@@ -2,6 +2,7 @@ package detect
 
 import (
 	"bytes"
+	"github.com/DanDreadless/atropos/internal/imagefs/imagetest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -71,6 +72,11 @@ func TestEverySignature(t *testing.T) {
 		{"pcapng", at(64, 0, "\x0A\x0D\x0D\x0A"), PCAP},
 		{"pe", pe, PE},
 		{"mbr disk", mbr, MBRDisk},
+		{"fat16 volume", imagetest.FAT16()[:4096], FATVolume},
+		{"exfat volume", imagetest.ExFAT()[:4096], FATVolume},
+		{"disk holding a fat volume", imagetest.MBR(imagetest.FAT16(), 0x0E)[:4096], MBRDisk},
+		{"ext4 volume", imagetest.Ext4()[:4096], ExtVolume},
+		{"disk holding an ext4 volume", imagetest.MBR(imagetest.Ext4(), 0x83)[:4096], MBRDisk},
 		{"text", []byte("2024-01-01 12:00:00 service started\n"), Text},
 		{"text with bom", append([]byte{0xEF, 0xBB, 0xBF}, "hello, world\n"...), Text},
 		{"text non-ascii", []byte("naïve café — ünïcödé log line\n"), Text},

@@ -33,6 +33,9 @@ Public samples (`scripts/fetch-testdata.sh`):
 | `testdata/ewf/ext2.split.E01` | `d14f130c462b0ab8efb6bb44bbfe5680e00ffaa90538cde84579d1eb0dcac00f` |
 | `testdata/ewf/ext2.split.E02` | `b508375954ec1d1caeed8a6e5fc503f98493816ad6a3af89f5d220244c5f2864` |
 | `testdata/vss/vss.raw` | `e633f0be5fb9ee9a07d44ba5223b786012ce89e9f0024f93d743568e6d052f16` |
+| `testdata/ext/ext2.raw` | `a6c2f0e39afe6c6ab432ca5465349fcefe8dc944398e97b2d957d3f89dbb5d80` |
+| `testdata/ext/ext4.raw` | `d88dd5f6774526a94ad74e061c6a4245fef302e03c917277fb4043e30ed8b434` |
+| `testdata/fat/fat12.raw` | `60aacdf576dad24743d80a66a045bcdfbbd0ef4d368cece060bf087ee114da2f` |
 
 The owner's own files, from a Windows 11 machine, read from copies and reported as counts: `NTUSER.DAT`, `UsrClass.dat`, `SAM`, `SECURITY`, `Amcache.hve`, `SRUDB.dat`, seven Defender detection records and one MPLog.
 
@@ -73,7 +76,10 @@ The owner's own files, from a Windows 11 machine, read from copies and reported 
 | Registry key times, UserAssist, BAM | RECmd with its `DFIRBatch.reb` | owner's SYSTEM and NTUSER.DAT | last-write time of the 930 keys the batch reports, to 100 ns; 222 UserAssist entries (program, last run, run count); 77 BAM entries (program, account, time) | no differences |
 | VHD, VHDX, VMDK readers | libvhdi (pyvhdi 20260901), libvmdk (pyvmdk 20260714), `scripts/compare/vdisk.py` | dfVFS's ntfs-fixed, -dynamic, -differential and -parent as VHD and VHDX, and ext2.vmdk | MD5 of each disk's contents | identical (the VMDK's is also the stored MD5 of ext2.E01, the same disk) |
 | E01 test writer | libewf | five images written by `imagetest.E01`: stored and compressed chunks, one to three segments, with and without a set identifier or a table base | libewf opens each and reads the same media | no differences |
+| FAT reader | dfVFS's own test expectations | dfVFS's `fat12.raw`, and `fat-differential.vhd`/`.vhdx` with their parents | names, sizes and contents of the 4 entries; the directory entry offset dfVFS uses as the inode number (0x62A0) | identical. Not yet compared with The Sleuth Kit: `scripts/compare/fls.py` is ready |
+| ext reader | dfVFS's own test expectations | dfVFS's `ext2.raw` and `ext4.raw` | inode numbers of the 5 names, mode, owner, group, size and link count of one file, the symbolic link's target, content; creation time present only on ext4 | identical. Not yet compared with The Sleuth Kit: `scripts/compare/fls.py` is ready |
 | Shadow copy list | libvshadow | public `vss.raw` | identifier, creation time and volume size of 2 copies | no differences |
+| Reading through shadow copies | dfVFS's own test, and the sample's design | public `vss.raw` | the 16 bytes at 0x1C9 and 8 near the end of copy 2; which files each copy holds (`vss1` and `vss2` were written after copies 1 and 2); unchanged files byte for byte | as expected. Not yet compared with libvshadow: `scripts/compare/vss.py` prints the MD5 of each copy for comparison with `TestReadThroughShadowCopies` |
 | WMI subscriptions | `Get-CimInstance` in `root\subscription` | owner's repository | number of filters, consumers and bindings (1, 1, 1) and their names | no differences |
 | Browser profile tables | the tables themselves, counted with SQL | owner's Chrome profile | events per kind against rows with a usable, distinct time | no differences |
 
@@ -142,6 +148,11 @@ python ez.py recycle   EXPORT.jsonl rbcmd.csv
 python ez.py jumplist  EXPORT.jsonl AutomaticDestinations.csv
 python evtx_set.py     EXPORT.jsonl EvtxECmd_folder.csv          # EvtxECmd -d FOLDER --csv DIR --csvf all.csv
 python ez.py recmd     EXPORT.jsonl RECmd_Batch_DFIRBatch_Output.csv EVIDENCE_ID
+# Shadow copies: libvshadow (pip install libvshadow-python)
+python vss.py ../../testdata/vss/vss.raw
+# FAT, exFAT and ext: The Sleuth Kit's fls, as a body file (standard library only)
+#   fls -r -p -m / -z UTC [-o SECTOR] IMAGE > body.txt
+python fls.py fat EXPORT.jsonl body.txt [EVIDENCE_ID] [p1]     # or ext
 # Registry: RECmd -d DIR --bn Root.reb (every key, deleted ones marked) or AllKeys.reb (whole branches); both are in scripts/compare
 ```
 
@@ -151,7 +162,7 @@ Each script exits non-zero when it finds a difference and prints the first forty
 
 ## Still to do
 
-- **Still to compare with a Zimmerman tool:** the rest of what RECmd's batch reports (USB devices, services' values, the recent-file and dialog lists, MountPoints2: only key times, UserAssist and BAM are compared so far), Amcache (AmcacheParser is not in the .NET 4 download: it needs the .NET 9 or 10 runtime installed, or `-NetVersion 10`), loose `.lnk` files (the owner's Recent folder holds none), `$FILE_NAME` times and the change journal on a real `$MFT` and `$J`, event log channels other than Security. And RegRipper, Plaso and The Sleuth Kit, none of which is installed.
+- **Still to compare with a Zimmerman tool:** the rest of what RECmd's batch reports (USB devices, services' values, the recent-file and dialog lists, MountPoints2: only key times, UserAssist and BAM are compared so far), Amcache (AmcacheParser is not in the .NET 4 download: it needs the .NET 9 or 10 runtime installed, or `-NetVersion 10`), loose `.lnk` files (the owner's Recent folder holds none), `$FILE_NAME` times and the change journal on a real `$MFT` and `$J`, event log channels other than Security. And RegRipper, Plaso and The Sleuth Kit, none of which is installed here; `fls.py` is ready for The Sleuth Kit's `fls` output on FAT, exFAT and ext volumes.
 - **Gaps the Zimmerman tools showed:** the modified time of shellbag items inside archives (4 on the owner's machine); the shell item kinds listed above; SRUM's energy, push-notification and `vfuprov` tables, which SrumECmd reads.
 - **Not compared at all:** `$LogFile` and directory-index slack (LogFileParser, INDXParse), Notepad state, browser history values as distinct from code meanings (Hindsight run on a profile), and the whole timeline against Plaso.
 - **`$FILE_NAME` times:** the public volume produced no `$FN` events to compare. A real `$MFT` is needed.

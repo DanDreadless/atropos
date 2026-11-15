@@ -522,7 +522,7 @@ func (in *Ingester) Parse(e *store.Evidence) error {
 		}
 		// An image is not text: when it cannot be opened, the reason given
 		// is the result, and strings from its compressed chunks are not.
-		if count > 0 || status == "parsed" || e.Kind == detect.EWF {
+		if count > 0 || status == "parsed" || Browsable(e.Kind) {
 			return nil
 		}
 		carried = append([]string{fmt.Sprintf("dedicated parser %q (version %s) produced no events", p.Name(), p.Version())}, notes...)
@@ -682,6 +682,9 @@ func Stale(e *store.Evidence) string {
 	case strings.Contains(e.Notes, "parser panic"):
 		return "the parser stopped on an error last time"
 	case e.Parser == "generic" && p != nil:
+		if !strings.Contains(e.Notes, "dedicated parser") {
+			return fmt.Sprintf("this build has a %s parser for it, which the last reading did not", p.Name())
+		}
 		if !strings.Contains(e.Notes, "(version "+p.Version()+")") {
 			return fmt.Sprintf("the %s parser found nothing in it before, and has changed since", p.Name())
 		}

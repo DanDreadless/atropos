@@ -26,7 +26,7 @@ import (
 
 // Browsable reports whether evidence of this kind can be looked inside.
 func Browsable(kind string) bool {
-	return kind == detect.ISO || kind == detect.MBRDisk || kind == detect.NTFSVolume || kind == detect.EWF ||
+	return kind == detect.ISO || kind == detect.MBRDisk || kind == detect.NTFSVolume || kind == detect.FATVolume || kind == detect.ExtVolume || kind == detect.EWF ||
 		kind == detect.VHD || kind == detect.VHDX || kind == detect.VMDK
 }
 
@@ -47,7 +47,7 @@ func (in *Ingester) segments(e *store.Evidence) []string {
 	case detect.Registry:
 		want = []string{detect.RegistryLog}
 	case detect.VHD, detect.VHDX:
-		want = []string{detect.VHD, detect.VHDX, detect.MBRDisk, detect.NTFSVolume}
+		want = []string{detect.VHD, detect.VHDX, detect.MBRDisk, detect.NTFSVolume, detect.FATVolume, detect.ExtVolume}
 	default:
 		return nil
 	}

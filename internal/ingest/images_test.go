@@ -229,3 +229,108 @@ func TestTriagePatterns(t *testing.T) {
 		}
 	}
 }
+
+// A USB stick imaged as a disk: its FAT volume's entries go on the timeline
+// when it is added, deleted ones included, and its files can be browsed and
+// copied out. The same in a worker process.
+func TestFATImageOnTheTimeline(t *testing.T) {
+	for _, mode := range []string{"in-process", "isolated"} {
+		t.Run(mode, func(t *testing.T) {
+			c := newCase(t)
+			if mode == "isolated" {
+				c.isolate(t, "atropos-worker")
+			}
+			p := filepath.Join(t.TempDir(), "stick.dd")
+			if err := os.WriteFile(p, imagetest.MBR(imagetest.FAT16(), 0x0E), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c.ingest(t, p)
+			img := c.byName(t, "stick.dd")
+			if img.Kind != "disk-image" || img.Status != "parsed" || img.EventCount != 10 || img.Parser != "disk-image" {
+				t.Fatalf("image: kind %s, status %s, %d events, parser %s, notes %s", img.Kind, img.Status, img.EventCount, img.Parser, img.Notes)
+			}
+			if rows, _ := c.s.Search(store.Query{Text: "secret plan.txt"}); len(rows) != 3 {
+				t.Errorf("%d events for the deleted file", len(rows))
+			}
+			// As the user guide says to search for them.
+			if rows, _ := c.s.Search(store.Query{Text: "source:fat deleted"}); len(rows) != 3 {
+				t.Errorf("source:fat deleted finds %d events", len(rows))
+			}
+			if got := listNames(t, c, &img, "/p1"); got != "DCIM/ Report final.docx" {
+				t.Errorf("p1: %s", got)
+			}
+			if _, err := c.in.Extract(&img, []string{"/p1/DCIM/img_0001.jpg"}, false); err != nil {
+				t.Fatal(err)
+			}
+			if j := c.byName(t, "img_0001.jpg"); j.Size != 12 || !strings.HasSuffix(j.Origin, "stick.dd!/p1/DCIM/img_0001.jpg") {
+				t.Errorf("copied out: %+v", j)
+			}
+			c.verifyOK(t)
+		})
+	}
+}
+
+// A Linux volume imaged on its own: names and inode times on the timeline
+// when it is added, and its files browsable, in a worker as in process.
+func TestExtImageOnTheTimeline(t *testing.T) {
+	for _, mode := range []string{"in-process", "isolated"} {
+		t.Run(mode, func(t *testing.T) {
+			c := newCase(t)
+			if mode == "isolated" {
+				c.isolate(t, "atropos-worker")
+			}
+			p := filepath.Join(t.TempDir(), "linux.img")
+			if err := os.WriteFile(p, imagetest.Ext4(), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c.ingest(t, p)
+			img := c.byName(t, "linux.img")
+			if img.Kind != "ext-volume-image" || img.Status != "parsed" || img.Parser != "disk-image" || img.EventCount == 0 {
+				t.Fatalf("image: kind %s, status %s, %d events, parser %s, notes %s", img.Kind, img.Status, img.EventCount, img.Parser, img.Notes)
+			}
+			if rows, _ := c.s.Search(store.Query{Text: "category:deletion source:ext"}); len(rows) != 1 {
+				t.Errorf("%d deletion events", len(rows))
+			}
+			if got := listNames(t, c, &img, "/"); got != "docs/ big.bin link tree.dat" {
+				t.Errorf("root: %s", got)
+			}
+			if _, err := c.in.Extract(&img, []string{"/docs/report.txt"}, false); err != nil {
+				t.Fatal(err)
+			}
+			if r := c.byName(t, "report.txt"); r.Size != 5000 {
+				t.Errorf("copied out: %+v", r)
+			}
+			c.verifyOK(t)
+		})
+	}
+}
+
+// A file is copied out of a shadow copy like any other, and its origin
+// says which copy it came from.
+func TestExtractFromAShadowCopy(t *testing.T) {
+	sample := filepath.Join("..", "..", "testdata", "vss", "vss.raw")
+	if _, err := os.Stat(sample); err != nil {
+		t.Skip("no sample volume with shadow copies")
+	}
+	for _, mode := range []string{"in-process", "isolated"} {
+		t.Run(mode, func(t *testing.T) {
+			c := newCase(t)
+			if mode == "isolated" {
+				c.isolate(t, "atropos-worker")
+			}
+			c.ingest(t, sample)
+			img := c.byName(t, "vss.raw")
+			if got := listNames(t, c, &img, "/<shadow copy 1>"); strings.Contains(got, "vss1") || !strings.Contains(got, "passwords.txt") {
+				t.Errorf("copy 1: %s", got)
+			}
+			if _, err := c.in.Extract(&img, []string{"/<shadow copy 2>/vss1"}, false); err != nil {
+				t.Fatal(err)
+			}
+			v := c.byName(t, "vss1")
+			if v.Size != 7 || !strings.HasSuffix(v.Origin, "vss.raw!/<shadow copy 2>/vss1") {
+				t.Errorf("copied out: %+v", v)
+			}
+			c.verifyOK(t)
+		})
+	}
+}

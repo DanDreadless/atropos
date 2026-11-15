@@ -39,6 +39,8 @@ const (
 	VMDK        = "vmdk-image"
 	VHD         = "vhd-image"
 	MBRDisk     = "disk-image"
+	FATVolume   = "fat-volume-image"
+	ExtVolume   = "ext-volume-image"
 	ISO         = "iso-image"
 	RecycleI    = "recycle-bin-record"
 	WinNotepad  = "windows-notepad-state"
@@ -190,7 +192,16 @@ func Identify(r io.ReaderAt, size int64) Result {
 	if len(head) >= 0x40 && head[0] == 'M' && head[1] == 'Z' && !looksText(head) {
 		return Result{PE, `"MZ" signature at offset 0`}
 	}
+	// ext2/3/4: the superblock at 1024, its signature at 0x38 within it,
+	// with a block size and group sizes that make sense.
+	if len(head) >= 2048 && head[1080] == 0x53 && head[1081] == 0xEF && binary.LittleEndian.Uint32(head[1048:]) <= 6 &&
+		binary.LittleEndian.Uint32(head[1056:]) != 0 && binary.LittleEndian.Uint32(head[1064:]) != 0 {
+		return Result{ExtVolume, "ext2/3/4 superblock: signature 0xEF53 at offset 1080 and valid block and group sizes"}
+	}
 	if len(head) >= 512 && head[510] == 0x55 && head[511] == 0xAA && !looksText(head) {
+		if r := fatBoot(head); r != "" {
+			return Result{FATVolume, r}
+		}
 		return Result{MBRDisk, "boot sector signature 55AA at offset 510"}
 	}
 	if wmiRepository(r, size) {
@@ -206,6 +217,26 @@ func Identify(r io.ReaderAt, size int64) Result {
 		return Result{Text, "content is printable text"}
 	}
 	return Result{Unknown, "no known signature matched"}
+}
+
+// fatBoot recognises the boot sector of a FAT or exFAT volume: its type
+// name, and a sector and cluster size that make sense.
+func fatBoot(b []byte) string {
+	le := binary.LittleEndian
+	if string(b[3:11]) == "EXFAT   " && b[108] >= 9 && b[108] <= 12 && b[109] <= 16 {
+		return `exFAT boot sector: "EXFAT" at offset 3 and a valid sector and cluster size`
+	}
+	bps, spc := le.Uint16(b[11:]), b[13]
+	if bps < 512 || bps > 4096 || bps&(bps-1) != 0 || spc == 0 || spc&(spc-1) != 0 || le.Uint16(b[14:]) == 0 || b[16] == 0 {
+		return ""
+	}
+	switch {
+	case string(b[82:87]) == "FAT32":
+		return `FAT32 boot sector: "FAT32" at offset 82 and a valid BIOS parameter block`
+	case string(b[54:57]) == "FAT":
+		return `FAT12/16 boot sector: "FAT" at offset 54 and a valid BIOS parameter block`
+	}
+	return ""
 }
 
 var lnkClass = []byte{0x01, 0x14, 0x02, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46}

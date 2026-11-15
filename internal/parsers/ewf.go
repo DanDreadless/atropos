@@ -23,7 +23,7 @@ type ewfParser struct{}
 
 func (ewfParser) Name() string { return "ewf-image" }
 func (ewfParser) Version() string {
-	return "1 (native: EWF version 1, E01; media verified against the stored hash)"
+	return "2 (native: EWF version 1, E01; media verified against the stored hash; FAT and exFAT volumes inside put on the timeline)"
 }
 
 func (ewfParser) Parse(ctx *Context) error {
@@ -118,6 +118,11 @@ func (ewfParser) Parse(ctx *Context) error {
 			}
 		}
 	}
-	ctx.Note("this is an image: open it under Files to browse its contents and choose what goes on the timeline")
-	return nil
+	fsys, err := imagefs.Open(img, img.Size())
+	if err != nil {
+		ctx.Note("%v", err)
+		return nil
+	}
+	defer fsys.Close()
+	return imageVolumes(ctx, fsys)
 }

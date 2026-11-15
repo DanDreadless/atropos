@@ -395,7 +395,13 @@ func openVHDX(r io.ReaderAt, size int64, others []EWFSegment, depth int) (*vhdx,
 		}
 		if v.parent == nil {
 			loc := vhdxLocator(items[vhdxParent])
-			return nil, fmt.Errorf("the differencing VHDX's parent (%q) is not in the case. Add it, and open this image again", loc["relative_path"]+loc["absolute_win32_path"])
+			var where []string
+			for _, k := range []string{"relative_path", "absolute_win32_path", "volume_path"} {
+				if loc[k] != "" {
+					where = append(where, fmt.Sprintf("%q", loc[k]))
+				}
+			}
+			return nil, fmt.Errorf("the differencing VHDX's parent (%s) is not in the case. Add it, and open this image again", strings.Join(where, " or "))
 		}
 	}
 	return v, nil

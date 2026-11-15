@@ -12,21 +12,34 @@ import (
 )
 
 type ntfsFS struct {
-	ctx   *ntfs.NTFSContext
-	label string
+	ctx     *ntfs.NTFSContext
+	label   string
+	shadows *shadowSet // the volume's shadow copies, if it has any
 }
 
-func openNTFS(r io.ReaderAt, offset int64, label string) (fs FS, err error) {
+func openNTFS(r io.ReaderAt, offset, size int64, label string) (FS, error) {
+	// The volume is handed over as a reader of its own, starting at zero.
+	// The library accepts an offset, but does not apply it everywhere.
+	if offset != 0 {
+		r = &shifted{r, offset}
+		size -= offset
+	}
+	n, err := openNTFSVolume(r, label+shadowSummary(r))
+	if err != nil {
+		return nil, err
+	}
+	if copies, err := ShadowCopies(r, size); err == nil && len(copies) > 0 {
+		n.shadows = &shadowSet{r: r, size: size, copies: copies, open: map[int]FS{}, errs: map[int]error{}}
+	}
+	return n, nil
+}
+
+func openNTFSVolume(r io.ReaderAt, label string) (fs *ntfsFS, err error) {
 	defer func() {
 		if p := recover(); p != nil {
 			fs, err = nil, fmt.Errorf("NTFS volume could not be read: %v", p)
 		}
 	}()
-	// The volume is handed over as a reader of its own, starting at zero.
-	// The library accepts an offset, but does not apply it everywhere.
-	if offset != 0 {
-		r = &shifted{r, offset}
-	}
 	ctx, err := ntfs.GetNTFSContext(r, 0)
 	if err != nil {
 		return nil, err
@@ -35,7 +48,59 @@ func openNTFS(r io.ReaderAt, offset int64, label string) (fs FS, err error) {
 		ctx.Close()
 		return nil, fmt.Errorf("NTFS volume has no readable root directory: %w", err)
 	}
-	return &ntfsFS{ctx: ctx, label: label + shadowSummary(r)}, nil
+	return &ntfsFS{ctx: ctx, label: label}, nil
+}
+
+// shadowName is the folder a shadow copy appears as at the volume's root.
+// "<" cannot occur in a Windows file name, so it cannot hide a real one.
+func shadowName(i int) string { return fmt.Sprintf("<shadow copy %d>", i+1) }
+
+// get opens shadow copy i as a volume of its own, once.
+func (s *shadowSet) get(i int) (FS, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if fs, ok := s.open[i]; ok {
+		return fs, nil
+	}
+	if err, ok := s.errs[i]; ok {
+		return nil, err
+	}
+	v, err := OpenShadowCopy(s.r, s.size, s.copies, i)
+	var fs *ntfsFS
+	if err == nil {
+		fs, err = openNTFSVolume(v, fmt.Sprintf("shadow copy %d, made %s", i+1, s.copies[i].CreatedTime().Format("2006-01-02 15:04:05 UTC")))
+	}
+	if err != nil {
+		err = fmt.Errorf("shadow copy %d could not be read: %v", i+1, err)
+		s.errs[i] = err
+		return nil, err
+	}
+	s.open[i] = fs
+	return fs, nil
+}
+
+func (s *shadowSet) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, fs := range s.open {
+		fs.Close()
+	}
+	s.open = map[int]FS{}
+}
+
+// route sends a path that starts in a shadow copy's folder to that copy:
+// the copy, the folder's path, and the path within the copy.
+func (n *ntfsFS) route(parts []string) (FS, string, string, bool, error) {
+	if n.shadows == nil || len(parts) == 0 || !strings.HasPrefix(parts[0], "<shadow copy ") {
+		return nil, "", "", false, nil
+	}
+	for i := range n.shadows.copies {
+		if parts[0] == shadowName(i) {
+			fs, err := n.shadows.get(i)
+			return fs, "/" + parts[0], "/" + strings.Join(parts[1:], "/"), true, err
+		}
+	}
+	return nil, "", "", false, nil
 }
 
 type shifted struct {
@@ -46,7 +111,12 @@ type shifted struct {
 func (s *shifted) ReadAt(p []byte, off int64) (int, error) { return s.r.ReadAt(p, off+s.off) }
 
 func (n *ntfsFS) Describe() string { return n.label }
-func (n *ntfsFS) Close()           { n.ctx.Close() }
+func (n *ntfsFS) Close() {
+	if n.shadows != nil {
+		n.shadows.close()
+	}
+	n.ctx.Close()
+}
 
 func (n *ntfsFS) entry(parts []string) (*ntfs.MFT_ENTRY, error) {
 	root, err := n.ctx.GetMFT(5)
@@ -85,6 +155,16 @@ func (n *ntfsFS) List(path string) (out []Entry, err error) {
 	if err != nil {
 		return nil, err
 	}
+	if sub, prefix, inner, ok, err := n.route(parts); ok {
+		if err != nil {
+			return nil, err
+		}
+		list, err := sub.List(inner)
+		for i := range list {
+			list[i].Path = prefix + list[i].Path
+		}
+		return list, err
+	}
 	e, err := n.entry(parts)
 	if err != nil {
 		return nil, err
@@ -108,6 +188,12 @@ func (n *ntfsFS) List(path string) (out []Entry, err error) {
 		out = append(out, ent)
 		if len(out) >= MaxListing {
 			break
+		}
+	}
+	if len(parts) == 0 && n.shadows != nil {
+		for i, c := range n.shadows.copies {
+			out = append(out, Entry{Name: shadowName(i), Path: "/" + shadowName(i), IsDir: true, Born: ns(c.CreatedTime()),
+				Note: fmt.Sprintf("volume shadow copy made %s: the whole volume as it was then (store %s)", c.CreatedTime().Format("2006-01-02 15:04:05 UTC"), c.ID)})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -166,6 +252,12 @@ func (n *ntfsFS) Open(path string) (rd io.Reader, size int64, err error) {
 	}
 	if len(parts) == 0 {
 		return nil, 0, errors.New("not a file")
+	}
+	if sub, _, inner, ok, err := n.route(parts); ok {
+		if err != nil {
+			return nil, 0, err
+		}
+		return sub.Open(inner)
 	}
 	e, err := n.entry(parts)
 	if err != nil {

@@ -112,6 +112,8 @@ func For(kind string) Parser {
 		return wmiParser{}
 	case detect.EWF:
 		return ewfParser{}
+	case detect.FATVolume, detect.ExtVolume, detect.MBRDisk, detect.VHD, detect.VHDX, detect.VMDK:
+		return diskImageParser{}
 	case detect.MozLz4:
 		return mozLz4Parser{}
 	case detect.DefenderDH:

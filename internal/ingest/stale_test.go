@@ -29,6 +29,8 @@ func TestStale(t *testing.T) {
 		{"duplicate", store.Evidence{Kind: "text", Parser: text.Name(), ParserVersion: "1 (old)", DuplicateOf: &one}, false},
 		{"not parsed yet", store.Evidence{Kind: "text"}, false},
 		{"archive", store.Evidence{Kind: "zip-archive", Parser: "container", ParserVersion: "0"}, false},
+		// A disk image read before this build had a parser for disk images.
+		{"kind that has gained a parser", store.Evidence{Kind: "disk-image", Parser: "generic", ParserVersion: parsers.Generic().Version(), Notes: "this is an image: open it under Files to browse its contents"}, true},
 	} {
 		if got := Stale(&c.e); (got != "") != c.want {
 			t.Errorf("%s: %q", c.name, got)

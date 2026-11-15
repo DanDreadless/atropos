@@ -11,7 +11,7 @@ import (
 )
 
 // Volume shadow copies: Windows keeps earlier states of an NTFS volume on
-// the volume itself. This lists them (when each was made); it does not read
+// the volume itself. This lists them (when each was made); vssread.go reads
 // through them.
 //
 // Written from Joachim Metz's "Volume Shadow Snapshot (VSS) format" (the
@@ -36,6 +36,9 @@ type ShadowCopy struct {
 	VolumeSize int64  // size of the volume when the copy was made
 	HasStore   bool   // the catalog also says where the copy's data is kept
 	Offset     int64  // of the catalog entry, from the start of the volume
+	// Where the copy's store is, from the catalog's type 3 entry: its block
+	// list, header, range list, bitmap and previous bitmap (0 if none).
+	BlockList, StoreHeader, RangeList, Bitmap, PrevBitmap int64
 }
 
 // CreatedTime is when the copy was made.
@@ -97,6 +100,9 @@ func ShadowCopies(r io.ReaderAt, size int64) ([]ShadowCopy, error) {
 				// Where the copy's blocks are; it follows its type 2 entry.
 				if s, ok := byID[id]; ok {
 					s.HasStore = true
+					le := binary.LittleEndian
+					s.BlockList, s.StoreHeader, s.RangeList = int64(le.Uint64(ent[8:])), int64(le.Uint64(ent[32:])), int64(le.Uint64(ent[40:]))
+					s.Bitmap, s.PrevBitmap = int64(le.Uint64(ent[48:])), int64(le.Uint64(ent[72:]))
 				}
 			}
 		}
@@ -124,5 +130,5 @@ func shadowSummary(r io.ReaderAt) string {
 	if len(copies) > 1 {
 		when = "the first made " + copies[0].CreatedTime().Format(layout) + ", the last " + copies[len(copies)-1].CreatedTime().Format(layout)
 	}
-	return fmt.Sprintf("; holds %d volume shadow copies (%s), whose contents this version does not read", len(copies), when)
+	return fmt.Sprintf("; holds %d volume shadow copies (%s), each shown as a folder <shadow copy N> at the root", len(copies), when)
 }

@@ -3,8 +3,9 @@
 // timeline. It only ever reads: an image is opened through an io.ReaderAt
 // and nothing here can write to it.
 //
-// What it understands: ISO 9660 discs (with Joliet names), NTFS volumes, and
-// raw disk images partitioned with MBR or GPT whose partitions hold NTFS, and
+// What it understands: ISO 9660 discs (with Joliet names), NTFS, FAT,
+// exFAT and ext2/3/4 volumes, and raw disk images partitioned with MBR or GPT whose
+// partitions hold those, and
 // any of those inside an Expert Witness (E01) image, split or not.
 // Other file systems are recognised and listed as present but not readable.
 package imagefs
@@ -118,7 +119,18 @@ func OpenSet(r io.ReaderAt, size int64, others []EWFSegment) (FS, error) {
 		return fs, nil
 	}
 	if isNTFS(r, 0) {
-		return openNTFS(r, 0, "NTFS volume")
+		return openNTFS(r, 0, size, "NTFS volume")
+	}
+	switch sniff(r, 0) {
+	case "ext2/3/4":
+		if fs, err := openExtView(r, 0, size); err == nil {
+			return fs, nil
+		}
+	case "FAT", "FAT32", "exFAT":
+		// A volume on its own; its boot sector also ends 55 AA, like a disk's.
+		if fs, err := openFATView(r, 0, size, ""); err == nil {
+			return fs, nil
+		}
 	}
 	if d, err := openDisk(r, size); err == nil {
 		return d, nil
@@ -166,7 +178,7 @@ func sniff(r io.ReaderAt, off int64) string {
 		return "exFAT"
 	case string(b[82:87]) == "FAT32":
 		return "FAT32"
-	case string(b[54:59]) == "FAT16" || string(b[54:59]) == "FAT12":
+	case string(b[54:57]) == "FAT": // "FAT12   ", "FAT16   ", or plain "FAT     "
 		return "FAT"
 	case string(b[3:11]) == "-FVE-FS-":
 		return "BitLocker (encrypted)"
@@ -198,11 +210,25 @@ func openDisk(r io.ReaderAt, size int64) (FS, error) {
 			return
 		}
 		p := partition{index: len(d.parts) + 1, offset: off, length: length, label: label, content: sniff(r, off)}
-		if p.content == "NTFS" {
-			if fs, err := openNTFS(r, off, "NTFS"); err == nil {
+		switch p.content {
+		case "NTFS":
+			if fs, err := openNTFS(r, off, off+length, "NTFS"); err == nil {
 				p.fs = fs
 			} else {
 				p.content = "NTFS (could not be opened: " + err.Error() + ")"
+			}
+		case "ext2/3/4":
+			if fs, err := openExtView(r, off, off+length); err == nil {
+				p.fs = fs
+				p.content = fs.(*extView).f.kind()
+			} else {
+				p.content += " (could not be opened: " + err.Error() + ")"
+			}
+		case "FAT", "FAT32", "exFAT":
+			if fs, err := openFATView(r, off, off+length, ""); err == nil {
+				p.fs = fs
+			} else {
+				p.content += " (could not be opened: " + err.Error() + ")"
 			}
 		}
 		d.parts = append(d.parts, p)

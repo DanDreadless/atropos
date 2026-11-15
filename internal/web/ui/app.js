@@ -825,7 +825,7 @@ async function reparse(id) {
 }
 
 // ---- files: looking inside disk and disc images ----
-const IMAGE_KINDS = ['iso-image', 'disk-image', 'ntfs-volume-image', 'ewf-image', 'vhd-image', 'vhdx-image', 'vmdk-image'];
+const IMAGE_KINDS = ['iso-image', 'disk-image', 'ntfs-volume-image', 'fat-volume-image', 'ext-volume-image', 'ewf-image', 'vhd-image', 'vhdx-image', 'vmdk-image'];
 const isImage = (e) => IMAGE_KINDS.includes(e.kind) && !e.duplicate_of;
 
 function renderImagePicker() {

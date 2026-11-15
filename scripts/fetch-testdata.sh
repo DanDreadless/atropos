@@ -51,6 +51,15 @@ mkdir -p testdata/vdisk
 for f in ntfs-fixed.vhd ntfs-dynamic.vhd ntfs-differential.vhd ntfs-parent.vhd ntfs-fixed.vhdx ntfs-dynamic.vhdx          ntfs-differential.vhdx ntfs-parent.vhdx ext2.vmdk; do
   curl -fsSL -o "testdata/vdisk/$f" "$D/$f"
 done
+# FAT: a FAT12 volume, and a FAT disk as differencing VHD and VHDX with
+# their parents, from dfVFS (Apache-2.0).
+mkdir -p testdata/fat
+for f in fat12.raw fat-parent.vhd fat-differential.vhd fat-parent.vhdx fat-differential.vhdx; do
+  curl -fsSL -o "testdata/fat/$f" "$D/$f"
+done
+# ext2 and ext4 volumes from dfVFS (Apache-2.0).
+mkdir -p testdata/ext
+for f in ext2.raw ext4.raw; do curl -fsSL -o "testdata/ext/$f" "$D/$f"; done
 python3 scripts/fetch_evtx_attack.py 2>/dev/null || python scripts/fetch_evtx_attack.py
 chmod -R u+w testdata
 echo "testdata: $(find testdata -type f | wc -l) files"
