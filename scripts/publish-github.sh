@@ -55,7 +55,9 @@ trap 'rm -f "$index"' EXIT
 copied=0
 for commit in $(git rev-list --reverse --first-parent "$range"); do
   GIT_INDEX_FILE="$index" git read-tree "$commit"
-  GIT_INDEX_FILE="$index" git rm -r -q --cached --ignore-unmatch -- "${PRIVATE[@]}" >/dev/null
+  # -f: the index is a temporary one, and --cached leaves the working tree alone; without it
+  # git refuses whenever an older commit's private files differ from the current ones.
+  GIT_INDEX_FILE="$index" git rm -r -q -f --cached --ignore-unmatch -- "${PRIVATE[@]}" >/dev/null
   # GitHub's .gitignore also lists the private paths, so a clone from GitHub ignores them too.
   # (Gitea's can't: an ignored file is never committed, and Gitea keeps them.)
   ignore_blob="$(
