@@ -46,6 +46,9 @@ func (in *Ingester) segments(e *store.Evidence) []string {
 		want = []string{detect.EWF}
 	case detect.Registry:
 		want = []string{detect.RegistryLog}
+	case detect.SQLite:
+		// A database is offered every write-ahead log; its pages say which fits.
+		want = []string{detect.SQLiteWAL}
 	case detect.VHD, detect.VHDX:
 		want = []string{detect.VHD, detect.VHDX, detect.MBRDisk, detect.NTFSVolume, detect.FATVolume, detect.ExtVolume}
 	default:
@@ -88,6 +91,9 @@ var triagePatterns = []string{
 	"Windows/AppCompat/Programs/Amcache.hve.LOG*",
 	"Windows/System32/Tasks/**",
 	"Windows/System32/sru/SRUDB.dat",
+	"ProgramData/Microsoft/Search/Data/Applications/Windows/Windows.edb",
+	"ProgramData/Microsoft/Search/Data/Applications/Windows/Windows.db",
+	"ProgramData/Microsoft/Search/Data/Applications/Windows/Windows.db-wal",
 	"Windows/System32/wbem/Repository/OBJECTS.DATA",
 	"Windows/System32/LogFiles/Firewall/*.log",
 	"Users/*/NTUSER.DAT",
@@ -123,6 +129,15 @@ var triagePatterns = []string{
 	"Users/*/AppData/Local/Microsoft/Edge/User Data/*/Preferences",
 	"Users/*/AppData/Local/Microsoft/Edge/User Data/*/Secure Preferences",
 	"Users/*/AppData/Roaming/Mozilla/Firefox/Profiles/*/cookies.sqlite",
+	// Open and recently closed tabs, and the write-ahead logs that hold a
+	// running browser's newest database rows.
+	"Users/*/AppData/Local/Google/Chrome/User Data/*/Sessions/*",
+	"Users/*/AppData/Local/Microsoft/Edge/User Data/*/Sessions/*",
+	"Users/*/AppData/Local/Google/Chrome/User Data/*/*-wal",
+	"Users/*/AppData/Local/Google/Chrome/User Data/*/Network/*-wal",
+	"Users/*/AppData/Local/Microsoft/Edge/User Data/*/*-wal",
+	"Users/*/AppData/Local/Microsoft/Edge/User Data/*/Network/*-wal",
+	"Users/*/AppData/Roaming/Mozilla/Firefox/Profiles/*/*.sqlite-wal",
 	"Users/*/AppData/Roaming/Mozilla/Firefox/Profiles/*/formhistory.sqlite",
 	"Users/*/AppData/Roaming/Mozilla/Firefox/Profiles/*/extensions.json",
 	"Users/*/AppData/Roaming/Mozilla/Firefox/Profiles/*/sessionstore.jsonlz4",

@@ -128,34 +128,46 @@ func volumeLogFile(ctx *Context, vol *ntfs.NTFSContext, dirs map[int64]string) (
 }
 
 // volumeShadowCopies puts the making of each of the volume's shadow copies
-// on the timeline. Their contents are not read.
+// on the timeline. Their contents are browsed on the Files tab.
 func volumeShadowCopies(ctx *Context) error {
 	copies, err := imagefs.ShadowCopies(ctx.File, ctx.Size)
 	if err != nil {
 		ctx.Warn("%v", err)
 		return nil
 	}
+	return emitShadowCopies(ctx, copies, "")
+}
+
+// emitShadowCopies puts a volume's shadow copies on the timeline; where is
+// the partition ("p1"), or empty for a volume on its own.
+func emitShadowCopies(ctx *Context, copies []imagefs.ShadowCopy, where string) error {
 	if len(copies) == 0 {
 		return nil
 	}
-	n := 0
 	for _, c := range copies {
 		stamp, ok := timeutil.FromFiletime(c.Created)
 		if !ok {
 			ctx.Warn("shadow copy %s has no usable creation time", c.ID)
 			continue
 		}
+		fields := map[string]any{"store_id": c.ID, "volume_size": c.VolumeSize, "has_store": c.HasStore}
+		ref := fmt.Sprintf("shadow copy catalog entry at offset %d", c.Offset)
+		if where != "" {
+			fields["partition"] = where
+			ref = "partition " + where + ", " + ref
+		}
 		if err := ctx.Emit(Event{
 			Stamp: stamp, Type: "shadow-copy-created", Category: CatFileSystem, Source: "vss", Host: ctx.Host,
-			Message: "Volume shadow copy created: {" + c.ID + "}",
-			Fields:  map[string]any{"store_id": c.ID, "volume_size": c.VolumeSize, "has_store": c.HasStore},
-			Ref:     fmt.Sprintf("shadow copy catalog entry at offset %d", c.Offset),
+			Message: "Volume shadow copy created: {" + c.ID + "}", Fields: fields, Ref: ref,
 		}); err != nil {
 			return err
 		}
-		n++
 	}
-	ctx.Fact("vss.shadow_copies", fmt.Sprint(len(copies)), "volume shadow copies listed in the volume's catalog")
-	ctx.Note("%d volume shadow copies are on this volume: earlier states of it, which often still hold files since deleted. This version lists when each was made and does not read their contents; mount the image with a tool that does (vshadowmount, Arsenal Image Mounter) and add the files of interest", len(copies))
+	key, on := "vss.shadow_copies", "this volume"
+	if where != "" {
+		key, on = "vss."+where+".shadow_copies", "partition "+where
+	}
+	ctx.Fact(key, fmt.Sprint(len(copies)), "volume shadow copies listed in the volume's catalog")
+	ctx.Note("%d volume shadow copies are on %s: earlier states of it, which often still hold files since deleted. Each appears on the Files tab as a folder <shadow copy N> at the volume's root, to browse and copy files out of", len(copies), on)
 	return nil
 }

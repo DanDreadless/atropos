@@ -60,6 +60,15 @@ done
 # ext2 and ext4 volumes from dfVFS (Apache-2.0).
 mkdir -p testdata/ext
 for f in ext2.raw ext4.raw; do curl -fsSL -o "testdata/ext/$f" "$D/$f"; done
+# Windows Search indexes (Windows.db and Windows.edb) and the reports SIDR
+# makes of them, from Stroz Friedberg's SIDR project (Apache-2.0).
+mkdir -p testdata/winsearch
+S=https://raw.githubusercontent.com/strozfriedberg/sidr/main/tests
+curl -fsSL -o testdata/winsearch/Windows.db "$S/testdata/Windows.db"
+curl -fsSL -o testdata/winsearch/Windows.edb "$S/testdata/Windows.edb"
+for h in DESKTOP-O47KVAD DESKTOP-80RDGLC; do for k in File Activity_History Internet_History; do
+  curl -fsSL -o "testdata/winsearch/${h}_${k}_Report.json" "$S/goldenfiles/${h}_${k}_Report.json"
+done; done
 python3 scripts/fetch_evtx_attack.py 2>/dev/null || python scripts/fetch_evtx_attack.py
 chmod -R u+w testdata
 echo "testdata: $(find testdata -type f | wc -l) files"

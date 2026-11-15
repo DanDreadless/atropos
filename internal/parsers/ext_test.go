@@ -1,6 +1,7 @@
 package parsers
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -70,5 +71,27 @@ func TestExtInADisk(t *testing.T) {
 	res := run(t, p, nil)
 	if res.err != nil || len(res.warns) > 0 || len(eventsAt(res, "/p1/docs/report.txt")) != 3 || res.facts["ext.p1.volume_uuid"] == "" {
 		t.Errorf("%v %v %d events %v", res.err, res.warns, len(res.events), res.facts)
+	}
+}
+
+// The shadow copies of an NTFS partition inside a disk image go on the
+// timeline when the image is added, as those of a bare volume do.
+func TestShadowCopiesOfAPartition(t *testing.T) {
+	vol, err := os.ReadFile("../../testdata/vss/vss.raw")
+	if err != nil {
+		t.Skip("no sample volume with shadow copies")
+	}
+	res := run(t, write(t, "disk.dd", imagetest.MBR(vol, 0x07)), nil)
+	var created []string
+	for _, e := range res.events {
+		if e.Type == "shadow-copy-created" {
+			created = append(created, utc(e))
+			if e.Fields["partition"] != "p1" || !strings.HasPrefix(e.Ref, "partition p1, ") {
+				t.Errorf("event: %+v", e)
+			}
+		}
+	}
+	if strings.Join(created, " ") != "2021-05-01T17:40:03.2230304Z 2021-05-01T17:41:28.2249863Z" || res.facts["vss.p1.shadow_copies"] != "2" {
+		t.Errorf("created %v facts %v warns %v", created, res.facts, res.warns)
 	}
 }

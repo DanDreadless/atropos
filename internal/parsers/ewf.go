@@ -23,7 +23,7 @@ type ewfParser struct{}
 
 func (ewfParser) Name() string { return "ewf-image" }
 func (ewfParser) Version() string {
-	return "2 (native: EWF version 1, E01; media verified against the stored hash; FAT and exFAT volumes inside put on the timeline)"
+	return "3 (native: EWF version 1, E01; media verified against the stored hash; FAT, exFAT and ext volumes inside, and NTFS partitions' shadow copies, put on the timeline)"
 }
 
 func (ewfParser) Parse(ctx *Context) error {

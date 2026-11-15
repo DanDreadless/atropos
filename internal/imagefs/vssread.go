@@ -331,3 +331,33 @@ type shadowSet struct {
 	open   map[int]FS
 	errs   map[int]error
 }
+
+// VolumeShadows is the shadow copy list of one NTFS volume in an image.
+type VolumeShadows struct {
+	Where  string // "/" for a volume on its own, "/p1" for a partition
+	Copies []ShadowCopy
+}
+
+// ShadowCopiesIn lists the shadow copies of every NTFS volume an opened
+// image holds.
+func ShadowCopiesIn(fsys FS) []VolumeShadows {
+	switch v := fsys.(type) {
+	case *ntfsFS:
+		if v.shadows != nil {
+			return []VolumeShadows{{"/", v.shadows.copies}}
+		}
+	case *disk:
+		var out []VolumeShadows
+		for _, p := range v.parts {
+			if n, ok := p.fs.(*ntfsFS); ok && n.shadows != nil {
+				out = append(out, VolumeShadows{fmt.Sprintf("/p%d", p.index), n.shadows.copies})
+			}
+		}
+		return out
+	case vdiskFS:
+		return ShadowCopiesIn(v.FS)
+	case ewfFS:
+		return ShadowCopiesIn(v.FS)
+	}
+	return nil
+}

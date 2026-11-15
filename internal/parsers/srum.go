@@ -31,7 +31,7 @@ type srumParser struct{}
 
 func (srumParser) Name() string { return "srum" }
 func (srumParser) Version() string {
-	return "6 (velocidex/go-ese 458e8ab; record times rounded, not cut; program named in activity records; push notification, energy and vfuprov tables)"
+	return "7 (velocidex/go-ese 458e8ab; Windows Search Windows.edb; record times rounded, not cut; program named in activity records; push notification, energy and vfuprov tables)"
 }
 
 const (
@@ -151,6 +151,16 @@ func (srumParser) Parse(ctx *Context) (err error) {
 	cat, err := ese.ReadCatalog(ectx)
 	if err != nil {
 		return err
+	}
+	if _, ok := cat.Tables.Get("SystemIndex_PropertyStore"); ok {
+		n, err := windowsSearchESE(ctx, cat)
+		if err != nil {
+			ctx.Warn("windows search index: %v", err)
+		}
+		if n == 0 {
+			return ErrNothingExtracted
+		}
+		return nil
 	}
 	if _, ok := cat.Tables.Get("SruDbIdMapTable"); !ok {
 		// An ESE database that is not SRUM: a search index, a browser cache,

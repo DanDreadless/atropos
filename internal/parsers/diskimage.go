@@ -3,6 +3,7 @@ package parsers
 import (
 	"errors"
 	"os"
+	"strings"
 
 	"github.com/DanDreadless/atropos/internal/imagefs"
 )
@@ -18,7 +19,7 @@ type diskImageParser struct{}
 
 func (diskImageParser) Name() string { return "disk-image" }
 func (diskImageParser) Version() string {
-	return "2 (native: FAT12/16/32 and exFAT directory entries; ext2/3/4 inodes and names, deleted names from directory slack)"
+	return "3 (native: shadow copies of NTFS partitions; FAT12/16/32 and exFAT directory entries; ext2/3/4 inodes and names, deleted names from directory slack)"
 }
 
 func (diskImageParser) Parse(ctx *Context) error {
@@ -52,6 +53,14 @@ func imageVolumes(ctx *Context, fsys imagefs.FS) error {
 	ctx.Fact("image.contents", trunc(fsys.Describe(), 500), "what the image holds, as Atropos opened it")
 	for _, p := range imagefs.Partitions(fsys) {
 		ctx.Note("%s", p)
+	}
+	for _, v := range imagefs.ShadowCopiesIn(fsys) {
+		if v.Where == "/" {
+			continue // a volume on its own: the NTFS parser lists them
+		}
+		if err := emitShadowCopies(ctx, v.Copies, strings.TrimPrefix(v.Where, "/")); err != nil {
+			return err
+		}
 	}
 	fat, ext := imagefs.FATVolumes(fsys), imagefs.ExtVolumes(fsys)
 	if len(fat)+len(ext) == 0 {

@@ -6,6 +6,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -242,6 +243,7 @@ func (in *Ingester) process(top []*store.Evidence) {
 	}
 	in.completeImages(leaves)
 	in.completeHives(leaves)
+	in.completeDatabases(leaves)
 }
 
 // completeHives parses a hive again when this submission brought one of
@@ -284,6 +286,65 @@ func (in *Ingester) completeHives(leaves []*store.Evidence) {
 			}
 		}
 	}
+}
+
+// completeDatabases parses a database again when this submission brought a
+// write-ahead log that may be its own: same page size, the database in WAL
+// mode. The parser decides by the pages whether the log really fits.
+func (in *Ingester) completeDatabases(leaves []*store.Evidence) {
+	arrived := map[int64]bool{}
+	sizes := map[int64]bool{}
+	for _, e := range leaves {
+		arrived[e.ID] = true
+		if e.Kind == detect.SQLiteWAL && e.DuplicateOf == nil {
+			if h := in.head(e, 12); len(h) == 12 {
+				ps := int64(binary.BigEndian.Uint32(h[8:]))
+				if ps == 1 {
+					ps = 65536
+				}
+				sizes[ps] = true
+			}
+		}
+	}
+	if len(sizes) == 0 {
+		return
+	}
+	all, err := in.S.ListEvidence()
+	if err != nil {
+		return
+	}
+	for i := range all {
+		e := &all[i]
+		if e.Kind != detect.SQLite || arrived[e.ID] || e.DuplicateOf != nil {
+			continue
+		}
+		h := in.head(e, 20)
+		if len(h) < 20 || h[18] != 2 {
+			continue
+		}
+		ps := int64(binary.BigEndian.Uint16(h[16:]))
+		if ps == 1 {
+			ps = 65536
+		}
+		if sizes[ps] {
+			in.setStatus(func(s *Status) { s.Current = e.Name })
+			if err := in.Parse(e); err != nil {
+				in.S.Audit("parse.error", fmt.Sprintf("evidence:%d", e.ID), map[string]any{"error": err.Error()})
+			}
+		}
+	}
+}
+
+// head reads the first n bytes of a stored file.
+func (in *Ingester) head(e *store.Evidence, n int) []byte {
+	f, err := in.V.Open(e.SHA256)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	b := make([]byte, n)
+	k, _ := io.ReadFull(f, b)
+	return b[:k]
 }
 
 // baseBlock reads the registry base block at the start of a stored file.
@@ -555,7 +616,7 @@ func (in *Ingester) runParserWith(e *store.Evidence, p parsers.Parser, okStatus 
 		Path: in.V.Path(e.SHA256), Size: e.Size, Name: e.Name, Kind: e.Kind, Host: host,
 		ZoneFrom: lc.ZoneFrom, ZoneName: lc.ZoneName,
 		ReceivedYear: received.Year(), ReceivedMonth: int(received.Month()),
-		Generic: okStatus == "generic", Segments: in.segments(e),
+		Generic: okStatus == "generic", Segments: in.segments(e), OutDir: in.V.WorkDir(),
 	}
 	out := sink{
 		event: run.Add,

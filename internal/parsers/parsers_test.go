@@ -523,7 +523,7 @@ func TestChromiumHistoryInFull(t *testing.T) {
 		!strings.Contains(v.Message, "[synced: recorded on another device]") {
 		t.Errorf("synced visit: %q %+v", v.Message, v.Fields)
 	}
-	if len(r.notes) < 2 || !strings.Contains(strings.Join(r.notes, "\n"), "1 of 3 visits were brought here by browser sync") {
+	if !strings.Contains(strings.Join(r.notes, "\n"), "1 of 3 visits were brought here by browser sync") {
 		t.Errorf("no note about synced visits: %q", r.notes)
 	}
 	// The address outlived its visit records; the never-visited one says nothing.

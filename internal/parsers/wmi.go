@@ -34,7 +34,7 @@ type wmiParser struct{}
 
 func (wmiParser) Name() string { return "wmi-repository" }
 func (wmiParser) Version() string {
-	return "1 (native carve: event filters, consumers, bindings and timers)"
+	return "2 (native carve: event filters, consumers, bindings and timers, values named from carved class definitions)"
 }
 
 const (
@@ -111,7 +111,9 @@ func wmiStrings(data []byte) []string {
 
 type wmiRecord struct {
 	class, kind string
-	values      []string // the strings after the class name, in stored order
+	values      []string       // the strings after the class name, in stored order
+	props       map[string]any // the values named by the class definition, when it was found
+	raw         []byte
 	written     uint64
 	classTime   uint64
 	offset      int64
@@ -160,7 +162,8 @@ func (wmiParser) Parse(ctx *Context) error {
 			if kind == "" {
 				continue
 			}
-			r := &wmiRecord{class: strs[0], kind: kind, values: strs[1:], written: t1, classTime: t2, offset: base + int64(m[0])}
+			r := &wmiRecord{class: strs[0], kind: kind, values: strs[1:], written: t1, classTime: t2, offset: base + int64(m[0]),
+				raw: append([]byte(nil), b[m[1]:end]...)}
 			key := fmt.Sprintf("%s\x00%d\x00%s", r.class, r.written, strings.Join(r.values, "\x00"))
 			if have, ok := found[key]; ok {
 				have.copies++
@@ -177,6 +180,25 @@ func (wmiParser) Parse(ctx *Context) error {
 		ctx.Note("no event filters, consumers or bindings were found")
 		return nil
 	}
+
+	// Name the values from the class definitions in the same file.
+	want := map[string]bool{}
+	for _, k := range order {
+		want[found[k].class] = true
+	}
+	classes := carveClasses(ctx.File, size, want)
+	named := 0
+	for _, k := range order {
+		r := found[k]
+		for _, layout := range wmiLayouts(classes, r.class) {
+			if p := decodeInstance(r.raw, r.class, layout); p != nil {
+				r.props = p
+				named++
+				break
+			}
+		}
+	}
+	ctx.Note("%d of %d subscription records had their values named from the class definitions found in the repository; the rest give their values in stored order, unnamed", named, len(order))
 
 	// Names the bindings refer to, so a consumer or filter can be named.
 	bound := map[string]bool{}
@@ -200,15 +222,46 @@ func (wmiParser) Parse(ctx *Context) error {
 		for _, v := range r.values {
 			vals = append(vals, clean(trunc(v, 4000)))
 		}
-		fields["values"] = vals
+		str := func(name string) string {
+			if v, ok := r.props[name].(string); ok {
+				return clean(trunc(v, 4000))
+			}
+			return ""
+		}
+		if r.props != nil {
+			props := map[string]any{}
+			for k, v := range r.props {
+				switch x := v.(type) {
+				case string:
+					props[k] = clean(trunc(x, 4000))
+				case []any:
+					items := make([]any, len(x))
+					for i, it := range x {
+						if s, ok := it.(string); ok {
+							it = clean(trunc(s, 1000))
+						}
+						items[i] = it
+					}
+					props[k] = items
+				default:
+					props[k] = v
+				}
+			}
+			fields["properties"] = props
+		} else {
+			fields["values"] = vals
+		}
 		if s, ok := timeutil.FromFiletime(r.classTime); ok {
 			fields["class_defined"] = s.UTC.Format("2006-01-02T15:04:05.0000000Z")
 		}
 		var msg string
 		switch r.kind {
 		case "filter":
-			name, query := "", ""
+			name, query := str("Name"), str("Query")
 			for _, v := range vals {
+				if r.props != nil {
+					break
+				}
 				low := strings.ToLower(strings.TrimSpace(v))
 				switch {
 				case strings.HasPrefix(low, "select "):
@@ -225,6 +278,9 @@ func (wmiParser) Parse(ctx *Context) error {
 			}
 			msg = fmt.Sprintf("WMI event filter %q: %s", name, trunc(query, 600))
 		case "binding":
+			if r.props != nil {
+				vals = []string{str("Filter"), str("Consumer")}
+			}
 			for _, v := range vals {
 				if m := reWMIRef.FindStringSubmatch(v); m != nil {
 					if m[1] == "__EventFilter" {
@@ -236,13 +292,30 @@ func (wmiParser) Parse(ctx *Context) error {
 			}
 			msg = fmt.Sprintf("WMI subscription: filter %q runs %v %q", fields["filter"], fields["consumer_class"], fields["consumer"])
 		case "consumer":
+			if n := str("Name"); n != "" {
+				fields["name"] = n
+			}
 			for _, v := range vals {
+				if fields["name"] != nil {
+					break
+				}
 				if bound[r.class+"\x00"+v] {
 					fields["name"] = v
 					break
 				}
 			}
-			msg = fmt.Sprintf("WMI %s %q: %s", clean(r.class), fields["name"], trunc(strings.Join(vals, " | "), 800))
+			what := strings.Join(vals, " | ")
+			if r.props != nil {
+				// What it runs, by the property that says so.
+				var parts []string
+				for _, k := range []string{"CommandLineTemplate", "ExecutablePath", "WorkingDirectory", "ScriptingEngine", "ScriptFilename", "ScriptText", "SourceName", "Filename", "Text", "ToLine", "Subject"} {
+					if v := str(k); v != "" {
+						parts = append(parts, k+"="+v)
+					}
+				}
+				what = strings.Join(parts, " | ")
+			}
+			msg = fmt.Sprintf("WMI %s %q: %s", clean(r.class), fields["name"], trunc(what, 800))
 		default:
 			msg = fmt.Sprintf("WMI %s: %s", clean(r.class), trunc(strings.Join(vals, " | "), 800))
 		}

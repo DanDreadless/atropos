@@ -45,6 +45,9 @@ type Context struct {
 	// the same split image. Set only for an image kind that is split across
 	// files (E01): such an image is one piece of evidence in several files.
 	Segments []string
+	// WorkDir is the case's directory for temporary working copies (a
+	// database with its write-ahead log applied). Never evidence.
+	WorkDir string
 
 	// ReceivedYear anchors formats that omit the year entirely.
 	ReceivedYear  int
@@ -100,6 +103,8 @@ func For(kind string) Parser {
 		return lnkParser{}
 	case detect.SQLite:
 		return sqliteParser{}
+	case detect.SQLiteWAL:
+		return walParser{}
 	case detect.Text, detect.TextUTF16:
 		return textParser{}
 	case detect.NTFSIndex:
@@ -114,6 +119,8 @@ func For(kind string) Parser {
 		return ewfParser{}
 	case detect.FATVolume, detect.ExtVolume, detect.MBRDisk, detect.VHD, detect.VHDX, detect.VMDK:
 		return diskImageParser{}
+	case detect.SNSS:
+		return snssParser{}
 	case detect.MozLz4:
 		return mozLz4Parser{}
 	case detect.DefenderDH:

@@ -347,7 +347,9 @@
         <h2 id="h-limits">Limits worth knowing</h2>
         <ul>
           <li>A finding, a tag, or an event is evidence of what the artefact recorded, and no more. "File modified (ShimCache)" is the file's modification time as Windows cached it, not the time it ran.</li>
-          <li>A browser database copied from a running browser may have its newest entries in a separate <code>-wal</code> file, which is not applied. The item's notes say so.</li>
+          <li>A browser database copied from a running browser keeps its newest entries in a separate <code>-wal</code> file beside it. Add that file too: Atropos works out from its contents which database it belongs to, applies it to a working copy (never to the evidence) and reads that, and the database's notes say how many transactions were applied. Add it later and the database is read again by itself. A database in that mode with no log that fits says so in its notes.</li>
+          <li>A Chromium browser's <code>Sessions</code> folder holds the tabs that were open and those recently closed, with each tab's back-and-forward history and when it was closed. Private windows' tabs are not saved there. The newest browsers can encrypt these files; Atropos says so when it meets one.</li>
+          <li>The Windows Search index records files as the indexer last saw them, including files that have since been deleted or moved; its file times are copies, taken when the item was indexed. Search <code>source:windows-search</code>.</li>
           <li>Synced browser history is marked as such: a visit made on another device signed in to the same account is not evidence that this computer was used.</li>
           <li>Cookie values and saved passwords are never read. Atropos records that a cookie or a saved login exists, for which site, and when.</li>
           <li>Records found by searching (WMI subscriptions, entries in unused directory space) may be old or deleted versions. Their notes say how they were found.</li>

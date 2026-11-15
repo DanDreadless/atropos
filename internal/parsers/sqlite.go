@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/DanDreadless/atropos/internal/timeutil"
@@ -24,7 +26,7 @@ type sqliteParser struct{}
 
 func (sqliteParser) Name() string { return "sqlite" }
 func (sqliteParser) Version() string {
-	return "5 (native: chromium history with referrers, search terms, sync origin and download detail; firefox places with downloads; cookies, form values, saved logins without passwords, address-bar shortcuts, page icons, bookmarks)"
+	return "7 (native, write-ahead log applied when one in the case fits: windows search index; chromium history with referrers, search terms, sync origin and download detail; firefox places with downloads; cookies, form values, saved logins without passwords, address-bar shortcuts, page icons, bookmarks)"
 }
 
 // maxSideRows bounds the small tables read whole into memory (search terms,
@@ -32,8 +34,37 @@ func (sqliteParser) Version() string {
 const maxSideRows = 500000
 
 func (sqliteParser) Parse(ctx *Context) error {
+	// A write-ahead log that fits this database is applied to a working
+	// copy, never to the evidence, and the copy is what is read.
+	path := ctx.File.Name()
+	walNote := ""
+	head := make([]byte, 20)
+	if _, err := ctx.File.ReadAt(head, 0); err == nil && head[18] == 2 {
+		walNote = "the database is in write-ahead log mode, and no log in the case fits it: if it was copied from a running program, its newest changes may be in a -wal file beside it, which should be added too"
+		w, wpath, why := pickWAL(ctx)
+		if why != "" {
+			walNote = why
+		}
+		if w != nil {
+			dir := ctx.WorkDir
+			if dir == "" {
+				dir = os.TempDir()
+			}
+			merged, err := applyWAL(ctx, w, dir)
+			w.file.Close()
+			if err != nil {
+				ctx.Warn("the write-ahead log that fits this database could not be applied: %v; the database was read without it", err)
+				walNote = ""
+			} else {
+				defer os.Remove(merged)
+				path = merged
+				walNote = walDescribe(w, wpath)
+				ctx.Fact("sqlite.wal_applied", filepath.Base(wpath), "SHA-256 of the write-ahead log applied to this database before it was read")
+			}
+		}
+	}
 	// immutable=1 guarantees SQLite neither writes to nor locks the evidence.
-	db, err := sql.Open("sqlite", "file:"+url.PathEscape(ctx.File.Name())+"?mode=ro&immutable=1&_pragma=trusted_schema(0)&_pragma=query_only(1)")
+	db, err := sql.Open("sqlite", "file:"+url.PathEscape(path)+"?mode=ro&immutable=1&_pragma=trusted_schema(0)&_pragma=query_only(1)")
 	if err != nil {
 		return err
 	}
@@ -55,7 +86,9 @@ func (sqliteParser) Parse(ctx *Context) error {
 	}
 	rows.Close()
 	ctx.Fact("sqlite.tables", strings.Join(names, ", "), "tables present in the database")
-	ctx.Note("a write-ahead log accompanying this database, if one existed, is a separate file and was not applied")
+	if walNote != "" {
+		ctx.Note("%s", walNote)
+	}
 
 	done := 0
 	if tables["urls"] && tables["visits"] {
@@ -82,6 +115,13 @@ func (sqliteParser) Parse(ctx *Context) error {
 			}
 			done += n
 		}
+	}
+	if tables["systemindex_1_propertystore"] && tables["systemindex_1_propertystore_metadata"] {
+		n, err := windowsSearch(ctx, db)
+		if err != nil {
+			ctx.Warn("windows search index: %v", err)
+		}
+		done += n
 	}
 	if tables["moz_places"] && tables["moz_historyvisits"] {
 		n, err := firefoxVisits(ctx, db)

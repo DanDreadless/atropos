@@ -28,6 +28,7 @@ const (
 	NTFSIndex   = "ntfs-directory-index"
 	NTFSLog     = "ntfs-transaction-log"
 	SQLite      = "sqlite-database"
+	SQLiteWAL   = "sqlite-wal"
 	Text        = "text"
 	TextUTF16   = "text-utf16"
 	Zip         = "zip-archive"
@@ -46,6 +47,7 @@ const (
 	WinNotepad  = "windows-notepad-state"
 	DefenderDH  = "defender-detection-record"
 	MozLz4      = "mozilla-lz4"
+	SNSS        = "chromium-session"
 	WMIRepo     = "wmi-repository"
 	USN         = "ntfs-usn-journal"
 	JumpList    = "jump-list-custom"
@@ -79,8 +81,11 @@ var sigs = []sig{
 	{0, []byte{0x4C, 0, 0, 0, 0x01, 0x14, 0x02, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46}, LNK, "shell link header size and class identifier at offset 0"},
 	{3, []byte("NTFS    "), NTFSVolume, `NTFS boot sector signature at offset 3`},
 	{0, []byte("SQLite format 3\x00"), SQLite, `signature "SQLite format 3" at offset 0`},
+	{0, []byte{0x37, 0x7F, 0x06, 0x82, 0x00, 0x2D, 0xE2, 0x18}, SQLiteWAL, "SQLite write-ahead log signature and format version 3007000 at offset 0"},
+	{0, []byte{0x37, 0x7F, 0x06, 0x83, 0x00, 0x2D, 0xE2, 0x18}, SQLiteWAL, "SQLite write-ahead log signature and format version 3007000 at offset 0"},
 	{4, []byte{0xEF, 0xCD, 0xAB, 0x89}, ESE, "ESE database signature at offset 4"},
 	{0, []byte("EVF\x09\x0d\x0a\xff\x00"), EWF, "Expert Witness Format signature at offset 0"},
+	{0, []byte("SNSS"), SNSS, `Chromium session file signature "SNSS" at offset 0`},
 	{0, []byte("mozLz40\x00"), MozLz4, `Mozilla LZ4 signature "mozLz40" at offset 0`},
 	{0, []byte("vhdxfile"), VHDX, `signature "vhdxfile" at offset 0`},
 	{0, []byte("KDMV"), VMDK, `signature "KDMV" at offset 0`},

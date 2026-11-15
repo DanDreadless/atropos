@@ -120,7 +120,7 @@ func runJob(j job, s sink) (err error) {
 	defer f.Close()
 	return p.Parse(&parsers.Context{
 		File: f, Size: j.Size, Name: j.Name, Kind: j.Kind, Host: j.Host, Local: lc,
-		ReceivedYear: j.ReceivedYear, ReceivedMonth: j.ReceivedMonth, Segments: j.Segments,
+		ReceivedYear: j.ReceivedYear, ReceivedMonth: j.ReceivedMonth, Segments: j.Segments, WorkDir: j.OutDir,
 		Emit: func(ev parsers.Event) error { return s.event(storeEvent(ev)) },
 		Fact: s.fact,
 		Warn: func(format string, args ...any) { s.warn(fmt.Sprintf(format, args...)) },
