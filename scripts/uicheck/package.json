@@ -1,0 +1,8 @@
+{
+  "name": "atropos-uicheck",
+  "private": true,
+  "description": "Browser check of the Atropos web interface. Development only; nothing here ships in the binary.",
+  "dependencies": {
+    "puppeteer-core": "^24.0.0"
+  }
+}

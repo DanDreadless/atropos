@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atropos</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header id="top">
+  <img class="brand" src="banner.png" alt="Atropos" width="140" height="30">
+  <nav id="nav">
+    <button data-view="timeline" class="on">Timeline</button>
+    <button data-view="evidence">Evidence <span id="evcount" class="count"></span></button>
+    <button data-view="files" title="Look inside disk and disc images and choose what goes on the timeline">Files <span id="imgcount" class="count"></span></button>
+    <button data-view="analysis" title="Checks that compare artefacts with each other">Analysis</button>
+    <button data-view="details" title="What a report needs that no artefact can supply: case reference, each host's make, model, serial number, clock and how it was collected">Details</button>
+    <button data-view="audit">Audit log</button>
+    <button data-view="help" title="How everything here works (press ?)">Help</button>
+  </nav>
+  <div id="ingest" class="ingest" hidden></div>
+  <div class="spacer"></div>
+  <div id="caseinfo" class="caseinfo"></div>
+  <select id="report" title="A document stating what was examined, how, and whether it still verifies">
+    <option value="">Case report…</option>
+    <option value="html">HTML (to read or print)</option>
+    <option value="json">JSON (complete, for other tools)</option>
+  </select>
+  <button id="add" class="primary">Add evidence</button>
+  <button id="verify">Verify integrity</button>
+</header>
+
+<main>
+  <section id="view-timeline" class="view">
+    <div class="bar">
+      <input id="q" type="search" spellcheck="false" autocomplete="off"
+             placeholder='Search events:  powershell  "exact phrase"  -exclude  host:PC1  source:evtx  category:execution  file:ntuser  macb:m  tz:assumed  tag:…'>
+      <select id="origin" title="Show only what came from one image, archive or submission"></select>
+      <button id="order" title="Change sort order">Oldest first</button>
+      <select id="export" title="Export the events matching this search">
+        <option value="">Export…</option>
+        <option value="csv">CSV</option>
+        <option value="jsonl">JSON lines</option>
+        <option value="timesketch">Timesketch JSONL</option>
+        <option value="bodyfile">Bodyfile (file times only)</option>
+      </select>
+    </div>
+    <div id="groups" class="facets groups"></div>
+    <div id="facets" class="facets"></div>
+    <div class="rangebar">
+      <span id="summary" class="summary"></span>
+      <span class="spacer"></span>
+      <select id="groupadd" title="Build a separate timeline from events you pick"></select>
+      <button id="groupremove" hidden></button>
+      <button id="clearsel" hidden>Clear selection</button>
+      <span class="hint">All times are UTC. Drag across the chart to zoom.</span>
+      <button id="zoomout" hidden>Zoom out</button>
+      <button id="zoomreset" hidden>Whole timeline</button>
+    </div>
+    <div id="histo" class="histo"><div id="bars"></div><div id="sel" hidden></div><div id="tip" hidden></div></div>
+    <div id="texthits" class="texthits" hidden></div>
+    <div class="split">
+      <div class="table">
+        <div class="row head">
+          <span><input type="checkbox" id="checkall" title="Select every event loaded so far"></span><span>Time (UTC)</span><span title="How the time zone was established">TZ</span><span title="Which file time this is: Modified, Accessed, Changed (metadata), Born. Dots mean it is not a file time.">MACB</span><span title="What the event is evidence of">Evidence of</span><span title="What this timestamp means for this artefact">Meaning</span><span>Source</span><span>Host</span><span>User</span><span title="The evidence item the event was read from. Hover for its path, which for a file taken out of an image includes the image.">Item</span><span>Message</span>
+        </div>
+        <div id="rows" class="rows" tabindex="0"><div id="spacer"></div><div id="win"></div><div id="empty" class="empty" hidden></div></div>
+      </div>
+      <aside id="detail" class="detail" hidden></aside>
+    </div>
+  </section>
+
+  <section id="view-evidence" class="view" hidden>
+    <div class="bar">
+      <input id="evq" type="search" placeholder="Filter by name, path, type, status or hash" spellcheck="false" autocomplete="off">
+      <select id="evsort" title="The order of the list">
+        <option value="tree">In the order added</option>
+        <option value="events">Most events first</option>
+        <option value="name">By name</option>
+        <option value="kind">By type</option>
+        <option value="status">By status</option>
+        <option value="size">Largest first</option>
+        <option value="newest">Newest first</option>
+      </select>
+      <label class="tick" title="Hide items that put nothing on the timeline"><input type="checkbox" id="evonly"> With events only</label>
+      <button id="evstale" hidden title="Parses again every item that this version of Atropos would read differently from the run now shown. Earlier runs are kept."></button>
+      <span id="evsummary" class="summary"></span>
+    </div>
+    <div class="table">
+      <div class="erow head"><span>#</span><span>Name</span><span>Identified as</span><span>Status</span><span class="num">Events</span><span class="num">Size</span><span>SHA-256</span><span>Notes</span></div>
+      <div id="evrows" class="rows plain"></div>
+    </div>
+  </section>
+
+  <section id="view-files" class="view" hidden>
+    <div class="bar">
+      <select id="imgpick" title="Disk and disc images in this case"></select>
+      <span id="imgdesc" class="summary"></span>
+      <span class="spacer"></span>
+      <button id="imgstd" title="Copies out the registry hives, event logs, prefetch, $MFT, change journal, shortcuts, jump lists, browser history, scheduled tasks and Recycle Bin records, and parses them">Add standard Windows artefacts</button>
+      <button id="imgshow" title="Go to the timeline showing only what has been taken out of this image">Show its events</button>
+      <button id="imgadd" class="primary" disabled>Add selected to timeline</button>
+    </div>
+    <div id="crumbs" class="crumbs"></div>
+    <div class="table">
+      <div class="frow head"><span><input type="checkbox" id="imgall" title="Select everything in this folder"></span><span>Name</span><span class="num">Size</span><span>Modified (UTC)</span><span>Created (UTC)</span><span>Note</span></div>
+      <div id="imgrows" class="rows plain"></div>
+    </div>
+  </section>
+
+  <section id="view-analysis" class="view" hidden>
+    <div class="bar">
+      <span id="anmode" class="anmode">
+        <button data-mode="anomalies" class="on" title="Programs, names and commands that do not belong where they were found">Out of place</button>
+        <button data-mode="timestamps" title="Contradictions between artefacts about a file's times">Timestamp consistency</button>
+      </span>
+      <span id="ansummary" class="summary"></span>
+      <span class="spacer"></span>
+      <button id="antag" title="Give every event listed the tag &quot;anomaly&quot;, so they stand out on the timeline">Tag these as anomalies</button>
+      <button id="anrun">Run again</button>
+    </div>
+    <p id="anintro-anomalies" class="hint anintro">Looks through every event for things that do not belong where they are: programs run from temporary, public and other staging folders, Windows program names in the wrong folder or one character out, names made to look like documents, commands of a kind attackers use, tools intruders favour, cleared logs. These are places to look first, not conclusions.</p>
+    <p id="anintro-timestamps" class="hint anintro" hidden>Compares each file's times in the file table ($MFT) with what ShimCache, Amcache, the change journal, the transaction log and unused space in directory indexes recorded about the same file. A finding is a contradiction between records, not proof of tampering: open the events and check them.</p>
+    <div id="ancompared" class="facets"></div>
+    <div id="anrows" class="anrows"></div>
+  </section>
+
+  <section id="view-details" class="view" hidden>
+    <div class="bar">
+      <b>Case and host details</b>
+      <span id="dtsummary" class="summary"></span>
+      <span class="spacer"></span>
+      <input id="dthost" type="text" placeholder="Host name" spellcheck="false" autocomplete="off" list="dtknown">
+      <datalist id="dtknown"></datalist>
+      <button id="dtadd">Add host</button>
+    </div>
+    <p class="hint anintro">What a report must state that the evidence cannot supply. The fields follow the SWGDE report-writing requirements, ISO/IEC 17025 clause 7.8, ISO/IEC 27037 and NIST SP 800-86. Fill in what applies; everything stated appears in the case report. A change never overwrites: the earlier value stays in the case history with who stated it and when.</p>
+    <div id="dtbody" class="anrows"></div>
+  </section>
+
+  <section id="view-audit" class="view" hidden>
+    <div class="bar">
+      <span id="auditsummary" class="summary"></span>
+      <span class="spacer"></span>
+      <span class="hint">Each entry's hash covers the entry before it. "Verify integrity" walks the whole chain.</span>
+    </div>
+    <div class="table">
+      <div class="arow head"><span>#</span><span>Time (UTC)</span><span>Examiner</span><span>Action</span><span>Target</span><span>Details</span><span>Entry hash</span></div>
+      <div id="auditrows" class="rows plain"></div>
+    </div>
+  </section>
+  <section id="view-help" class="view" hidden>
+    <div class="help">
+      <nav id="helptoc" class="helptoc" aria-label="Contents of the guide">
+        <b>User guide</b>
+        <button data-to="h-start">Getting started</button>
+        <button data-to="h-add">Adding evidence</button>
+        <button data-to="h-timeline">Reading the timeline</button>
+        <button data-to="h-search">Searching</button>
+        <button data-to="h-from">Finding what came from where</button>
+        <button data-to="h-images">Disk and disc images</button>
+        <button data-to="h-evidence">The Evidence tab</button>
+        <button data-to="h-notes">Tags, comments and groups</button>
+        <button data-to="h-analysis">Analysis</button>
+        <button data-to="h-details">Case and host details</button>
+        <button data-to="h-out">Reports and exports</button>
+        <button data-to="h-integrity">Integrity and the audit log</button>
+        <button data-to="h-zones">Time zones</button>
+        <button data-to="h-keys">Keyboard</button>
+        <button data-to="h-cli">Command line</button>
+        <button data-to="h-limits">Limits worth knowing</button>
+      </nav>
+      <article class="helpbody">
+
+        <h1>Atropos user guide</h1>
+        <p class="lede">Atropos takes the artefacts of an investigation, keeps an untouched copy of each, reads what it can from them, and puts every dated thing it finds on one timeline in UTC. This guide goes through the screens in the order you are likely to use them.</p>
+
+        <h2 id="h-start">Getting started</h2>
+        <p>A case is a folder. Start Atropos with <code>atropos serve --case</code> and the folder's path, and open the address it prints, including the part after <code>?token=</code>. The token changes each time the server starts, so an old bookmark will ask you to use the new address.</p>
+        <ol>
+          <li><b>Add evidence.</b> Drag files or whole folders onto the page, or press <b>Add evidence</b>. Add everything from one computer together, and include its SYSTEM registry hive if you have it: that is where Atropos learns the computer's name and time zone.</li>
+          <li><b>Watch it arrive.</b> Progress shows beside the tabs. The timeline fills as each file is read; you do not have to wait for the last one.</li>
+          <li><b>Look.</b> The chart across the top of the timeline shows where the activity is. Drag across a busy stretch to zoom in on it.</li>
+          <li><b>Narrow it.</b> Type in the search box, or click the chips under it: <i>Evidence of</i> answers questions such as "what ran?", and <i>Source</i> picks one kind of artefact.</li>
+          <li><b>Keep what matters.</b> Click an event to open it, tag it, or tick several and put them in a group of their own.</li>
+          <li><b>Write it up.</b> Fill in <b>Details</b>, run <b>Verify integrity</b>, and take a <b>Case report</b>.</li>
+        </ol>
+
+        <h2 id="h-add">Adding evidence</h2>
+        <p>Anything can be added. Atropos works out what a file is from its contents, never from its name, so a renamed file is still recognised. What it has a reader for goes on the timeline. Everything else is still hashed, stored, and has its text indexed so that a search can find it.</p>
+        <p>For each file, in this order:</p>
+        <ol>
+          <li>It is copied into the case's vault while SHA-256, SHA-1 and MD5 are worked out. The original is only ever read.</li>
+          <li>The arrival is written to the audit log with the hashes, who added it and when.</li>
+          <li>It is identified, and the reason is recorded ("signature regf at offset 0").</li>
+          <li>It is read by a separate worker process, so that a damaged or hostile file cannot take the rest of the case down with it.</li>
+        </ol>
+        <p><b>Archives</b> (zip, tar, gzip) are unpacked, and each file inside becomes evidence in its own right, listed under the archive. <b>Disk and disc images</b> are not unpacked: see <i>Disk and disc images</i> below. A file whose contents are already in the case is recorded as a <b>duplicate</b> and not read a second time.</p>
+        <p><b>Submissions.</b> Files added in one go form a submission. The host name and time zone found in a SYSTEM hive apply to the rest of the same submission, which is why a computer's artefacts belong together and two computers' artefacts belong in two submissions.</p>
+        <p><b>Registry hives and their logs.</b> A hive copied from a running computer is often missing its last changes, which Windows keeps for a while in the hive's transaction logs (<code>NTUSER.DAT.LOG1</code>, <code>.LOG2</code> and so on). Add the logs with the hive. Atropos matches them to their hive by what is inside them, applies them the way Windows would on loading the hive, and says in the hive's notes which logs and entries it used. If a hive needs its logs and they are not in the case, its status is <b>partial</b> and the notes say so; add the logs later and the hive is read again by itself.</p>
+        <p class="aside">Files dropped onto the page arrive without their alternate data streams, because a browser cannot see them. To keep the <code>Zone.Identifier</code> of downloaded files (it records where each came from), add the folder with <code>atropos ingest</code> on the command line instead.</p>
+
+        <h2 id="h-timeline">Reading the timeline</h2>
+        <p>Each row is one moment that an artefact recorded. The columns, left to right:</p>
+        <table>
+          <tr><th>Time (UTC)</th><td>Always UTC, to the precision the artefact holds.</td></tr>
+          <tr><th>TZ</th><td>A coloured dot for how the time zone was established. Hover over it. An orange row means the zone was <i>assumed</i>: treat that time with care (see <i>Time zones</i>).</td></tr>
+          <tr><th>MACB</th><td>For file times only: <b>M</b>odified, <b>A</b>ccessed, <b>C</b>hanged (the file's record, not its content) and <b>B</b>orn. Dots mean the time is not a file time.</td></tr>
+          <tr><th>Evidence of</th><td>What the event tells you: a program ran, a file was opened, an account was used, something was set to start automatically, and so on.</td></tr>
+          <tr><th>Meaning</th><td>What this particular time is. "program-last-run (prefetch)" and "file-modified (shimcache)" are different claims even when they name the same file.</td></tr>
+          <tr><th>Source</th><td>The kind of artefact: event log, registry, file table, browser and so on.</td></tr>
+          <tr><th>Host, User</th><td>Where the artefact says them. Often empty.</td></tr>
+          <tr><th>Item</th><td>The evidence file the event was read from. Hover for its full path; for a file taken out of an image, the path starts with the image.</td></tr>
+          <tr><th>Message</th><td>The event in a sentence, with any tags and groups in front.</td></tr>
+        </table>
+        <p><b>The chart.</b> Each bar is a slice of time and its height is the number of events in it, for the current search. Drag across bars to zoom to that span. <b>Zoom out</b> steps back and <b>Whole timeline</b> returns to everything. The line above the chart says how many events match and the period they cover.</p>
+        <p><b>Order.</b> The button beside the search box switches between oldest first and newest first.</p>
+        <p><b>Opening an event.</b> Click a row. The panel on the right shows the time to the nanosecond and as it was found in the source, how the zone was arrived at, every field the reader extracted, where in the file the record sits, and which evidence item and parse run it belongs to. From there you can jump to that item, show only its events, or show everything from the image it came out of. A change-journal record names its folder only by a number in the file table; when the file table from the same volume is in the case, the panel shows that folder's path too, as the file table records it now.</p>
+        <p class="aside">The address bar always holds the current view, search, zoom and open event. Copy it into your notes and it will bring you back to exactly that place while the same server is running.</p>
+
+        <h2 id="h-search">Searching</h2>
+        <p>Words are matched from their start and all of them must be present, so <code>powersh enc</code> finds events mentioning both "powershell" and "encodedcommand". Everything else is a filter of the form <code>name:value</code>. Put a minus sign in front of a word or a filter to exclude it.</p>
+        <table>
+          <tr><th><code>"exact phrase"</code></th><td>The whole word or phrase, not just its beginning.</td></tr>
+          <tr><th><code>-svchost</code></th><td>Leave out events that mention it.</td></tr>
+          <tr><th><code>category:execution</code></th><td>One "Evidence of" group. The chips do the same.</td></tr>
+          <tr><th><code>source:evtx</code></th><td>One kind of artefact.</td></tr>
+          <tr><th><code>type:"program-last-run (bam)"</code></th><td>One exact meaning. Use quotes when it has spaces.</td></tr>
+          <tr><th><code>host:PC1</code> &nbsp; <code>user:alice</code></th><td>As the artefact recorded them.</td></tr>
+          <tr><th><code>macb:m</code> &nbsp; <code>macb:mb</code></th><td>File times that are a modification; or both modified and born.</td></tr>
+          <tr><th><code>tz:assumed</code></th><td>Events whose zone had to be assumed.</td></tr>
+          <tr><th><code>tag:anomaly</code> &nbsp; <code>group:Malware</code></th><td>Events you, or an analysis, have marked.</td></tr>
+          <tr><th><code>evidence:12</code></th><td>Events read from item 12 alone.</td></tr>
+          <tr><th><code>from:12</code></th><td>Item 12 and everything that came out of it: all files taken from an image, all members of an archive.</td></tr>
+          <tr><th><code>file:ntuser</code></th><td>Events from any item whose name or path contains the text. <code>file:"Users/alice"</code> works on paths inside an image.</td></tr>
+          <tr><th><code>submission:2</code></th><td>Everything added together in the second submission.</td></tr>
+          <tr><th><code>id:41,57</code></th><td>Those events exactly. Analysis findings use this to point at the timeline.</td></tr>
+        </table>
+        <p>Filters combine: <code>from:3 category:execution -source:registry powershell</code> is "programs run, according to anything but the registry, among what came out of image 3, mentioning PowerShell".</p>
+        <p><b>Text inside files.</b> When your search has plain words in it, files whose own text contains them are listed above the table, even if they put nothing on the timeline. A script, a note, or a file Atropos has no reader for is found this way.</p>
+
+        <h2 id="h-from">Finding what came from where</h2>
+        <p>A case soon holds hundreds of items, many of them copied out of one image. Four things keep them apart:</p>
+        <ul>
+          <li><b>The From list</b>, beside the search box. It lists every image and archive that things were taken out of, with the number of events each accounts for, and every submission. Pick one and the timeline shows only that, and the counts on the <i>Evidence of</i>, <i>Source</i> and <i>Time zone from</i> chips change to count only that too. Pick <i>all evidence</i> to go back. Viewing a group does the same to the counts.</li>
+          <li><b>The Item column</b> names the file each event was read from.</li>
+          <li><b>On the Evidence tab</b>, open an image or archive and press <b>Show all events from it and what came out of it</b>. Open any single item and press <b>Show its events</b>.</li>
+          <li><b>On the Files tab</b>, <b>Show its events</b> does the same for the image you are browsing.</li>
+        </ul>
+        <p>These all write a <code>from:</code>, <code>evidence:</code> or <code>submission:</code> filter into the search box, so you can add words and other filters after it.</p>
+
+        <h2 id="h-images">Disk and disc images</h2>
+        <p>An image can hold a million files, nearly all of them irrelevant, so it is not unpacked when it arrives. Open the <b>Files</b> tab, choose the image, and browse it like a folder.</p>
+        <ul>
+          <li><b>Add standard Windows artefacts</b> walks the image for the files an investigation usually wants (registry hives, event logs, prefetch, the file table and change journal, shortcuts and jump lists, browser profiles, scheduled tasks, Defender's records, the WMI repository and more) and copies them out.</li>
+          <li>Or tick files and folders yourself and press <b>Add selected to timeline</b>.</li>
+        </ul>
+        <p>Whatever is copied out is hashed, stored and read like any other evidence, and is listed under the image on the Evidence tab. Files with an alternate data stream show it as a separate line; a file's <code>Zone.Identifier</code> is taken along with it automatically.</p>
+        <p><b>What can be opened:</b> ISO 9660 discs, NTFS volumes, raw disks partitioned with MBR or GPT that hold NTFS, and any of those inside an EnCase or FTK Imager image (<code>.E01</code>), a Hyper-V or Virtual PC disk (<code>.vhd</code>, <code>.vhdx</code>, fixed, dynamic or differencing) or a single-file VMware disk (<code>.vmdk</code>, sparse or stream-optimised).</p>
+        <p><b>Differencing disks</b> hold only what changed since their parent disk. Add the parent too: Atropos finds it among the case's images by the identifier the two share, whatever it is called. Without it, the image's notes say which parent is missing.</p>
+        <p><b>E01 images.</b> Add every segment file (<code>.E01</code>, <code>.E02</code> and so on). They are matched by an identifier inside them, so their names do not matter and you can add them in any order. When the set is complete Atropos reads the whole image, checks every block against its own checksum, and compares the hash of the contents with the hash the imaging tool stored. The first segment's notes then say <b>verified</b>, or <b>NOT VERIFIED</b> with both hashes. If a segment is missing, the notes say which, and the check runs by itself when it arrives. The acquisition details recorded in the image (case number, examiner, notes) are kept as facts.</p>
+        <p><b>Volume shadow copies</b> are listed, with the time each was made, in the image's description. Their contents are not read; mount the image with a tool that can and add the files you want.</p>
+
+        <h2 id="h-evidence">The Evidence tab</h2>
+        <p>One row for every item in the case. Click a row for its hashes, where it came from, how it was identified, which reader handled it, and that reader's notes.</p>
+        <table>
+          <tr><th>parsed</th><td>Read by the reader for its kind, without complaint.</td></tr>
+          <tr><th>partial</th><td>Read, but something was skipped or could not be decoded. The notes say what. The events that did come out are sound.</td></tr>
+          <tr><th>generic</th><td>No reader for this kind, or the reader found nothing it recognised. The file's text is indexed, and a program's build time is taken, but nothing else.</td></tr>
+          <tr><th>unpacked</th><td>An archive; look at the items under it.</td></tr>
+          <tr><th>duplicate</th><td>The same contents as an earlier item. Stored once, read once.</td></tr>
+          <tr><th>queued, processing</th><td>Waiting its turn, or being read now.</td></tr>
+          <tr><th>interrupted</th><td>Atropos was stopped while reading it. Press <b>Parse again</b>.</td></tr>
+        </table>
+        <p><b>Sorting and filtering.</b> The list starts in the order things were added, with each file under the image or archive it came out of. The box at the top filters by name, path, type, status or hash. The list beside it re-orders by number of events, name, type, status or size, and <b>With events only</b> hides everything that put nothing on the timeline.</p>
+        <p><b>Parse again</b> reads an item afresh as a new run. The earlier run and its events are kept in the case and remain verifiable; the timeline shows the newest. Tags, comments and group membership belong to the earlier run's events and do not move across, so re-parse before you annotate, not after.</p>
+        <p><b>After an upgrade.</b> Readers improve between versions. An item read by an earlier version than the one now running is marked <b>older</b>, and a button appears at the top: <b>Bring N items up to date</b>. It parses all of them again in one step.</p>
+
+        <h2 id="h-notes">Tags, comments and groups</h2>
+        <p>Your notes sit in a layer of their own. They never alter an event, and every one is recorded in the audit log under your name.</p>
+        <ul>
+          <li><b>Tag or comment:</b> open an event, type in the box under <i>Examiner notes</i>, and press <b>Add tag</b> or <b>Add comment</b>. Enter adds a single word as a tag and anything longer as a comment. Tags show in front of the event's message and can be searched with <code>tag:</code>.</li>
+          <li><b>Withdraw</b> a note from the same panel. It is struck through, not erased: the record shows that it was made and that it was withdrawn.</li>
+          <li><b>Groups</b> are timelines you build from picked events: one for the intrusion, one for the exfiltration, one for a single user. Press <b>+ New group</b>, then tick events (shift-click ticks a run of them) and choose the group from <b>Add selected to group</b>. With nothing ticked, the same list adds every event matching the current search. Click a group's chip to see only its events; <b>Everything</b> returns to the whole case.</li>
+          <li>A group can be exported or reported on by itself. Archiving a group hides it; nothing is deleted.</li>
+        </ul>
+
+        <h2 id="h-analysis">Analysis</h2>
+        <p>Two sets of checks that no single artefact can make. Neither adds events. Each run is recorded in the audit log, and every finding opens the events behind it.</p>
+        <p><b>Things out of place</b> looks at every event for what does not belong where it was found: a Windows program name in the wrong folder, a name one character away from a real one, programs run from temporary or public folders, things set to start automatically from such places, cleared logs, antivirus detections, commands of the kind intruders use, downloads the browser judged dangerous, browser extensions loaded from a folder, and WMI subscriptions that run a command. Each kind says why it matters and, just as important, what innocent thing also looks like this.</p>
+        <p><b>Contradictions about file times</b> compares what the file table says about a file with what other artefacts recorded independently (ShimCache, Amcache, the change journal, the transaction log, old directory entries). A file whose times were set backwards disagrees with at least one of them. This needs a file table in the case.</p>
+        <p>A finding is a place to look, not a conclusion. <b>Tag these as anomalies</b> gives every event listed the tag <code>anomaly</code>, in your name, so that they stand out on the timeline and can be searched.</p>
+
+        <h2 id="h-details">Case and host details</h2>
+        <p>A report needs facts no artefact holds: the case reference, who asked for the examination, and for each computer its make, model, serial number, who collected it and how, and what its clock read against a reference when it was seized. Enter them on the <b>Details</b> tab. Where Atropos found a value in the evidence (the host name, the time zone, the Windows version) it is shown beside the field for comparison. Changes are kept as a history; an earlier value is never overwritten.</p>
+
+        <h2 id="h-out">Reports and exports</h2>
+        <p><b>Case report</b> (top right) first verifies the case, then writes one document: what was examined, with hashes; how each item was read and by which version; the details you entered; your groups and notes; and the result of the verification. HTML is for reading and printing, JSON for other tools.</p>
+        <p><b>Export</b> (beside the search box) writes the events that match the current search, zoom and group:</p>
+        <table>
+          <tr><th>CSV</th><td>For a spreadsheet. Values that a spreadsheet would treat as a formula are made safe.</td></tr>
+          <tr><th>JSON lines</th><td>One event to a line with every field. The fullest form.</td></tr>
+          <tr><th>Timesketch JSONL</th><td>Ready to upload to Timesketch.</td></tr>
+          <tr><th>Bodyfile</th><td>File times only, for <code>mactime</code> and tools that read its format.</td></tr>
+        </table>
+        <p>Every export and report is recorded in the audit log with what was asked for.</p>
+
+        <h2 id="h-integrity">Integrity and the audit log</h2>
+        <p>Nothing in a case is ever changed or deleted. Evidence is stored once under its hash. Events belong to the parse run that made them, and each run is sealed with a digest of its events. Corrections are new entries. The <b>Audit log</b> tab lists everything that has happened, each entry carrying the hash of the one before, so that an entry cannot be altered or removed from the middle without it showing.</p>
+        <p><b>Verify integrity</b> re-hashes every stored file, recomputes every run's digest from the events as they are now, compares the runs with what the audit log recorded when each was sealed, and walks the audit chain. It ends with the hash of the newest audit entry. Write that down somewhere outside the case: it is what later proves that nothing was removed from the end of the log.</p>
+
+        <h2 id="h-zones">Time zones</h2>
+        <p>Everything on the timeline is UTC. Many artefacts store UTC already. Others store the computer's local time with no zone, and those have to be converted. The <b>TZ</b> dot on each row says how:</p>
+        <table>
+          <tr><th>native-utc</th><td>The format stores UTC. Nothing to decide.</td></tr>
+          <tr><th>explicit-offset</th><td>The value carried its own offset.</td></tr>
+          <tr><th>host-registry</th><td>Local time, converted with the zone read from the computer's own SYSTEM hive in the same submission. This is why the hive should be added with the rest.</td></tr>
+          <tr><th>examiner-set</th><td>Local time, converted with a zone you stated when starting Atropos (<code>--local-zone Europe/London</code>). Your statement is in the audit log.</td></tr>
+          <tr><th>assumed</th><td>No zone could be established, so the time was taken as UTC. It may be wrong by the computer's offset. These rows are orange; <code>tz:assumed</code> finds them all.</td></tr>
+        </table>
+        <p>A local time that falls in the hour repeated or skipped when the clocks change cannot be converted with certainty. Such an event carries a caveat, shown when you open it.</p>
+
+        <h2 id="h-keys">Keyboard</h2>
+        <table>
+          <tr><th><kbd>/</kbd></th><td>Go to the search box.</td></tr>
+          <tr><th><kbd>↓</kbd> <kbd>↑</kbd> or <kbd>j</kbd> <kbd>k</kbd></th><td>Open the next or previous event.</td></tr>
+          <tr><th><kbd>Esc</kbd></th><td>Close the open event, or leave the box you are typing in.</td></tr>
+          <tr><th><kbd>?</kbd></th><td>This guide.</td></tr>
+          <tr><th>Shift-click a tick box</th><td>Tick every row between it and the last one ticked.</td></tr>
+        </table>
+
+        <h2 id="h-cli">Command line</h2>
+        <p>Everything the page does to a case can also be done without it. One Atropos process works on a case at a time.</p>
+        <table>
+          <tr><th><code>atropos serve --case DIR</code></th><td>This interface. It listens only on this computer.</td></tr>
+          <tr><th><code>atropos ingest --case DIR PATH…</code></th><td>Add files or folders. On Windows this keeps alternate data streams, which the page cannot.</td></tr>
+          <tr><th><code>atropos verify --case DIR</code></th><td>The integrity check.</td></tr>
+          <tr><th><code>atropos export --case DIR --format csv --query "…" -o FILE</code></th><td>Export a search. Formats: csv, jsonl, timesketch, bodyfile. <code>--group NAME</code> for one group.</td></tr>
+          <tr><th><code>atropos report --case DIR --format html -o FILE</code></th><td>The case report.</td></tr>
+          <tr><th><code>atropos analyse --case DIR</code></th><td>Both sets of checks. <code>--check anomalies</code> or <code>timestamps</code> for one; <code>--tag</code> to tag what the anomaly checks find.</td></tr>
+        </table>
+        <p>Useful with any of them: <code>--examiner NAME</code> (recorded in the audit log; your login name otherwise) and <code>--local-zone ZONE</code>. Run <code>atropos</code> with no arguments for the full list.</p>
+
+        <h2 id="h-limits">Limits worth knowing</h2>
+        <ul>
+          <li>A finding, a tag, or an event is evidence of what the artefact recorded, and no more. "File modified (ShimCache)" is the file's modification time as Windows cached it, not the time it ran.</li>
+          <li>A browser database copied from a running browser may have its newest entries in a separate <code>-wal</code> file, which is not applied. The item's notes say so.</li>
+          <li>Synced browser history is marked as such: a visit made on another device signed in to the same account is not evidence that this computer was used.</li>
+          <li>Cookie values and saved passwords are never read. Atropos records that a cookie or a saved login exists, for which site, and when.</li>
+          <li>Records found by searching (WMI subscriptions, entries in unused directory space) may be old or deleted versions. Their notes say how they were found.</li>
+          <li>A deleted registry key is shown at the time it was last written, which is before it was deleted, not the moment of deletion. When its parent key is also gone, its path starts with <code>…\</code>. Search <code>type:"registry-key-deleted (last written)"</code> to see them all.</li>
+          <li>Memory images are out of scope. Use Volatility, and add what it produces as a log if you want it on the timeline.</li>
+          <li>Not opened yet: VHDX and VMDK images, FAT and exFAT volumes, the contents of shadow copies. The README lists what each reader covers and <code>docs/COMPARISON.md</code> how its output compares with other tools.</li>
+          <li>The timeline loads rows as you scroll. In a case of millions of events, zoom in on the chart to move around; do not try to scroll the whole of it.</li>
+        </ul>
+      </article>
+    </div>
+  </section>
+</main>
+
+<div id="drop" class="drop" hidden><div>Drop files or folders to add them as evidence<small>Originals are not modified. Each file is hashed and copied into the case vault.</small></div></div>
+<dialog id="dlg"></dialog>
+<div id="toast" class="toast" hidden></div>
+<input id="pickfiles" type="file" multiple hidden>
+<input id="pickdir" type="file" webkitdirectory hidden>
+<script src="app.js"></script>
+</body>
+</html>

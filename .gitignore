@@ -1,0 +1,29 @@
+# build output
+/atropos
+/atropos.exe
+/dist/
+
+# case directories and scratch (evidence must never be committed)
+/case*/
+/cases/
+/tmp/
+
+# third-party sample artefacts: fetched by scripts/fetch-testdata.sh, licences vary
+/testdata/
+
+*.test
+*.out
+.vscode/
+.idea/
+
+# browser check dependencies
+/scripts/uicheck/node_modules/
+/scripts/uicheck/package-lock.json
+
+# Python bytecode from scripts/compare
+__pycache__/
+
+# --- kept on the private (Gitea) repo only; scripts/publish-github.sh ------
+CLAUDE.md
+docs/HANDOFF.md
+docs/PLAN.md
