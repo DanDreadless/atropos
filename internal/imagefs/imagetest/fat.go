@@ -285,3 +285,35 @@ func MBR(vol []byte, typ byte) []byte {
 	copy(img[start*512:], vol)
 	return img
 }
+
+// Thumbcache returns a Windows 10/11 thumbnail cache (format 32) holding
+// two pictures: 482d656ee647f25e.jpg (300 bytes) and 9a1b2c3d4e5f6071.png
+// (200 bytes), and one entry without a picture.
+func Thumbcache() []byte {
+	le := binary.LittleEndian
+	var b []byte
+	b = append(b, "CMMM"...)
+	for _, v := range []uint32{32, 4, 0, 24, 3} {
+		b = le.AppendUint32(b, v)
+	}
+	add := func(id string, data []byte) {
+		var idb []byte
+		for _, c := range utf16.Encode([]rune(id)) {
+			idb = le.AppendUint16(idb, c)
+		}
+		pad := (8 - (56+len(idb))%8) % 8
+		e := make([]byte, 56)
+		copy(e, "CMMM")
+		le.PutUint32(e[4:], uint32(56+len(idb)+pad+len(data)))
+		le.PutUint32(e[16:], uint32(len(idb)))
+		le.PutUint32(e[20:], uint32(pad))
+		le.PutUint32(e[24:], uint32(len(data)))
+		b = append(append(append(append(b, e...), idb...), make([]byte, pad)...), data...)
+	}
+	jpg := append([]byte{0xFF, 0xD8, 0xFF, 0xE0}, make([]byte, 296)...)
+	png := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 192)...)
+	add("482d656ee647f25e", jpg)
+	add("77", nil)
+	add("9a1b2c3d4e5f6071", png)
+	return b
+}

@@ -90,6 +90,9 @@ func OpenSet(r io.ReaderAt, size int64, others []EWFSegment) (FS, error) {
 	if ewfIsSignature(r) {
 		return openEWF(r, size, others)
 	}
+	if head, err := readAt(r, 0, 24); err == nil && IsThumbcache(head) {
+		return openThumbcache(r, size)
+	}
 	if head, err := readAt(r, 0, 8); err == nil {
 		switch {
 		case string(head) == "vhdxfile":
@@ -115,6 +118,11 @@ func OpenSet(r io.ReaderAt, size int64, others []EWFSegment) (FS, error) {
 	}
 	// An optical disc first: many are also given a boot sector so they can
 	// start a computer from a USB stick, and would otherwise look like a disk.
+	// A disc with a UDF side is read through it: it holds files of any size,
+	// which ISO 9660 cannot; if it cannot be read, ISO 9660 is tried.
+	if fs, err := openUDFView(r, size); err == nil {
+		return fs, nil
+	}
 	if fs, err := openISO(r, size); err == nil {
 		return fs, nil
 	}

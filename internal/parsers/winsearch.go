@@ -212,6 +212,10 @@ func wsItem(ctx *Context, work int64, rec map[string]any, n *int) (string, error
 		}
 	}
 	fields["properties"] = props
+	// The thumbnail cache names a file's thumbnail by this, in hexadecimal.
+	if id, ok := rec["System.ThumbnailCacheId"].(uint64); ok && id != 0 {
+		fields["thumbnail_cache_id"] = fmt.Sprintf("%x", id)
+	}
 	ref := fmt.Sprintf("WorkId %d", work)
 	emit := func(t wsTime, typ, macb, cat, path, msg string) error {
 		s, ok := timeutil.FromFiletime(uint64(t))
@@ -340,6 +344,8 @@ func windowsSearchESE(ctx *Context, cat *ese.Catalog) (int, error) {
 					} else {
 						rec[name] = wsTime(binary.LittleEndian.Uint64(b))
 					}
+				} else if err == nil && len(x) == 16 && (name == "System.ThumbnailCacheId" || name == "System.Size") {
+					rec[name] = binary.LittleEndian.Uint64(b)
 				} else if x != "" {
 					rec[name] = x
 				}

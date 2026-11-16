@@ -48,6 +48,10 @@ const (
 	DefenderDH  = "defender-detection-record"
 	MozLz4      = "mozilla-lz4"
 	SNSS        = "chromium-session"
+	Thumbcache  = "thumbnail-cache"
+	ODL         = "onedrive-log"
+	ODLKeystore = "onedrive-keystore"
+	Picture     = "picture"
 	WMIRepo     = "wmi-repository"
 	USN         = "ntfs-usn-journal"
 	JumpList    = "jump-list-custom"
@@ -85,6 +89,8 @@ var sigs = []sig{
 	{0, []byte{0x37, 0x7F, 0x06, 0x83, 0x00, 0x2D, 0xE2, 0x18}, SQLiteWAL, "SQLite write-ahead log signature and format version 3007000 at offset 0"},
 	{4, []byte{0xEF, 0xCD, 0xAB, 0x89}, ESE, "ESE database signature at offset 4"},
 	{0, []byte("EVF\x09\x0d\x0a\xff\x00"), EWF, "Expert Witness Format signature at offset 0"},
+	{0, []byte("EBFGONED"), ODL, `OneDrive log signature "EBFGONED" at offset 0`},
+	{0, []byte("CMMM"), Thumbcache, `Windows thumbnail cache signature "CMMM" at offset 0`},
 	{0, []byte("SNSS"), SNSS, `Chromium session file signature "SNSS" at offset 0`},
 	{0, []byte("mozLz40\x00"), MozLz4, `Mozilla LZ4 signature "mozLz40" at offset 0`},
 	{0, []byte("vhdxfile"), VHDX, `signature "vhdxfile" at offset 0`},
@@ -130,6 +136,15 @@ func Identify(r io.ReaderAt, size int64) Result {
 	iso := make([]byte, 5)
 	if n, _ := r.ReadAt(iso, 32769); n == 5 && string(iso) == "CD001" {
 		return Result{ISO, `ISO 9660 signature "CD001" at offset 32769`}
+	} else if n == 5 && string(iso) == "BEA01" {
+		// A disc with only UDF: its recognition sequence begins BEA01 and
+		// names NSR02 or NSR03 in one of the next sectors.
+		nsr := make([]byte, 5)
+		for _, off := range []int64{34817, 36865} {
+			if k, _ := r.ReadAt(nsr, off); k == 5 && (string(nsr) == "NSR02" || string(nsr) == "NSR03") {
+				return Result{ISO, `UDF disc: "BEA01" at offset 32769 and "` + string(nsr) + `" after it`}
+			}
+		}
 	}
 	// A raw $MFT is a run of 1024-byte FILE records.
 	if len(head) >= 1028 && (bytes.HasPrefix(head, []byte("FILE")) || bytes.HasPrefix(head, []byte("BAAD"))) {
@@ -211,6 +226,12 @@ func Identify(r io.ReaderAt, size int64) Result {
 	}
 	if wmiRepository(r, size) {
 		return Result{WMIRepo, "WMI repository (OBJECTS.DATA): 8 KiB pages whose first megabyte holds many records that begin with a class-name hash, and WMI's system class names"}
+	}
+	if t := PictureType(head); t != "" {
+		return Result{Picture, t + " picture, by its signature"}
+	}
+	if odlKeystore(head) {
+		return Result{ODLKeystore, "OneDrive keystore: a JSON list of objects with CreatedTime, Key and Version"}
 	}
 	if len(head) >= 2 && head[0] == 0xFF && head[1] == 0xFE {
 		return Result{TextUTF16, "UTF-16 little-endian byte order mark"}
@@ -401,4 +422,38 @@ func wmiRepository(r io.ReaderAt, size int64) bool {
 		run = 0
 	}
 	return runs >= 8
+}
+
+// odlKeystore recognises OneDrive's general.keystore: a short JSON list whose
+// objects carry CreatedTime, Key and Version.
+func odlKeystore(head []byte) bool {
+	t := bytes.TrimPrefix(head, []byte("\xEF\xBB\xBF"))
+	if len(t) > 4096 || !bytes.HasPrefix(bytes.TrimSpace(t), []byte("[")) {
+		return false
+	}
+	return bytes.Contains(t, []byte(`"Key"`)) && bytes.Contains(t, []byte(`"Version"`)) && bytes.Contains(t, []byte(`"CreatedTime"`))
+}
+
+// PictureType names a raster picture by its first bytes: JPEG, PNG, GIF,
+// WebP or BMP, or "". Only these are ever shown in the browser; SVG, which
+// can carry script, is not among them.
+func PictureType(b []byte) string {
+	switch {
+	case len(b) >= 4 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF:
+		return "JPEG"
+	case bytes.HasPrefix(b, []byte("\x89PNG\r\n\x1a\n")):
+		return "PNG"
+	case bytes.HasPrefix(b, []byte("GIF87a")) || bytes.HasPrefix(b, []byte("GIF89a")):
+		return "GIF"
+	case len(b) >= 12 && string(b[:4]) == "RIFF" && string(b[8:12]) == "WEBP":
+		return "WebP"
+	case len(b) >= 18 && b[0] == 'B' && b[1] == 'M' && binary.LittleEndian.Uint32(b[6:]) == 0:
+		// "BM" alone is too weak: the reserved field must be zero and the
+		// header size one that BMP defines.
+		switch binary.LittleEndian.Uint32(b[14:]) {
+		case 12, 40, 52, 56, 108, 124:
+			return "BMP"
+		}
+	}
+	return ""
 }

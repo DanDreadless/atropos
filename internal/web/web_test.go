@@ -501,3 +501,39 @@ func TestSecondUploadIsANewBatch(t *testing.T) {
 		t.Errorf("%d events, want 6", len(all.Events))
 	}
 }
+
+// A picture in the case is shown in the browser, but only if its bytes are
+// a raster picture: an SVG or HTML file named like a picture is refused.
+func TestPicturesAreShownAndNothingElse(t *testing.T) {
+	h := start(t)
+	png := "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+	svg := `<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`
+	html := `<html><script>alert(1)</script></html>`
+	h.upload(map[string]string{"dot.png": png, "evil.png": svg, "page.jpg": html, "bm.txt": "BM not really a bitmap"}, "dot.png", "evil.png", "page.jpg", "bm.txt")
+	var list struct{ Evidence []store.Evidence }
+	h.get("/api/evidence", &list)
+	ids := map[string]int64{}
+	for _, e := range list.Evidence {
+		ids[e.Name] = e.ID
+		if e.Name == "dot.png" && e.Kind != "picture" {
+			t.Errorf("png kind %s", e.Kind)
+		}
+		if e.Name != "dot.png" && e.Kind == "picture" {
+			t.Errorf("%s detected as a picture", e.Name)
+		}
+	}
+	code, hdr, body := h.do("GET", fmt.Sprintf("/api/evidence/%d/picture", ids["dot.png"]), nil, nil)
+	if code != 200 || string(body) != png || hdr.Get("Content-Type") != "image/png" || hdr.Get("X-Content-Type-Options") != "nosniff" ||
+		!strings.Contains(hdr.Get("Content-Security-Policy"), "sandbox") || hdr.Get("Cache-Control") != "no-store" || !strings.HasPrefix(hdr.Get("Content-Disposition"), "inline;") {
+		t.Errorf("png: %d %v", code, hdr)
+	}
+	for _, n := range []string{"evil.png", "page.jpg", "bm.txt"} {
+		if code, hdr, _ := h.do("GET", fmt.Sprintf("/api/evidence/%d/picture", ids[n]), nil, nil); code != http.StatusUnsupportedMediaType || strings.HasPrefix(hdr.Get("Content-Type"), "image/") {
+			t.Errorf("%s: %d %s", n, code, hdr.Get("Content-Type"))
+		}
+	}
+	// Another site in the browser may not load it.
+	if code, _, _ := h.do("GET", fmt.Sprintf("/api/evidence/%d/picture", ids["dot.png"]), nil, map[string]string{"Sec-Fetch-Site": "cross-site"}); code != http.StatusForbidden {
+		t.Errorf("cross-site: %d", code)
+	}
+}

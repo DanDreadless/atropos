@@ -64,7 +64,7 @@ func imageVolumes(ctx *Context, fsys imagefs.FS) error {
 	}
 	fat, ext := imagefs.FATVolumes(fsys), imagefs.ExtVolumes(fsys)
 	if len(fat)+len(ext) == 0 {
-		ctx.Note("no FAT, exFAT or ext volume in this image to put on the timeline. Open it under Files to browse it and choose what goes on the timeline; for an NTFS partition, the Windows artefacts action copies out its file table")
+		ctx.Note("no FAT, exFAT or ext volume in this image to put on the timeline. Open it on the Images tab to browse it and choose what goes on the timeline; for an NTFS partition, the Windows artefacts action copies out its file table")
 		return nil
 	}
 	for _, v := range fat {

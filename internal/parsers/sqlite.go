@@ -26,7 +26,7 @@ type sqliteParser struct{}
 
 func (sqliteParser) Name() string { return "sqlite" }
 func (sqliteParser) Version() string {
-	return "7 (native, write-ahead log applied when one in the case fits: windows search index; chromium history with referrers, search terms, sync origin and download detail; firefox places with downloads; cookies, form values, saved logins without passwords, address-bar shortcuts, page icons, bookmarks)"
+	return "8 (native, write-ahead log applied when one in the case fits: windows search index; onedrive sync and SafeDelete databases; chromium history with referrers, search terms, sync origin and download detail; firefox places with downloads; cookies, form values, saved logins without passwords, address-bar shortcuts, page icons, bookmarks)"
 }
 
 // maxSideRows bounds the small tables read whole into memory (search terms,
@@ -120,6 +120,20 @@ func (sqliteParser) Parse(ctx *Context) error {
 		n, err := windowsSearch(ctx, db)
 		if err != nil {
 			ctx.Warn("windows search index: %v", err)
+		}
+		done += n
+	}
+	if tables["od_clientfile_records"] && tables["od_clientfolder_records"] {
+		n, err := oneDriveSync(ctx, db)
+		if err != nil {
+			ctx.Warn("onedrive sync database: %v", err)
+		}
+		done += n
+	}
+	if tables["filter_delete_info"] || tables["deletes_last_touched_by_sync_engine"] {
+		n, err := oneDriveSafeDelete(ctx, db)
+		if err != nil {
+			ctx.Warn("onedrive SafeDelete database: %v", err)
 		}
 		done += n
 	}

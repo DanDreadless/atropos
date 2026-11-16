@@ -76,7 +76,7 @@ func (ntfsParser) Parse(ctx *Context) (err error) {
 		}
 		items = ntfs.ParseMFTFile(bg, mft, ntfs.RangeSize(mft), nctx.ClusterSize, nctx.RecordSize)
 		records, recSize = mft, nctx.RecordSize
-		ctx.Note("volume image: the file table, the unused space of every directory index and the transaction log were read. Files inside the volume are added from the Files tab")
+		ctx.Note("volume image: the file table, the unused space of every directory index and the transaction log were read. Files inside the volume are added from the Images tab")
 		if err := volumeShadowCopies(ctx); err != nil {
 			return err
 		}

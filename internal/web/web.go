@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/DanDreadless/atropos/internal/analysis"
+	"github.com/DanDreadless/atropos/internal/detect"
 	"github.com/DanDreadless/atropos/internal/ingest"
 	"github.com/DanDreadless/atropos/internal/report"
 	"github.com/DanDreadless/atropos/internal/store"
@@ -118,6 +119,7 @@ func Handler(s *store.Store, in *ingest.Ingester, token string) http.Handler {
 	mux.HandleFunc("POST /api/evidence/reparse-stale", sv.reparseStale)
 	mux.HandleFunc("GET /api/evidence/{id}/browse", sv.browse)
 	mux.HandleFunc("POST /api/evidence/{id}/extract", sv.extract)
+	mux.HandleFunc("GET /api/evidence/{id}/picture", sv.picture)
 	mux.HandleFunc("GET /api/audit", sv.audit)
 	mux.HandleFunc("GET /api/facts", sv.facts)
 	mux.HandleFunc("GET /api/textsearch", sv.textSearch)
@@ -293,6 +295,48 @@ func (sv *server) browse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"describe": describe, "path": dir, "entries": entries})
+}
+
+// maxPicture bounds the size of a picture the browser is given.
+const maxPicture = 100 << 20
+
+// picture gives the browser an evidence item that is a raster picture, to
+// show it. The type comes from the stored bytes, not the name or the
+// recorded kind, and anything else is refused: no SVG, no HTML, nothing a
+// browser would run. The response may not be framed, run script or be kept.
+func (sv *server) picture(w http.ResponseWriter, r *http.Request) {
+	e, err := sv.s.GetEvidence(atoi(r.PathValue("id")))
+	if err != nil {
+		fail(w, 404, err)
+		return
+	}
+	if e.Size > maxPicture {
+		fail(w, http.StatusRequestEntityTooLarge, fmt.Errorf("the item is %d bytes; pictures over %d bytes are not shown", e.Size, maxPicture))
+		return
+	}
+	f, err := sv.in.V.Open(e.SHA256)
+	if err != nil {
+		fail(w, 404, err)
+		return
+	}
+	defer f.Close()
+	head := make([]byte, 32)
+	n, _ := io.ReadFull(f, head)
+	kind := detect.PictureType(head[:n])
+	mime := map[string]string{"JPEG": "image/jpeg", "PNG": "image/png", "GIF": "image/gif", "WebP": "image/webp", "BMP": "image/bmp"}[kind]
+	if mime == "" {
+		fail(w, http.StatusUnsupportedMediaType, fmt.Errorf("this item is not a picture Atropos shows (JPEG, PNG, GIF, WebP or BMP)"))
+		return
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		fail(w, 500, err)
+		return
+	}
+	w.Header().Set("Content-Type", mime)
+	w.Header().Set("Content-Length", fmt.Sprint(e.Size))
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="evidence-%d.%s"`, e.ID, strings.ToLower(kind)))
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	io.Copy(w, io.LimitReader(f, e.Size))
 }
 
 // extract copies chosen files out of an image and puts them on the timeline.

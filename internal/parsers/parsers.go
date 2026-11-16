@@ -121,6 +121,12 @@ func For(kind string) Parser {
 		return diskImageParser{}
 	case detect.SNSS:
 		return snssParser{}
+	case detect.Thumbcache:
+		return thumbcacheParser{}
+	case detect.ODL:
+		return odlParser{}
+	case detect.ODLKeystore:
+		return keystoreParser{}
 	case detect.MozLz4:
 		return mozLz4Parser{}
 	case detect.DefenderDH:

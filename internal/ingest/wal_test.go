@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"bytes"
 	"database/sql"
 	"fmt"
 	"os"
@@ -8,6 +9,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/DanDreadless/atropos/internal/imagefs/imagetest"
+	"github.com/DanDreadless/atropos/internal/store"
 
 	_ "modernc.org/sqlite"
 )
@@ -91,4 +95,27 @@ func TestDatabaseWithItsWriteAheadLog(t *testing.T) {
 			c2.verifyOK(t)
 		})
 	}
+}
+
+// A OneDrive log added before its keystore is read again, decrypted, when
+// the keystore arrives.
+func TestOneDriveLogThenKeystore(t *testing.T) {
+	log, ks := imagetest.OneDriveLog(bytes.Repeat([]byte{3}, 32), "Plans for the merger.docx")
+	dir := t.TempDir()
+	lp, kp := filepath.Join(dir, "SyncEngine.odl"), filepath.Join(dir, "general.keystore")
+	os.WriteFile(lp, log, 0o600)
+	os.WriteFile(kp, ks, 0o600)
+	c := newCase(t)
+	c.ingest(t, lp)
+	if rows, _ := c.s.Search(store.Query{Text: "merger"}); len(rows) != 0 {
+		t.Fatal("decrypted without a key")
+	}
+	c.ingest(t, kp)
+	if rows, _ := c.s.Search(store.Query{Text: "merger"}); len(rows) != 1 {
+		t.Errorf("not decrypted once the keystore arrived: %d", len(rows))
+	}
+	if k := c.byName(t, "general.keystore"); k.Kind != "onedrive-keystore" {
+		t.Errorf("keystore kind %s", k.Kind)
+	}
+	c.verifyOK(t)
 }

@@ -286,14 +286,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.waitForFunction((n) => document.getElementById('evcount').textContent === String(n), { timeout: 30000 }, before.ev + 1);
   await settled();
   ok(await summaryCount() === before.n, 'adding a disc image does not unpack it onto the timeline');
-  ok((await text('#imgcount')) === '2', 'both images (the NTFS volume added earlier and this disc) are counted on the Files tab');
+  ok((await text('#imgcount')) === '2', 'both images (the NTFS volume added earlier and this disc) are counted on the Images tab');
+  ok((await page.$eval('button[data-view="files"]', (b) => b.firstChild.textContent.trim())) === 'Images', 'the tab for looking inside images is called Images');
   await page.click('#nav [data-view=files]');
   await page.waitForSelector('#imgrows .frow');
   ok((await text('#imgdesc')).includes('NTFS') && (await page.$$eval('#imgrows .frow .fname', (els) => els.some((e) => e.textContent === '$MFT'))), 'an NTFS volume can be browsed too, down to its $MFT');
   const discValue = await page.$eval('#imgpick', (s) => [...s.options].find((o) => o.textContent.includes('disc.iso')).value);
   await page.select('#imgpick', discValue);
   await page.waitForFunction(() => document.getElementById('imgdesc').textContent.includes('ISO 9660'));
-  ok((await text('#imgdesc')).includes('ISO 9660'), 'Files says what the image is: ' + await text('#imgdesc'));
+  ok((await text('#imgdesc')).includes('ISO 9660'), 'Images says what the image is: ' + await text('#imgdesc'));
   const rowNames = () => page.$$eval('#imgrows .frow .fname', (els) => els.map((e) => e.textContent).join(' '));
   ok(await rowNames() === 'SUB/ APP.LOG NOTES.TXT', 'the image root is listed, folders first: ' + await rowNames());
   await page.click('#imgrows .frow.dir');
@@ -352,7 +353,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.waitForSelector('#imgrows .frow');
   await page.click('#imgshow');
   await page.waitForFunction(() => document.querySelector('#summary b').textContent === '3');
-  ok(!(await page.$eval('#view-timeline', (v) => v.hidden)) && (await page.$eval('#q', (i) => i.value)) === fromValue, 'the Files tab leads straight to the events of the image being browsed');
+  ok(!(await page.$eval('#view-timeline', (v) => v.hidden)) && (await page.$eval('#q', (i) => i.value)) === fromValue, 'the Images tab leads straight to the events of the image being browsed');
   await setQ('', before.n + 3);
 
   // ---- the evidence list can be re-ordered and thinned ----
@@ -472,6 +473,22 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const rep2 = await (await page.evaluate(async () => (await fetch('api/report?format=html')).text()));
   ok(rep2.includes('Hosts examined') && rep2.includes('PF3&lt;b&gt;ABC&lt;/b&gt;') && rep2.includes('4 minutes fast'), 'the case report carries the host details, escaped');
   await shot('17-details');
+  await page.goto(URL, { waitUntil: 'networkidle0' });
+
+  // ---- a picture is shown with its evidence ----
+  const pic = path.join(OUT, 'pixel.png');
+  fs.writeFileSync(pic, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4DwABAQEABRjYTgAAAABJRU5ErkJggg==', 'base64'));
+  const evBefore = Number(await text('#evcount'));
+  await (await page.$('#pickfiles')).uploadFile(pic);
+  await page.waitForFunction((n) => document.getElementById('evcount').textContent === String(n), { timeout: 30000 }, evBefore + 1);
+  await settled();
+  await page.click('#nav [data-view=evidence]');
+  await page.type('#evq', 'pixel.png');
+  await page.click('#evrows .erow');
+  await page.waitForSelector('#evrows .evdetail img.evpic');
+  await page.waitForFunction(() => { const i = document.querySelector('#evrows .evdetail img.evpic'); return i && i.complete; }, { timeout: 10000 });
+  ok(await page.$eval('#evrows .evdetail img.evpic', (i) => i.naturalWidth === 1 && i.getAttribute('src').endsWith('/picture')), 'a picture in the case is shown in its evidence detail');
+  await page.focus('#evq'); await page.keyboard.down('Control'); await page.keyboard.press('a'); await page.keyboard.up('Control'); await page.keyboard.press('Backspace');
   await page.goto(URL, { waitUntil: 'networkidle0' });
 
   // ---- narrow window ----

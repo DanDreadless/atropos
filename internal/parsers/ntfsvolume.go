@@ -128,7 +128,7 @@ func volumeLogFile(ctx *Context, vol *ntfs.NTFSContext, dirs map[int64]string) (
 }
 
 // volumeShadowCopies puts the making of each of the volume's shadow copies
-// on the timeline. Their contents are browsed on the Files tab.
+// on the timeline. Their contents are browsed on the Images tab.
 func volumeShadowCopies(ctx *Context) error {
 	copies, err := imagefs.ShadowCopies(ctx.File, ctx.Size)
 	if err != nil {
@@ -168,6 +168,6 @@ func emitShadowCopies(ctx *Context, copies []imagefs.ShadowCopy, where string) e
 		key, on = "vss."+where+".shadow_copies", "partition "+where
 	}
 	ctx.Fact(key, fmt.Sprint(len(copies)), "volume shadow copies listed in the volume's catalog")
-	ctx.Note("%d volume shadow copies are on %s: earlier states of it, which often still hold files since deleted. Each appears on the Files tab as a folder <shadow copy N> at the volume's root, to browse and copy files out of", len(copies), on)
+	ctx.Note("%d volume shadow copies are on %s: earlier states of it, which often still hold files since deleted. Each appears on the Images tab as a folder <shadow copy N> at the volume's root, to browse and copy files out of", len(copies), on)
 	return nil
 }

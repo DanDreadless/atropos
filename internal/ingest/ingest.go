@@ -244,6 +244,7 @@ func (in *Ingester) process(top []*store.Evidence) {
 	in.completeImages(leaves)
 	in.completeHives(leaves)
 	in.completeDatabases(leaves)
+	in.completeOneDriveLogs(leaves)
 }
 
 // completeHives parses a hive again when this submission brought one of
@@ -331,6 +332,33 @@ func (in *Ingester) completeDatabases(leaves []*store.Evidence) {
 			if err := in.Parse(e); err != nil {
 				in.S.Audit("parse.error", fmt.Sprintf("evidence:%d", e.ID), map[string]any{"error": err.Error()})
 			}
+		}
+	}
+}
+
+// completeOneDriveLogs parses OneDrive logs again when this submission
+// brought a keystore: it may be the one that decrypts them.
+func (in *Ingester) completeOneDriveLogs(leaves []*store.Evidence) {
+	arrived, keys := map[int64]bool{}, false
+	for _, e := range leaves {
+		arrived[e.ID] = true
+		keys = keys || e.Kind == detect.ODLKeystore && e.DuplicateOf == nil
+	}
+	if !keys {
+		return
+	}
+	all, err := in.S.ListEvidence()
+	if err != nil {
+		return
+	}
+	for i := range all {
+		e := &all[i]
+		if e.Kind != detect.ODL || arrived[e.ID] || e.DuplicateOf != nil || strings.Contains(e.Notes, "decrypted with the key") {
+			continue
+		}
+		in.setStatus(func(s *Status) { s.Current = e.Name })
+		if err := in.Parse(e); err != nil {
+			in.S.Audit("parse.error", fmt.Sprintf("evidence:%d", e.ID), map[string]any{"error": err.Error()})
 		}
 	}
 }
@@ -588,7 +616,7 @@ func (in *Ingester) Parse(e *store.Evidence) error {
 		}
 		carried = append([]string{fmt.Sprintf("dedicated parser %q (version %s) produced no events", p.Name(), p.Version())}, notes...)
 	} else if Browsable(e.Kind) {
-		carried = []string{"this is an image: open it under Files to browse its contents and choose what goes on the timeline"}
+		carried = []string{"this is an image: open it on the Images tab to browse its contents and choose what goes on the timeline"}
 	} else if e.Kind != detect.Unknown && e.Kind != detect.Empty && e.Kind != detect.PE {
 		carried = []string{fmt.Sprintf("recognised as %s; this version has no dedicated parser for it", e.Kind)}
 	}

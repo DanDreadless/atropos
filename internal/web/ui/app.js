@@ -636,6 +636,7 @@ function renderDetail({ event: e, evidence: ev, annotations, journal_folder: jf 
   }
   kids.push(h('h3', {}, 'Message'), h('pre', { class: 'msg' }, e.message));
 
+  if (ev.kind === 'picture') kids.push(h('h3', {}, 'Picture'), pictureOf(ev));
   kids.push(h('h3', {}, 'Where this came from'), kv([
     ['Location', e.record_ref],
     ['Evidence', h('button', { class: 'link', onclick: () => showEvidence(ev.id) }, `#${ev.id} ${ev.name}`)],
@@ -750,7 +751,7 @@ function renderEvidence() {
       h('span', { class: 'mono', title: e.sha256 }, e.sha256.slice(0, 12) + '…'),
       h('span', { class: 'notes', title: e.notes }, e.notes)));
     if (S.evOpen === e.id) {
-      out.push(h('div', { class: 'evdetail' }, kv([
+      out.push(h('div', { class: 'evdetail' }, e.kind === 'picture' ? pictureOf(e) : null, kv([
         ['Submitted as', e.origin],
         ['Identified as', `${e.kind}: ${e.detect_reason}`, true],
         ['SHA-256', e.sha256], ['SHA-1', e.sha1], ['MD5', e.md5],
@@ -800,6 +801,17 @@ function evidenceGroupSelect(e) {
   return sel;
 }
 
+// pictureOf shows an evidence item that is a picture. The server sends it
+// only if its bytes are a JPEG, PNG, GIF, WebP or BMP; if it refuses, the
+// space says why rather than showing a broken image.
+function pictureOf(ev) {
+  const img = h('img', { class: 'evpic', alt: `Evidence #${ev.id}, ${ev.name}`, src: `/api/evidence/${ev.id}/picture` });
+  const box = h('div', { class: 'picbox' }, img);
+  img.addEventListener('error', () => box.replaceChildren(h('div', { class: 'hint' }, 'This picture could not be shown.')));
+  img.addEventListener('click', (c) => { c.stopPropagation(); box.classList.toggle('big'); });
+  return box;
+}
+
 function showEvidence(id) {
   S.evOpen = id; S.evFilter = ''; $('evq').value = '';
   setView('evidence');
@@ -825,7 +837,7 @@ async function reparse(id) {
 }
 
 // ---- files: looking inside disk and disc images ----
-const IMAGE_KINDS = ['iso-image', 'disk-image', 'ntfs-volume-image', 'fat-volume-image', 'ext-volume-image', 'ewf-image', 'vhd-image', 'vhdx-image', 'vmdk-image'];
+const IMAGE_KINDS = ['iso-image', 'disk-image', 'ntfs-volume-image', 'fat-volume-image', 'ext-volume-image', 'thumbnail-cache', 'ewf-image', 'vhd-image', 'vhdx-image', 'vmdk-image'];
 const isImage = (e) => IMAGE_KINDS.includes(e.kind) && !e.duplicate_of;
 
 function renderImagePicker() {

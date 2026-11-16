@@ -2,9 +2,12 @@ package detect
 
 import (
 	"bytes"
+	"compress/gzip"
 	"github.com/DanDreadless/atropos/internal/imagefs/imagetest"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"unicode/utf16"
 )
@@ -76,6 +79,12 @@ func TestEverySignature(t *testing.T) {
 		{"exfat volume", imagetest.ExFAT()[:4096], FATVolume},
 		{"disk holding a fat volume", imagetest.MBR(imagetest.FAT16(), 0x0E)[:4096], MBRDisk},
 		{"ext4 volume", imagetest.Ext4()[:4096], ExtVolume},
+		{"jpeg", at(64, 0, "\xFF\xD8\xFF\xE0"), Picture},
+		{"png", at(64, 0, "\x89PNG\r\n\x1a\n"), Picture},
+		{"gif", at(64, 0, "GIF89a"), Picture},
+		{"webp", append([]byte("RIFF\x10\x00\x00\x00WEBPVP8 "), make([]byte, 40)...), Picture},
+		{"bmp", append([]byte("BM\x46\x00\x00\x00\x00\x00\x00\x00\x36\x00\x00\x00\x28\x00\x00\x00"), make([]byte, 40)...), Picture},
+		{"text starting BM", []byte("BMW service record, 2024-01-01 oil changed\n"), Text},
 		{"disk holding an ext4 volume", imagetest.MBR(imagetest.Ext4(), 0x83)[:4096], MBRDisk},
 		{"text", []byte("2024-01-01 12:00:00 service started\n"), Text},
 		{"text with bom", append([]byte{0xEF, 0xBB, 0xBF}, "hello, world\n"...), Text},
@@ -148,5 +157,19 @@ func TestSamplesIdentifiedByContent(t *testing.T) {
 	}
 	if found == 0 {
 		t.Skip("no sample artefacts; run scripts/fetch-testdata.sh")
+	}
+}
+
+// A disc with only UDF, as Windows' IMAPI2 writes one, is a disc image.
+func TestUDFOnlyDiscIsADiscImage(t *testing.T) {
+	f, err := os.Open("../imagefs/fixtures/udf250.iso.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	z, _ := gzip.NewReader(f)
+	b, _ := io.ReadAll(z)
+	if r := Identify(bytes.NewReader(b), int64(len(b))); r.Kind != ISO || !strings.Contains(r.Reason, "UDF") {
+		t.Errorf("%+v", r)
 	}
 }

@@ -26,7 +26,7 @@ import (
 
 // Browsable reports whether evidence of this kind can be looked inside.
 func Browsable(kind string) bool {
-	return kind == detect.ISO || kind == detect.MBRDisk || kind == detect.NTFSVolume || kind == detect.FATVolume || kind == detect.ExtVolume || kind == detect.EWF ||
+	return kind == detect.ISO || kind == detect.MBRDisk || kind == detect.NTFSVolume || kind == detect.FATVolume || kind == detect.ExtVolume || kind == detect.Thumbcache || kind == detect.EWF ||
 		kind == detect.VHD || kind == detect.VHDX || kind == detect.VMDK
 }
 
@@ -49,6 +49,9 @@ func (in *Ingester) segments(e *store.Evidence) []string {
 	case detect.SQLite:
 		// A database is offered every write-ahead log; its pages say which fits.
 		want = []string{detect.SQLiteWAL}
+	case detect.ODL:
+		// A OneDrive log is offered every keystore; the key that decrypts it fits.
+		want = []string{detect.ODLKeystore}
 	case detect.VHD, detect.VHDX:
 		want = []string{detect.VHD, detect.VHDX, detect.MBRDisk, detect.NTFSVolume, detect.FATVolume, detect.ExtVolume}
 	default:
@@ -101,6 +104,12 @@ var triagePatterns = []string{
 	"Users/*/AppData/Local/Microsoft/Windows/UsrClass.dat",
 	"Users/*/AppData/Local/Microsoft/Windows/UsrClass.dat.LOG*",
 	"Users/*/AppData/Roaming/Microsoft/Windows/Recent/**",
+	"Users/*/AppData/Local/Microsoft/Windows/Explorer/thumbcache_*.db",
+	"Users/*/AppData/Local/Microsoft/OneDrive/settings/*/SyncEngineDatabase.db",
+	"Users/*/AppData/Local/Microsoft/OneDrive/settings/*/SyncEngineDatabase.db-wal",
+	"Users/*/AppData/Local/Microsoft/OneDrive/settings/*/SafeDelete.db",
+	"Users/*/AppData/Local/Microsoft/OneDrive/settings/*/SafeDelete.db-wal",
+	"Users/*/AppData/Local/Microsoft/OneDrive/logs/**",
 	"Users/*/AppData/Roaming/Microsoft/Windows/PowerShell/PSReadLine/ConsoleHost_history.txt",
 	"Users/*/Documents/PowerShell_transcript.*.txt",
 	"ProgramData/Microsoft/Windows Defender/Support/MPLog-*.log",

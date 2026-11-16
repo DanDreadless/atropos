@@ -1,6 +1,8 @@
 package ingest
 
 import (
+	"compress/gzip"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,7 +61,7 @@ func TestBrowseAndExtractFromAnImage(t *testing.T) {
 			iso := testISO(t)
 			c.ingest(t, iso)
 			img := c.byName(t, "disc.iso")
-			if img.Kind != "iso-image" || img.Status != "generic" || !strings.Contains(img.Notes, "open it under Files") {
+			if img.Kind != "iso-image" || img.Status != "generic" || !strings.Contains(img.Notes, "open it on the Images tab") {
 				t.Fatalf("image: kind %s, status %s, notes %s", img.Kind, img.Status, img.Notes)
 			}
 			if n := len(c.evidence(t)); n != 1 {
@@ -329,6 +331,78 @@ func TestExtractFromAShadowCopy(t *testing.T) {
 			v := c.byName(t, "vss1")
 			if v.Size != 7 || !strings.HasSuffix(v.Origin, "vss.raw!/<shadow copy 2>/vss1") {
 				t.Errorf("copied out: %+v", v)
+			}
+			c.verifyOK(t)
+		})
+	}
+}
+
+// A thumbnail cache is browsed like an image, and a thumbnail copied out.
+func TestThumbnailCacheBrowsed(t *testing.T) {
+	for _, mode := range []string{"in-process", "isolated"} {
+		t.Run(mode, func(t *testing.T) {
+			c := newCase(t)
+			if mode == "isolated" {
+				c.isolate(t, "atropos-worker")
+			}
+			p := filepath.Join(t.TempDir(), "thumbcache_256.db")
+			if err := os.WriteFile(p, imagetest.Thumbcache(), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c.ingest(t, p)
+			tc := c.byName(t, "thumbcache_256.db")
+			if tc.Kind != "thumbnail-cache" || tc.Status != "parsed" || !strings.Contains(tc.Notes, "2 thumbnails") {
+				t.Fatalf("cache: %s %s %s", tc.Kind, tc.Status, tc.Notes)
+			}
+			if got := listNames(t, c, &tc, "/"); got != "482d656ee647f25e.jpg 9a1b2c3d4e5f6071.png" {
+				t.Errorf("listing: %s", got)
+			}
+			if hits, _ := c.s.SearchText("9a1b2c3d4e5f6071", 5); len(hits) != 1 {
+				t.Errorf("identifiers not searchable: %v", hits)
+			}
+			if _, err := c.in.Extract(&tc, []string{"/9a1b2c3d4e5f6071.png"}, false); err != nil {
+				t.Fatal(err)
+			}
+			if x := c.byName(t, "9a1b2c3d4e5f6071.png"); x.Size != 200 {
+				t.Errorf("copied out: %+v", x)
+			}
+			c.verifyOK(t)
+		})
+	}
+}
+
+// A disc with only UDF, written by Windows' IMAPI2, is browsed and a file
+// copied out of it.
+func TestUDFDiscBrowsed(t *testing.T) {
+	f, err := os.Open(filepath.Join("..", "imagefs", "fixtures", "udf250.iso.gz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	z, _ := gzip.NewReader(f)
+	disc, _ := io.ReadAll(z)
+	f.Close()
+	for _, mode := range []string{"in-process", "isolated"} {
+		t.Run(mode, func(t *testing.T) {
+			c := newCase(t)
+			if mode == "isolated" {
+				c.isolate(t, "atropos-worker")
+			}
+			p := filepath.Join(t.TempDir(), "disc.iso")
+			os.WriteFile(p, disc, 0o600)
+			c.ingest(t, p)
+			img := c.byName(t, "disc.iso")
+			describe, _, err := c.in.Browse(&img, "/")
+			if img.Kind != "iso-image" || err != nil || !strings.Contains(describe, "UDF 2.50") {
+				t.Fatalf("%s %q %v", img.Kind, describe, err)
+			}
+			if got := listNames(t, c, &img, "/Docs/Deep/Deeper"); got != "bottom.log" {
+				t.Errorf("deep folder: %s", got)
+			}
+			if _, err := c.in.Extract(&img, []string{"/Docs/Deep/Deeper/bottom.log"}, false); err != nil {
+				t.Fatal(err)
+			}
+			if b := c.byName(t, "bottom.log"); b.Size != 25 || b.EventCount != 1 {
+				t.Errorf("copied out: %+v", b)
 			}
 			c.verifyOK(t)
 		})

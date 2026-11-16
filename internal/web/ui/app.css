@@ -278,3 +278,8 @@ dialog p { margin: 6px 0; }
   .helpbody th { width: 40%; }
   .helpbody code { white-space: normal; }
 }
+
+/* An evidence item that is a picture, in the detail panel and the evidence list. */
+.picbox { margin: 6px 0 10px; }
+.picbox img.evpic { display: block; max-width: 100%; max-height: 320px; object-fit: contain; border: 1px solid var(--line, #ccc); background: repeating-conic-gradient(#ddd 0% 25%, #fff 0% 50%) 50% / 16px 16px; cursor: zoom-in; image-rendering: auto; }
+.picbox.big img.evpic { max-height: none; cursor: zoom-out; }
