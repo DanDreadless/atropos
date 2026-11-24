@@ -393,15 +393,30 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 			cl.account = a
 		}
 	}
-	// A service installed records no source. It is tied to the nearest share
-	// access or network logon on the same host, within the clustering time.
-	var untied []string
+	// A service installed, a task created, a program WMI or WinRM started:
+	// each records no source. It is tied to the nearest share access or
+	// network logon on the same host, within the clustering time, and when
+	// it names a person's account, only to one by that account.
+	var untied, local []string
 	for _, l := range loose {
+		acct := item(l.e, "account", "target")
 		var best *cluster
 		var bestD int64
 		for _, cl := range ins {
 			if cl.family != "smb" || cl.node != l.rec {
 				continue
+			}
+			if acct != "" {
+				same := false
+				for _, e := range cl.events {
+					if a := item(e, "account", "target"); a != "" && sameAccount(a, acct) {
+						same = true
+						break
+					}
+				}
+				if !same {
+					continue
+				}
 			}
 			var d int64
 			switch {
@@ -415,18 +430,40 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 			}
 		}
 		if best == nil {
-			untied = append(untied, fmt.Sprintf("%s on %s (event %d)", l.e.What, label(l.rec), l.e.EventID))
+			w := fmt.Sprintf("%s on %s (event %d)", l.e.What, label(l.rec), l.e.EventID)
+			// Tasks and programs WMI starts are made on the host itself
+			// all the time: one with no logon to tie it to is taken as
+			// local. Services and remote shells are named.
+			if v := item(l.e, "via", "object"); v == "task" || v == "wmi" {
+				local = append(local, w)
+			} else {
+				untied = append(untied, w)
+			}
 			continue
 		}
 		best.events = append(best.events, l.e)
 		best.kinds["exec"] = true
-		best.byTime = append(best.byTime, fmt.Sprintf("%s (event %d) records no source; it is tied to this connection by time alone", l.e.What, l.e.EventID))
+		if acct != "" {
+			best.byTime = append(best.byTime, fmt.Sprintf("%s (event %d) records no source; it is tied to this connection by time and by its account, %s", l.e.What, l.e.EventID, acct))
+		} else {
+			best.byTime = append(best.byTime, fmt.Sprintf("%s (event %d) records no source; it is tied to this connection by time alone", l.e.What, l.e.EventID))
+		}
 		sort.SliceStable(best.events, func(a, b int) bool { return best.events[a].TSUTC < best.events[b].TSUTC })
 	}
 	if len(untied) > 0 {
 		sort.Strings(untied)
-		c.notes = append(c.notes, fmt.Sprintf("%d remote-execution record%s had no network logon or share access within %s to say where %s came from, so %s not shown as connections: %s",
-			len(untied), plural(len(untied), "", "s"), fmtDur(connCluster), plural(len(untied), "it", "they"), plural(len(untied), "it is", "they are"), strings.Join(untied, "; ")))
+		c.notes = append(c.notes, fmt.Sprintf("%d remote-execution record%s had no network logon or share access within %s to say where %s came from, so %s not shown as %s: %s",
+			len(untied), plural(len(untied), "", "s"), fmtDur(connCluster), plural(len(untied), "it", "they"), plural(len(untied), "it is", "they are"), plural(len(untied), "a connection", "connections"), strings.Join(untied, "; ")))
+	}
+	if len(local) > 0 {
+		sort.Strings(local)
+		shown := local
+		more := ""
+		if len(shown) > 10 {
+			shown, more = shown[:10], fmt.Sprintf("; and %d more", len(local)-10)
+		}
+		c.notes = append(c.notes, fmt.Sprintf("%d scheduled task%s or program%s started by WMI under a person's account had no network logon by that account within %s, so %s taken as made on the host itself: %s%s",
+			len(local), plural(len(local), "", "s"), plural(len(local), "", "s"), fmtDur(connCluster), plural(len(local), "it is", "they are"), strings.Join(shown, "; "), more))
 	}
 	keep := ins[:0]
 	for _, cl := range ins {
@@ -468,14 +505,35 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		case "rdp":
 			return fmt.Sprintf("%s recorded a Remote Desktop logon from %s", label(cl.node), cl.why)
 		case "exec":
-			return fmt.Sprintf("%s recorded a service or task started remotely from %s", label(cl.node), cl.why)
+			// How, from the records with no source tied to it: one way
+			// named, or the general words.
+			vias := map[string]bool{}
+			for _, e := range cl.events {
+				if v := item(e, "via", "object"); v != "" {
+					vias[v] = true
+				}
+			}
+			words := "a service or task started remotely"
+			if len(vias) == 1 {
+				switch {
+				case vias["task"]:
+					words = "a scheduled task made remotely"
+				case vias["wmi"]:
+					words = "a program started remotely by WMI"
+				case vias["winrm"]:
+					words = "a remote management (WinRM) session"
+				}
+			} else if len(vias) > 1 {
+				words = "programs started remotely"
+			}
+			return fmt.Sprintf("%s recorded %s from %s", label(cl.node), words, cl.why)
 		}
 		return fmt.Sprintf("%s recorded share access from %s", label(cl.node), cl.why)
 	}
 	// details names the shares, services and programs an end involved.
 	details := func(cl *cluster) []string {
 		var out []string
-		for _, k := range []struct{ kind, words string }{{"share", "shares"}, {"service", "services installed"}, {"program", "programs"}} {
+		for _, k := range []struct{ kind, words string }{{"share", "shares"}, {"service", "services installed"}, {"task", "scheduled tasks"}, {"program", "programs"}} {
 			seen := map[string]bool{}
 			var vs []string
 			for _, e := range cl.events {
@@ -679,7 +737,7 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		rep.Notes = append(rep.Notes, "Some evidence is still being read for connections; open this again shortly for the full picture.")
 	}
 	rep.Notes = append(rep.Notes,
-		`Read so far: Remote Desktop (the client's log, RDPClient 1024 and 1102, and Security 4648 to TERMSRV on the computer connecting; Security 4624 type 10 or 12 and 4778, RemoteConnectionManager 1149, LocalSessionManager 21, 22 and 25, and RdpCoreTS 131 on the computer connected to); file shares (commands naming \\computer, from Security 4688 with command lines or Sysmon 1, and Security 4648 to cifs on the computer connecting; Security 5140 and 5145 on the computer connected to); and programs started remotely (PsExec, PAExec, RemCom and sc run against \\computer on the one; the service and task managers' pipes, PsExec's pipes, programs written to ADMIN$, services installed, System 7045 and Security 4697, on the other). Network logons (Security 4624 type 3) support these but are not shown alone: a domain controller or file server has thousands. WinRM and WMI are not read yet.`,
+		`Read so far: Remote Desktop (the client's log, RDPClient 1024 and 1102, and Security 4648 to TERMSRV on the computer connecting; Security 4624 type 10 or 12 and 4778, RemoteConnectionManager 1149, LocalSessionManager 21, 22 and 25, and RdpCoreTS 131 on the computer connected to); file shares (commands naming \\computer, from Security 4688 with command lines or Sysmon 1, and Security 4648 to cifs on the computer connecting; Security 5140 and 5145 on the computer connected to); and programs started remotely (on the computer connecting: PsExec, PAExec, RemCom, sc, at and schtasks against \\computer, wmic /node:, winrs -r:, schtasks /s, PowerShell remoting with -ComputerName, WinRM 6, and Security 4648 to RPCSS, WSMAN, or HTTP from PowerShell; on the computer connected to: the service and task managers' pipes, PsExec's pipes, programs written to ADMIN$, services installed (System 7045, Security 4697), scheduled tasks made or changed under a person's account (Security 4698, 4702), WinRM 91, the PowerShell remoting and winrs hosts and what they start, and programs WMI starts under a person's account). Network logons (Security 4624 type 3) support these but are not shown alone: a domain controller or file server has thousands. Records on the computer connected to that name no source are tied to a network logon or share access within two minutes, by the same account where they name one. Sysmon network connections (Sysmon 3) and DCOM are not read yet.`,
 		fmt.Sprintf("Ends are paired when each names the other and they are within %s once stated clock differences are taken off; strongly when within %s and with the same account. A pair is consistent with one connection, not proof of it.", fmtDur(connWindow), fmtDur(connStrong)))
 	return rep, nil
 }

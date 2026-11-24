@@ -1,7 +1,7 @@
 // Package lateraldemo writes a made-up set of Windows event logs from three
-// hosts that connect to each other by Remote Desktop, file shares and
-// PsExec: for trying the Connections view (scripts/mklateral) and for the
-// tests. No real machine, person or network is described: the domain is
+// hosts that connect to each other by Remote Desktop, file shares,
+// PsExec, PowerShell remoting, a remote scheduled task and WMI: for trying
+// the Connections view (scripts/mklateral) and for the tests. No real machine, person or network is described: the domain is
 // corp.example, and the addresses are private or documentation ranges.
 //
 // The story, in true time (UTC) on 20 November 2026:
@@ -14,7 +14,11 @@
 //	10:05  WS-ALICE -> 10.9.9.9        RDP     alice       (the source's side only)
 //	10:20  WS-ALICE -> DC01            service alice       (the target's side only)
 //	10:30  WS-ALICE -> DC01            RDP     alice       (the target's side only)
+//	10:50  WS-ALICE -> SRV-FILE01      WinRM   alice       (both ends: Invoke-Command)
 //	11:05  a service installed on SRV-FILE01 with nothing from the network near it
+//	11:20  SRV-FILE01 -> DC01          task    svc_backup  (both ends: schtasks /s)
+//	11:35  WS-ALICE -> DC01            WMI     alice       (both ends: wmic /node:)
+//	08:10  a task alice makes on her own workstation, taken as local
 //
 // WS-ALICE's clock is three minutes fast.
 package lateraldemo
@@ -67,6 +71,7 @@ const (
 	chLSM      = "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational"
 	chCore     = "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational"
 	chSystem   = "System"
+	chWinRM    = "Microsoft-Windows-WinRM/Operational"
 )
 
 var providers = map[string][2]string{
@@ -76,6 +81,7 @@ var providers = map[string][2]string{
 	chLSM:      {"Microsoft-Windows-TerminalServices-LocalSessionManager", "{5D896912-022D-40AA-A3A8-4FA5515C76D7}"},
 	chCore:     {"Microsoft-Windows-RemoteDesktopServices-RdpCoreTS", "{1139C61B-B549-4251-8ED3-27250A1EDEC8}"},
 	chSystem:   {"Service Control Manager", "{555908d1-a6d7-4695-8e1e-26931d2012f4}"},
+	chWinRM:    {"Microsoft-Windows-WinRM", "{A7975C8F-AC13-49F1-87DA-5A984A4AB417}"},
 }
 
 // log adds an event at true time t, written as h's clock showed it.
@@ -169,11 +175,29 @@ const userSID = "S-1-5-21-1004336348-1177238915-682003330-1104"
 // process is a program started on h by user, with its command line
 // (Security 4688, with command-line auditing on).
 func process(h *host, t time.Time, user, image, cmd string) {
+	processAs(h, t, user, image, cmd, `C:\Windows\System32\cmd.exe`, "-")
+}
+
+// processAs is a program started on h with the parent given, and the account
+// it runs as when that is not its creator (4688 names both from Windows 10).
+func processAs(h *host, t time.Time, user, image, cmd, parent, runAs string) {
+	td := "-"
+	if runAs != "-" {
+		td = domain
+	}
 	h.log(chSecurity, 4688, t, kv(
 		"SubjectUserSid", userSID, "SubjectUserName", user, "SubjectDomainName", domain, "SubjectLogonId", evtxw.Hex64(0x2f1c4),
 		"NewProcessId", evtxw.Hex64(0x1f30), "NewProcessName", image, "TokenElevationType", "%%1936", "ProcessId", evtxw.Hex64(0x1a10),
-		"CommandLine", cmd, "TargetUserSid", "S-1-0-0", "TargetUserName", "-", "TargetDomainName", "-", "TargetLogonId", evtxw.Hex64(0),
-		"ParentProcessName", `C:\Windows\System32\cmd.exe`, "MandatoryLabel", "S-1-16-12288"), nil)
+		"CommandLine", cmd, "TargetUserSid", "S-1-0-0", "TargetUserName", runAs, "TargetDomainName", td, "TargetLogonId", evtxw.Hex64(0),
+		"ParentProcessName", parent, "MandatoryLabel", "S-1-16-12288"), nil)
+}
+
+// task is h recording a scheduled task created by user (Security 4698).
+func task(h *host, t time.Time, user, name, command string) {
+	xml := `<?xml version="1.0" encoding="UTF-16"?>` + "\r\n" + `<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Actions Context="Author"><Exec><Command>` +
+		command + `</Command></Exec></Actions></Task>`
+	h.log(chSecurity, 4698, t, kv("SubjectUserSid", userSID, "SubjectUserName", user, "SubjectDomainName", domain, "SubjectLogonId", evtxw.Hex64(0x7d3e2),
+		"TaskName", name, "TaskContent", xml), nil)
 }
 
 // share is h recording user at fromIP connecting to a share (5140), or,
@@ -273,6 +297,36 @@ func Write(dir0 string) error {
 	// nothing from the network near it, so no connection.
 	service(file, at("11:05:00"), "BackupAgent", `"C:\Program Files\BackupAgent\agent.exe"`)
 
+	// 10:50 alice runs a command on the file server over PowerShell
+	// remoting (WinRM). The client logs the session it creates; the server
+	// logs the shell and the remoting host starting as her.
+	process(alice, at("10:50:05"), "alice", `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
+		`powershell.exe -NoProfile -Command "Invoke-Command -ComputerName SRV-FILE01 -ScriptBlock { Get-ChildItem D:\Shares }"`)
+	alice.log(chWinRM, 6, at("10:50:06"), kv("connection", "SRV-FILE01/wsman?PSVersion=5.1.19041.4648"), nil)
+	logon(file, at("10:50:06"), 3, "alice", "WS-ALICE", "10.1.1.20", 51022, nextLogon())
+	file.log(chWinRM, 91, at("10:50:07"), kv("resourceUri", "http://schemas.microsoft.com/powershell/Microsoft.PowerShell", "shellId", "{6A8F1C3B-2E4D-4F70-9B1A-5C3D2E1F0A9B}"), nil)
+	processAs(file, at("10:50:07"), "SRV-FILE01$", `C:\Windows\System32\wsmprovhost.exe`, `C:\Windows\system32\wsmprovhost.exe -Embedding`,
+		`C:\Windows\System32\svchost.exe`, "alice")
+
+	// 11:20 svc_backup, on the file server, makes a task on the domain
+	// controller with schtasks /s.
+	process(file, at("11:20:30"), "svc_backup", `C:\Windows\System32\schtasks.exe`,
+		`schtasks.exe /create /s DC01 /tn Cleanup /tr C:\Windows\Temp\cleanup.bat /sc once /st 23:00 /ru SYSTEM`)
+	logon(dc, at("11:20:31"), 3, "svc_backup", "SRV-FILE01", "10.1.1.50", 49910, nextLogon())
+	share(dc, at("11:20:31"), "svc_backup", "10.1.1.50", 49910, "IPC$", "", "atsvc", 0x12019f)
+	task(dc, at("11:20:32"), "svc_backup", `\Cleanup`, `C:\Windows\Temp\cleanup.bat`)
+
+	// 11:35 alice starts a program on the domain controller through WMI.
+	process(alice, at("11:35:40"), "alice", `C:\Windows\System32\wbem\WMIC.exe`,
+		`wmic /node:DC01 process call create "cmd.exe /c whoami > C:\Windows\Temp\w.txt"`)
+	logon(dc, at("11:35:41"), 3, "alice", "WS-ALICE", "10.1.1.20", 51130, nextLogon())
+	processAs(dc, at("11:35:42"), "DC01$", `C:\Windows\System32\cmd.exe`, `cmd.exe /c whoami > C:\Windows\Temp\w.txt`,
+		`C:\Windows\System32\wbem\WmiPrvSE.exe`, "alice")
+
+	// 08:10 A task alice makes on her own workstation: no network logon by
+	// her near it, so it is taken as local and named in the notes.
+	task(alice, at("08:10:00"), "alice", `\Backup reminder`, `C:\Users\alice\remind.cmd`)
+
 	// Ordinary network logons with nothing else: not connections.
 	logon(dc, at("08:40:00"), 3, "alice", "WS-ALICE", "10.1.1.20", 50001, nextLogon())
 	logon(dc, at("08:40:00"), 3, "SRV-FILE01$", "SRV-FILE01", "10.1.1.50", 50002, nextLogon())
@@ -284,6 +338,7 @@ func Write(dir0 string) error {
 		chLSM:      "Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx",
 		chCore:     "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS%4Operational.evtx",
 		chSystem:   "System.evtx",
+		chWinRM:    "Microsoft-Windows-WinRM%4Operational.evtx",
 	}
 	for _, h := range []*host{alice, file, dc} {
 		dir := filepath.Join(dir0, h.name)
@@ -312,7 +367,8 @@ func Write(dir0 string) error {
 
 const readme = `
 Made-up event logs from three hosts that connect to each other by Remote
-Desktop, a file share and PsExec (scripts/mklateral). Nothing here
+Desktop, a file share, PsExec, PowerShell remoting, a scheduled task and WMI
+(scripts/mklateral). Nothing here
 describes a real machine, person or network.
 
 1. Make a new case, and on the Details tab add three hosts:
@@ -337,10 +393,15 @@ describes a real machine, person or network.
    10:05  WS-ALICE -> 10.9.9.9        Remote Desktop  alice       source only
    10:20  WS-ALICE -> DC01            Remote service  alice       target only
    10:30  WS-ALICE -> DC01            Remote Desktop  alice       target only
+   10:50  WS-ALICE -> SRV-FILE01      WinRM           alice       both ends: strong
+   11:20  SRV-FILE01 -> DC01          Scheduled task  svc_backup  both ends: strong
+   11:35  WS-ALICE -> DC01            WMI             alice       both ends: strong
 
    Without WS-ALICE's clock difference stated, its connections are three
    minutes apart and pair only as "possible"; with it, the times agree to
    within seconds. A service installed on SRV-FILE01 at 11:05 with nothing
    from the network near it is named in the notes, not shown as a
-   connection.
+   connection, and so is a task alice made on her own workstation at 08:10.
+   The Connections tab's "Started remotely" filter shows PsExec, the
+   service, PowerShell remoting, the task and WMI together.
 `

@@ -20,11 +20,16 @@ import (
 // An act names the kind of connection and which end recorded it: "rdp-out"
 // on the computer connecting, "rdp-in" on the computer connected to; "smb-"
 // for a file share, "exec-" for a program started remotely (PsExec, a
-// service or task created over the network); "logon-in" for a network logon,
-// which only supports the others. WinRM, WMI, devices and hashes are to
+// service or task created over the network, WinRM, WMI); "logon-in" for a
+// network logon, which only supports the others. Devices and hashes are to
 // follow (the plan, H.2).
+//
+// A record of remote execution at the target that names no source (a
+// service installed, a task created, a program WMI started) carries a "via"
+// item saying how it was started: service, task, wmi or winrm. The analysis
+// ties it to a network logon by time, and by account where it names one.
 
-const observablesVersion = 2
+const observablesVersion = 3
 
 const observablesSchema = `
 CREATE TABLE IF NOT EXISTS observables (
@@ -35,7 +40,7 @@ CREATE TABLE IF NOT EXISTS observables (
   host        TEXT NOT NULL,      -- the event's host
   act         TEXT NOT NULL,      -- what the event shows: rdp-out, rdp-in, smb-in, exec-out, logon-in...
   what        TEXT NOT NULL,      -- the event, briefly: "RDP client connecting (1024)"
-  kind        TEXT NOT NULL,      -- ip, host, account, share, service, program
+  kind        TEXT NOT NULL,      -- ip, host, account, share, service, task, program, via
   value       TEXT NOT NULL,
   role        TEXT NOT NULL,      -- source, target, subject, object
   version     INTEGER NOT NULL
@@ -76,6 +81,7 @@ const (
 	chRCM      = "Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational"
 	chLSM      = "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational"
 	chCoreTS   = "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational"
+	chWinRM    = "Microsoft-Windows-WinRM/Operational"
 )
 
 // computeObservables takes the observables out of one sealed run.
@@ -88,7 +94,7 @@ func (s *Store) computeObservables(runID int64) error {
 	// them before any JSON is looked at.
 	rows, err := s.r.Query(`SELECT id, evidence_id, ts_utc, host, fields FROM events
 		WHERE run_id = ? AND source = 'evtx' AND category IN ('account', 'network', 'execution', 'persistence')
-		AND json_extract(fields, '$.channel') IN (?,?,?,?,?,?,?)`, runID, chSecurity, chRDPCli, chRCM, chLSM, chCoreTS, chSystem, chSysmon)
+		AND json_extract(fields, '$.channel') IN (?,?,?,?,?,?,?,?)`, runID, chSecurity, chRDPCli, chRCM, chLSM, chCoreTS, chSystem, chSysmon, chWinRM)
 	if err != nil {
 		return err
 	}
@@ -228,6 +234,21 @@ func observeEvent(oe *ObservedEvent, fieldsJSON string) bool {
 			oe.Act, oe.What = "rdp-out", "Explicit credentials for Remote Desktop (Security 4648)"
 		case "CIFS":
 			oe.Act, oe.What = "smb-out", "Explicit credentials for a file share (Security 4648)"
+		case "WSMAN":
+			oe.Act, oe.What = "exec-out", "Explicit credentials for remote management (WinRM, Security 4648)"
+		case "HTTP":
+			// HTTP is any web server; only the remote management clients
+			// make it remote management.
+			switch baseName(get("ProcessName")) {
+			case "powershell.exe", "pwsh.exe", "powershell_ise.exe", "winrs.exe", "wsmprovhost.exe":
+				oe.Act, oe.What = "exec-out", "Explicit credentials for remote management (WinRM, Security 4648)"
+			default:
+				return false
+			}
+		case "RPCSS":
+			// The remote activation of WMI and DCOM: wmic /node: and
+			// Invoke-WmiMethod -ComputerName with a user named.
+			oe.Act, oe.What = "exec-out", "Explicit credentials for remote WMI or DCOM (RPCSS, Security 4648)"
 		default:
 			return false
 		}
@@ -287,17 +308,67 @@ func observeEvent(oe *ObservedEvent, fieldsJSON string) bool {
 			account(get("SubjectDomainName"), get("SubjectUserName"), "target")
 		}
 		add("service", name, "object")
-	case chSecurity + "/4688", chSysmon + "/1":
-		image, user := get("NewProcessName"), ""
-		if f.EventID == "1" {
-			image, user = get("Image"), get("User")
-		} else if u := get("SubjectUserName"); u != "" && !strings.HasSuffix(u, "$") {
-			user = u
-			if d := get("SubjectDomainName"); d != "" {
-				user = d + `\` + u
+		add("via", "service", "object")
+	case chSecurity + "/4698", chSecurity + "/4702":
+		// A scheduled task created or changed. Like a service it records
+		// no source, and tasks are made locally all the time, so only those
+		// by a person's account are read; the analysis ties them to a
+		// network logon by the same account.
+		name, user := get("TaskName"), get("SubjectUserName")
+		if name == "" || !personAccount(user) {
+			return false
+		}
+		content := get("TaskContent")
+		oe.Act, oe.What = "exec-in", "Scheduled task created: "+name+" (Security 4698)"
+		if f.EventID == "4702" {
+			content = get("TaskContentNew")
+			oe.What = "Scheduled task changed: " + name + " (Security 4702)"
+		}
+		add("task", name, "object")
+		add("program", taskCommand(content), "object")
+		account(get("SubjectDomainName"), user, "target")
+		add("via", "task", "object")
+	case chWinRM + "/6":
+		// The client: "Creating WSMan Session. The connection string is:
+		// dc01/wsman?PSVersion=5.1".
+		conn := get("connection")
+		if conn == "" {
+			for _, v := range d {
+				if s := fieldString(v); strings.Contains(strings.ToLower(s), "wsman") {
+					conn = s
+					break
+				}
 			}
 		}
-		if !observeCommand(oe, image, get("CommandLine"), user, add) {
+		t := wsmanHost(conn)
+		if t == "" {
+			return false
+		}
+		oe.Act, oe.What = "exec-out", "Remote management session to "+t+" (WinRM 6)"
+		target(t)
+	case chWinRM + "/91":
+		// The server: a shell created. The record often carries nothing
+		// readable (its shell id fails to decode), so it is tied by time.
+		oe.Act, oe.What = "exec-in", "Remote management shell created (WinRM 91)"
+		add("via", "winrm", "object")
+	case chSecurity + "/4688", chSysmon + "/1":
+		image, parent, user := get("NewProcessName"), get("ParentProcessName"), ""
+		if f.EventID == "1" {
+			image, parent, user = get("Image"), get("ParentImage"), get("User")
+		} else {
+			// The new process's own account (Windows 10 on) before the
+			// creator's, which for a program WMI starts is the computer.
+			for _, p := range [][2]string{{"TargetDomainName", "TargetUserName"}, {"SubjectDomainName", "SubjectUserName"}} {
+				if u := get(p[1]); u != "" && !strings.HasSuffix(u, "$") {
+					user = u
+					if d := get(p[0]); d != "" {
+						user = d + `\` + u
+					}
+					break
+				}
+			}
+		}
+		if !observeCommand(oe, image, parent, get("CommandLine"), user, add) {
 			return false
 		}
 	default:
@@ -379,39 +450,72 @@ func writes(mask string) bool {
 }
 
 // observeCommand reads a process created (Security 4688 with its command
-// line, Sysmon 1) that names another computer: PsExec and its kind, or sc,
-// against \\name are remote execution; any other command naming \\name or
-// \\name\share (net use, copy, a program run from a share) is the share. The
-// PsExec service itself starting is remote execution seen at the target.
-func observeCommand(oe *ObservedEvent, image, cmd, user string, add func(string, string, string)) bool {
-	base := strings.ToLower(image)
-	if i := strings.LastIndexAny(base, `\/`); i >= 0 {
-		base = base[i+1:]
-	}
-	if base == "psexesvc.exe" {
+// line, Sysmon 1). At the computer connecting: a command that names another
+// computer, as PsExec and its kind, sc, at and schtasks do with \\name,
+// wmic with /node:, winrs with -r:, schtasks with /s and PowerShell's
+// remoting commands with -ComputerName, is remote execution; any other
+// command naming \\name or \\name\share (net use, copy, a program run from a
+// share) is the share. At the computer connected to: the PsExec service, the
+// PowerShell remoting and winrs hosts starting, and programs that WMI or
+// those hosts start, are remote execution with no source.
+func observeCommand(oe *ObservedEvent, image, parent, cmd, user string, add func(string, string, string)) bool {
+	base, pbase := baseName(image), baseName(parent)
+	switch {
+	case base == "psexesvc.exe":
 		oe.Act, oe.What = "exec-in", "PsExec service started (PSEXESVC.exe)"
-		add("program", image, "object")
-		return true
-	}
-	var target string
-	for _, s := range []string{image, cmd} {
-		if t := uncHosts(s); len(t) > 0 {
-			target = t[0]
-			break
+		add("via", "service", "object")
+	case base == "wsmprovhost.exe":
+		oe.Act, oe.What = "exec-in", "PowerShell remoting session started (wsmprovhost.exe)"
+		add("via", "winrm", "object")
+	case base == "winrshost.exe":
+		oe.Act, oe.What = "exec-in", "Remote shell host started (winrshost.exe)"
+		add("via", "winrm", "object")
+	case pbase == "wsmprovhost.exe" || pbase == "winrshost.exe":
+		oe.Act, oe.What = "exec-in", "Program started over remote management: "+base+" (by "+pbase+")"
+		add("via", "winrm", "object")
+	case pbase == "wmiprvse.exe":
+		// WMI starts programs for local software all the time; only those
+		// run as a person's account are read, and the analysis wants a
+		// network logon by that account.
+		if !personAccount(user) {
+			return false
 		}
+		oe.Act, oe.What = "exec-in", "Program started by WMI: "+base+" (by WmiPrvSE.exe)"
+		add("via", "wmi", "object")
+	default:
+		return observeCommandOut(oe, image, base, cmd, user, add)
 	}
-	if target == "" {
-		return false
+	if personAccount(user) {
+		add("account", user, "target")
 	}
+	add("program", image, "object")
+	return true
+}
+
+func observeCommandOut(oe *ObservedEvent, image, base, cmd, user string, add func(string, string, string)) bool {
 	prog := base
 	if prog == "" {
 		prog = "a program"
 	}
-	switch base {
-	case "psexec.exe", "psexec64.exe", "paexec.exe", "paexec64.exe", "remcom.exe", "sc.exe":
-		oe.Act, oe.What = "exec-out", `Program run against \\`+target+": "+prog
-	default:
-		oe.Act, oe.What = "smb-out", `Command naming \\`+target+": "+prog
+	target, how := remoteArg(base, cmd)
+	if target != "" {
+		oe.Act, oe.What = "exec-out", how+" "+target+": "+prog
+	} else {
+		for _, s := range []string{image, cmd} {
+			if t := uncHosts(s); len(t) > 0 {
+				target = t[0]
+				break
+			}
+		}
+		if target == "" {
+			return false
+		}
+		switch base {
+		case "psexec.exe", "psexec64.exe", "paexec.exe", "paexec64.exe", "remcom.exe", "sc.exe", "at.exe", "schtasks.exe", "wmic.exe", "winrs.exe":
+			oe.Act, oe.What = "exec-out", `Program run against \\`+target+": "+prog
+		default:
+			oe.Act, oe.What = "smb-out", `Command naming \\`+target+": "+prog
+		}
 	}
 	if ip, ok := normIP(target); ok {
 		add("ip", ip, "target")
@@ -424,6 +528,141 @@ func observeCommand(oe *ObservedEvent, image, cmd, user string, add func(string,
 	add("account", user, "subject")
 	add("program", image, "object")
 	return true
+}
+
+// remoteArg is the computer a remote management command names other than as
+// \\name, and how it is named: wmic /node:name, winrs -r:name, schtasks
+// /s name, and PowerShell's remoting and WMI commands with -ComputerName
+// name (or Enter-PSSession name).
+func remoteArg(base, cmd string) (target, how string) {
+	f := strings.Fields(cmd)
+	tok := func(i int) string { return strings.Trim(f[i], `"'`) }
+	pick := func(v string) string {
+		v = strings.Trim(v, `"'`)
+		if i := strings.IndexByte(v, ','); i >= 0 {
+			v = v[:i] // the first of several
+		}
+		v = strings.Trim(v, `"'`)
+		if v == "" || v == "." || strings.ContainsAny(v, "$@({*%") {
+			return "" // a variable, a list in a file, the local computer
+		}
+		if ip, ok := normIP(v); ok {
+			if isLoopbackIP(ip) {
+				return ""
+			}
+			return ip
+		}
+		return normHostName(v)
+	}
+	switch base {
+	case "wmic.exe":
+		for i := range f {
+			if t := tok(i); len(t) > 6 && strings.EqualFold(t[:6], "/node:") {
+				return pick(t[6:]), "WMI command against"
+			}
+		}
+	case "winrs.exe":
+		for i := range f {
+			t := tok(i)
+			lt := strings.ToLower(t)
+			for _, p := range []string{"-r:", "/r:", "-remote:", "/remote:"} {
+				if strings.HasPrefix(lt, p) {
+					return pick(wsmanHost(t[len(p):])), "Remote shell against"
+				}
+			}
+		}
+	case "schtasks.exe":
+		for i := 0; i+1 < len(f); i++ {
+			if strings.EqualFold(tok(i), "/s") {
+				return pick(strings.TrimLeft(tok(i+1), `\`)), "Scheduled task command against"
+			}
+		}
+	case "powershell.exe", "pwsh.exe", "powershell_ise.exe":
+		lc := strings.ToLower(cmd)
+		remote := false
+		for _, c := range []string{"invoke-command", "enter-pssession", "new-pssession", "invoke-wmimethod", "invoke-cimmethod", "new-cimsession"} {
+			if strings.Contains(lc, c) {
+				remote = true
+			}
+		}
+		if !remote {
+			return "", ""
+		}
+		for i := 0; i+1 < len(f); i++ {
+			lt := strings.ToLower(tok(i))
+			switch {
+			case lt == "-computername" || lt == "-cn":
+				return pick(tok(i + 1)), "PowerShell remoting to"
+			case strings.HasPrefix(lt, "-computername:"):
+				return pick(tok(i)[len("-computername:"):]), "PowerShell remoting to"
+			case lt == "enter-pssession" && !strings.HasPrefix(tok(i+1), "-"):
+				return pick(tok(i + 1)), "PowerShell remoting to"
+			}
+		}
+	}
+	return "", ""
+}
+
+// wsmanHost is the computer of a WinRM connection string: "dc01/wsman?...",
+// "http://10.0.0.5:5985/wsman", "https://[fe80::1]:5986/wsman".
+func wsmanHost(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	if i := strings.IndexAny(s, "/?"); i >= 0 {
+		s = s[:i]
+	}
+	if strings.HasPrefix(s, "[") {
+		if i := strings.IndexByte(s, ']'); i > 0 {
+			s = s[1:i]
+		}
+	} else if strings.Count(s, ":") == 1 {
+		s = s[:strings.IndexByte(s, ':')]
+	}
+	if ip, ok := normIP(s); ok {
+		if isLoopbackIP(ip) {
+			return ""
+		}
+		return ip
+	}
+	return normHostName(s)
+}
+
+// taskCommand is the first program a task's XML runs (<Command>).
+func taskCommand(xml string) string {
+	_, rest, ok := strings.Cut(xml, "<Command>")
+	if !ok {
+		return ""
+	}
+	cmd, _, _ := strings.Cut(rest, "</Command>")
+	return strings.TrimSpace(cmd)
+}
+
+// personAccount reports whether an account is a person's rather than the
+// computer's or a service's own.
+func personAccount(user string) bool {
+	if user == "" || strings.HasSuffix(user, "$") {
+		return false
+	}
+	u := user
+	if i := strings.LastIndexByte(u, '\\'); i >= 0 {
+		u = u[i+1:]
+	}
+	switch strings.ToUpper(u) {
+	case "SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE", "ANONYMOUS LOGON", "LOCALSYSTEM", "-":
+		return false
+	}
+	return true
+}
+
+// baseName is a path's last element in lower case.
+func baseName(p string) string {
+	p = strings.ToLower(strings.Trim(p, `" `))
+	if i := strings.LastIndexAny(p, `\/`); i >= 0 {
+		p = p[i+1:]
+	}
+	return p
 }
 
 // uncHosts lists the computers a command line names as \\name, in order,

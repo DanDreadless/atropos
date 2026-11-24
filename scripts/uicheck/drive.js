@@ -702,31 +702,31 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await settled();
   }
   await page.click('#nav [data-view=connections]');
-  await page.waitForFunction(() => document.querySelectorAll('#cnrows .cnrow').length >= 8, { timeout: 20000 }).catch(() => {});
+  await page.waitForFunction(() => document.querySelectorAll('#cnrows .cnrow').length >= 11, { timeout: 20000 }).catch(() => {});
   // The case holds another host from earlier checks, with no connections.
-  ok(/^8 connections \(4 seen at both ends\) between 4 hosts and 2 other computers or addresses: 5 remote desktop, 1 file share, 2 started remotely/.test(await text('#cnsummary')),
-    'the Connections tab finds the eight connections of three kinds: ' + await text('#cnsummary'));
-  ok(await count('.cngraph .cnnode') === 6 && await count('.cngraph .cnnode.host') === 4 && await count('.cngraph .cnedge') === 8 && await count('.cngraph .cnedge.strong') === 4,
+  ok(/^11 connections \(7 seen at both ends\) between 4 hosts and 2 other computers or addresses: 5 remote desktop, 1 file share, 5 started remotely/.test(await text('#cnsummary')),
+    'the Connections tab finds the eleven connections of three kinds: ' + await text('#cnsummary'));
+  ok(await count('.cngraph .cnnode') === 6 && await count('.cngraph .cnnode.host') === 4 && await count('.cngraph .cnedge') === 9 && await count('.cngraph .cnedge.strong') === 6,
     'the graph draws each host and address once, an arrow for each way and kind of connection, the paired ones strong');
-  ok((await page.$$eval('.cngraph .cncount', (t) => t.map((x) => x.textContent))).sort().join() === 'Exec 1,Exec 1,RDP 1,RDP 1,RDP 1,RDP 1,RDP 1,Share 1',
+  ok((await page.$$eval('.cngraph .cncount', (t) => t.map((x) => x.textContent))).sort().join() === 'Exec 1,Exec 2,Exec 2,RDP 1,RDP 1,RDP 1,RDP 1,RDP 1,Share 1',
     'each arrow is labelled with its kind and count');
   const cnText = await text('#cnrows');
   ok(cnText.includes('WS-ALICE → SRV-FILE01') && cnText.includes("after correcting WS-ALICE's clock (stated as 3 minutes ahead)") && cnText.includes('203.0.113.45 is not a host of this case') &&
     cnText.includes('services installed on DC01: PSEXESVC') && cnText.includes('shares on SRV-FILE01: Finance'),
     'each connection says why: the names, the clock correction, an address outside the case, the shares and services');
   ok((await page.$$eval('#cnrows .cnrow .anpath', (r) => r.map((x) => x.firstChild.textContent))).join() ===
-    '2026-11-20 08:55:10,2026-11-20 09:14:18,2026-11-20 09:22:30,2026-11-20 09:41:03,2026-11-20 09:48:10,2026-11-20 10:05:42,2026-11-20 10:20:00,2026-11-20 10:30:15', 'connections are listed in corrected time order');
+    '2026-11-20 08:55:10,2026-11-20 09:14:18,2026-11-20 09:22:30,2026-11-20 09:41:03,2026-11-20 09:48:10,2026-11-20 10:05:42,2026-11-20 10:20:00,2026-11-20 10:30:15,2026-11-20 10:50:05,2026-11-20 11:20:30,2026-11-20 11:35:40', 'connections are listed in corrected time order');
   await shot('18-connections-graph');
   await page.click('#cnkind [data-kind=exec]');
-  ok(/^2 connections \(started remotely\)/.test(await text('#cnsummary')) && await count('#cnrows .cnrow') === 2 && await count('.cngraph .cnedge') === 2 &&
-    (await text('#cnrows')).includes('PsExec'), 'the kind buttons show one kind at a time: ' + await text('#cnsummary'));
+  ok(/^5 connections \(started remotely\)/.test(await text('#cnsummary')) && await count('#cnrows .cnrow') === 5 && await count('.cngraph .cnedge') === 3 &&
+    (await text('#cnrows')).includes('PsExec') && (await text('#cnrows')).includes('Program started by WMI') && (await text('#cnrows')).includes('scheduled tasks on DC01: \\Cleanup'), 'the kind buttons show one kind at a time: ' + await text('#cnsummary'));
   await page.click('#cnkind [data-kind=""]');
   await page.evaluate(() => [...document.querySelectorAll('.cngraph .cnnode')].find((g) => g.textContent.endsWith('WS-ALICE')).dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 })));
   await page.evaluate(() => [...document.querySelectorAll('.cngraph .cnnode')].find((g) => g.textContent.endsWith('WS-ALICE')).dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 })));
-  await page.waitForFunction(() => document.querySelectorAll('#cnrows .cnrow').length === 5, { timeout: 5000 }).catch(() => {});
-  ok(await count('#cnrows .cnrow') === 5 && !(await page.$eval('#cnall', (b) => b.hidden)), 'picking a host lists only its connections, with a way back to all');
+  await page.waitForFunction(() => document.querySelectorAll('#cnrows .cnrow').length === 7, { timeout: 5000 }).catch(() => {});
+  ok(await count('#cnrows .cnrow') === 7 && !(await page.$eval('#cnall', (b) => b.hidden)), 'picking a host lists only its connections, with a way back to all');
   await page.click('#cnmode [data-mode=lanes]');
-  ok(await count('.cnlanes .cnconn') === 8 && await count('.cnlanes .cnconn.dim') === 3 && await count('.cnlanes .cnend.missing') === 4 && await count('.cnlanes .cnkindtag') === 8,
+  ok(await count('.cnlanes .cnconn') === 11 && await count('.cnlanes .cnconn.dim') === 4 && await count('.cnlanes .cnend.missing') === 4 && await count('.cnlanes .cnkindtag') === 11,
     "the lanes draw every connection in time with its kind, the picked host's in full, with a hollow end where nothing was recorded");
   await page.click('#cnall');
   await page.evaluate(() => [...document.querySelectorAll('#cnrows .cnrow')][1].querySelector('.cnactions button').click());

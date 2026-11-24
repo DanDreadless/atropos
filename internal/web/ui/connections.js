@@ -193,7 +193,25 @@ function drawGraph(box, r) {
     const bx = b.x - ((b.x - mx) / Math.hypot(b.x - mx, b.y - my)) * rb, by = b.y - ((b.y - my) / Math.hypot(b.x - mx, b.y - my)) * rb;
     // The label sits just outside its own curve, away from its siblings.
     const out = bend === 0 ? 0 : Math.sign(bend) * 14;
-    return { d: `M${ax},${ay} Q${mx},${my} ${bx},${by}`, lx: (ax + 2 * mx + bx) / 4 - (dy / d) * out, ly: (ay + 2 * my + by) / 4 + (dx / d) * out };
+    const side = bend < 0 ? -1 : 1;
+    return { d: `M${ax},${ay} Q${mx},${my} ${bx},${by}`, lx: (ax + 2 * mx + bx) / 4 - (dy / d) * out, ly: (ay + 2 * my + by) / 4 + (dx / d) * out,
+      nx: -(dy / d) * side, ny: (dx / d) * side };
+  };
+  // Labels that would overlap another are moved further out from their
+  // arrow, a step at a time, until they are clear.
+  const spreadLabels = () => {
+    const placed = [];
+    for (const x of edgeEls) {
+      const q = pathFor(x.e);
+      const wd = 7 * x.lbl.textContent.length, ht = 14;
+      let lx = q.lx, ly = q.ly;
+      for (const s of [0, 1, -1, 2, -2, 3, -3, 4]) {
+        lx = q.lx + q.nx * s * 14; ly = q.ly + q.ny * s * 14;
+        if (!placed.some((b) => Math.abs(b.x - lx) < (b.w + wd) / 2 && Math.abs(b.y - ly) < ht)) break;
+      }
+      placed.push({ x: lx, y: ly, w: wd });
+      x.lbl.setAttribute('x', lx); x.lbl.setAttribute('y', ly - 4);
+    }
   };
   for (const e of edges) {
     const kind = e.strong ? 'strong' : e.possible ? 'possible' : 'oneend';
@@ -212,6 +230,7 @@ function drawGraph(box, r) {
     edgeEls.push({ e, path, hit, lbl });
     svg.append(path, hit, lbl);
   }
+  spreadLabels();
   const conns = kindConns();
   for (const n of r.nodes) {
     const p = at[n.id];
@@ -238,8 +257,8 @@ function drawGraph(box, r) {
         if (x.e.from !== n.id && x.e.to !== n.id) continue;
         const q = pathFor(x.e);
         x.path.setAttribute('d', q.d); x.hit.setAttribute('d', q.d);
-        x.lbl.setAttribute('x', q.lx); x.lbl.setAttribute('y', q.ly - 4);
       }
+      spreadLabels();
     });
     g.addEventListener('pointerup', (ev) => { const moved = drag && drag.moved; drag = null; ev.stopPropagation(); if (!moved) pickConn(on ? null : { node: n.id }); });
     g.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') pickConn(on ? null : { node: n.id }); });
