@@ -1,19 +1,23 @@
-// Package rdpdemo writes a made-up set of Windows event logs from three
-// hosts that connect to each other by Remote Desktop: for trying the
-// Connections view (scripts/mkrdp) and for the tests. No real machine,
-// person or network is described: the domain is corp.example, and the
-// addresses are private or documentation ranges.
+// Package lateraldemo writes a made-up set of Windows event logs from three
+// hosts that connect to each other by Remote Desktop, file shares and
+// PsExec: for trying the Connections view (scripts/mklateral) and for the
+// tests. No real machine, person or network is described: the domain is
+// corp.example, and the addresses are private or documentation ranges.
 //
 // The story, in true time (UTC) on 20 November 2026:
 //
-//	08:55  203.0.113.45 -> SRV-FILE01  svc_backup  (the target's side only)
-//	09:14  WS-ALICE -> SRV-FILE01      alice       (both ends)
-//	09:41  SRV-FILE01 -> DC01          svc_backup  (both ends)
-//	10:05  WS-ALICE -> 10.9.9.9        alice       (the source's side only)
-//	10:30  WS-ALICE -> DC01            alice       (the target's side only)
+//	08:55  203.0.113.45 -> SRV-FILE01  RDP     svc_backup  (the target's side only)
+//	09:14  WS-ALICE -> SRV-FILE01      RDP     alice       (both ends)
+//	09:22  WS-ALICE -> SRV-FILE01      share   alice       (both ends: net use, 5140)
+//	09:41  SRV-FILE01 -> DC01          RDP     svc_backup  (both ends)
+//	09:48  SRV-FILE01 -> DC01          PsExec  svc_backup  (both ends)
+//	10:05  WS-ALICE -> 10.9.9.9        RDP     alice       (the source's side only)
+//	10:20  WS-ALICE -> DC01            service alice       (the target's side only)
+//	10:30  WS-ALICE -> DC01            RDP     alice       (the target's side only)
+//	11:05  a service installed on SRV-FILE01 with nothing from the network near it
 //
 // WS-ALICE's clock is three minutes fast.
-package rdpdemo
+package lateraldemo
 
 import (
 	"fmt"
@@ -62,6 +66,7 @@ const (
 	chRCM      = "Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational"
 	chLSM      = "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational"
 	chCore     = "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational"
+	chSystem   = "System"
 )
 
 var providers = map[string][2]string{
@@ -70,6 +75,7 @@ var providers = map[string][2]string{
 	chRCM:      {"Microsoft-Windows-TerminalServices-RemoteConnectionManager", "{C76BAA63-AE81-421C-B425-340B4B24157F}"},
 	chLSM:      {"Microsoft-Windows-TerminalServices-LocalSessionManager", "{5D896912-022D-40AA-A3A8-4FA5515C76D7}"},
 	chCore:     {"Microsoft-Windows-RemoteDesktopServices-RdpCoreTS", "{1139C61B-B549-4251-8ED3-27250A1EDEC8}"},
+	chSystem:   {"Service Control Manager", "{555908d1-a6d7-4695-8e1e-26931d2012f4}"},
 }
 
 // log adds an event at true time t, written as h's clock showed it.
@@ -158,6 +164,36 @@ func rdpOut(h *host, t time.Time, localUser, user, target, targetIP string) {
 	}
 }
 
+const userSID = "S-1-5-21-1004336348-1177238915-682003330-1104"
+
+// process is a program started on h by user, with its command line
+// (Security 4688, with command-line auditing on).
+func process(h *host, t time.Time, user, image, cmd string) {
+	h.log(chSecurity, 4688, t, kv(
+		"SubjectUserSid", userSID, "SubjectUserName", user, "SubjectDomainName", domain, "SubjectLogonId", evtxw.Hex64(0x2f1c4),
+		"NewProcessId", evtxw.Hex64(0x1f30), "NewProcessName", image, "TokenElevationType", "%%1936", "ProcessId", evtxw.Hex64(0x1a10),
+		"CommandLine", cmd, "TargetUserSid", "S-1-0-0", "TargetUserName", "-", "TargetDomainName", "-", "TargetLogonId", evtxw.Hex64(0),
+		"ParentProcessName", `C:\Windows\System32\cmd.exe`, "MandatoryLabel", "S-1-16-12288"), nil)
+}
+
+// share is h recording user at fromIP connecting to a share (5140), or,
+// with rel, checking an object on it (5145) with the access mask given.
+func share(h *host, t time.Time, user, fromIP string, port int, name, local, rel string, mask uint32) {
+	data := kv("SubjectUserSid", userSID, "SubjectUserName", user, "SubjectDomainName", domain, "SubjectLogonId", evtxw.Hex64(0x6c2a1),
+		"ObjectType", "File", "IpAddress", fromIP, "IpPort", fmt.Sprint(port), "ShareName", `\\*\`+name, "ShareLocalPath", local)
+	if rel == "" {
+		h.log(chSecurity, 5140, t, append(data, kv("AccessMask", uint32(1), "AccessList", "%%4416")...), nil)
+		return
+	}
+	h.log(chSecurity, 5145, t, append(data, kv("RelativeTargetName", rel, "AccessMask", mask, "AccessList", "%%4416", "AccessReason", "-")...), nil)
+}
+
+// service is h installing a service (System 7045).
+func service(h *host, t time.Time, name, image string) {
+	h.log(chSystem, 7045, t, kv("ServiceName", name, "ImagePath", image, "ServiceType", "user mode service",
+		"StartType", "demand start", "AccountName", "LocalSystem"), nil)
+}
+
 // background is ordinary activity, so the RDP events are not alone.
 func background(h *host, user string) {
 	for i, hhmm := range []string{"07:58:12", "08:30:00", "09:00:00", "09:30:00", "10:00:00", "10:30:00", "11:00:00"} {
@@ -206,12 +242,48 @@ func Write(dir0 string) error {
 	// or another program was used).
 	rdpIn(dc, at("10:30:15"), at("10:44:00"), "alice", "WS-ALICE", "10.1.1.20", 50990, "3")
 
+	// 09:22 alice maps the file server's Finance share and opens a file.
+	process(alice, at("09:22:30"), "alice", `C:\Windows\System32\net.exe`, `net  use F: \\SRV-FILE01\Finance /persistent:no`)
+	logon(file, at("09:22:31"), 3, "alice", "WS-ALICE", "10.1.1.20", 50710, nextLogon())
+	share(file, at("09:22:31"), "alice", "10.1.1.20", 50710, "Finance", `\??\D:\Shares\Finance`, "", 0)
+	share(file, at("09:23:02"), "alice", "10.1.1.20", 50710, "Finance", `\??\D:\Shares\Finance`, `Q4\budget.xlsx`, 0x120089)
+
+	// 09:48 svc_backup runs PsExec on the file server against the domain
+	// controller: it copies its service to ADMIN$, installs and starts it,
+	// and talks to it over named pipes.
+	process(file, at("09:48:10"), "svc_backup", `C:\Tools\PsExec64.exe`, `PsExec64.exe \\DC01 -accepteula -s cmd.exe`)
+	logon(dc, at("09:48:11"), 3, "svc_backup", "SRV-FILE01", "10.1.1.50", 49801, nextLogon())
+	share(dc, at("09:48:11"), "svc_backup", "10.1.1.50", 49801, "ADMIN$", `\??\C:\Windows`, "", 0)
+	share(dc, at("09:48:11"), "svc_backup", "10.1.1.50", 49801, "ADMIN$", `\??\C:\Windows`, "PSEXESVC.exe", 0x120196)
+	share(dc, at("09:48:12"), "svc_backup", "10.1.1.50", 49801, "IPC$", "", "svcctl", 0x12019f)
+	service(dc, at("09:48:12"), "PSEXESVC", `%SystemRoot%\PSEXESVC.exe`)
+	share(dc, at("09:48:13"), "svc_backup", "10.1.1.50", 49801, "IPC$", "", "PSEXESVC-SRV-FILE01-4312-stdin", 0x12019f)
+	share(dc, at("09:48:13"), "svc_backup", "10.1.1.50", 49801, "IPC$", "", "PSEXESVC-SRV-FILE01-4312-stdout", 0x12019f)
+	share(dc, at("09:48:13"), "svc_backup", "10.1.1.50", 49801, "IPC$", "", "srvsvc", 0x12019f) // ordinary: not read
+
+	// 10:20 From alice's address, a program is copied to the domain
+	// controller's ADMIN$ and installed as a service. Her workstation has no
+	// record of it (no command was logged there).
+	logon(dc, at("10:20:00"), 3, "alice", "WS-ALICE", "10.1.1.20", 50912, nextLogon())
+	share(dc, at("10:20:01"), "alice", "10.1.1.20", 50912, "ADMIN$", `\??\C:\Windows`, "updsvc.exe", 0x120196)
+	share(dc, at("10:20:02"), "alice", "10.1.1.20", 50912, "IPC$", "", "svcctl", 0x12019f)
+	service(dc, at("10:20:03"), "UpdSvc", `%SystemRoot%\updsvc.exe`)
+
+	// 11:05 An agent installed on the file server from its own console:
+	// nothing from the network near it, so no connection.
+	service(file, at("11:05:00"), "BackupAgent", `"C:\Program Files\BackupAgent\agent.exe"`)
+
+	// Ordinary network logons with nothing else: not connections.
+	logon(dc, at("08:40:00"), 3, "alice", "WS-ALICE", "10.1.1.20", 50001, nextLogon())
+	logon(dc, at("08:40:00"), 3, "SRV-FILE01$", "SRV-FILE01", "10.1.1.50", 50002, nextLogon())
+
 	names := map[string]string{
 		chSecurity: "Security.evtx",
 		chClient:   "Microsoft-Windows-TerminalServices-RDPClient%4Operational.evtx",
 		chRCM:      "Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Operational.evtx",
 		chLSM:      "Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx",
 		chCore:     "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS%4Operational.evtx",
+		chSystem:   "System.evtx",
 	}
 	for _, h := range []*host{alice, file, dc} {
 		dir := filepath.Join(dir0, h.name)
@@ -239,7 +311,8 @@ func Write(dir0 string) error {
 }
 
 const readme = `
-Made-up Remote Desktop logs from three hosts (scripts/mkrdp). Nothing here
+Made-up event logs from three hosts that connect to each other by Remote
+Desktop, a file share and PsExec (scripts/mklateral). Nothing here
 describes a real machine, person or network.
 
 1. Make a new case, and on the Details tab add three hosts:
@@ -255,14 +328,19 @@ describes a real machine, person or network.
 
 3. Open the Connections tab. It should show, on 20 November 2026 (UTC):
 
-   08:55  203.0.113.45 -> SRV-FILE01   svc_backup   seen on the target only
-                                        (an address outside the case)
-   09:14  WS-ALICE -> SRV-FILE01        alice        both ends: strong
-   09:41  SRV-FILE01 -> DC01            svc_backup   both ends: strong
-   10:05  WS-ALICE -> 10.9.9.9          alice        seen on the source only
-   10:30  WS-ALICE -> DC01              alice        seen on the target only
+   08:55  203.0.113.45 -> SRV-FILE01  Remote Desktop  svc_backup  target only
+                                      (an address outside the case)
+   09:14  WS-ALICE -> SRV-FILE01      Remote Desktop  alice       both ends: strong
+   09:22  WS-ALICE -> SRV-FILE01      File share      alice       both ends: strong
+   09:41  SRV-FILE01 -> DC01          Remote Desktop  svc_backup  both ends: strong
+   09:48  SRV-FILE01 -> DC01          PsExec          svc_backup  both ends: strong
+   10:05  WS-ALICE -> 10.9.9.9        Remote Desktop  alice       source only
+   10:20  WS-ALICE -> DC01            Remote service  alice       target only
+   10:30  WS-ALICE -> DC01            Remote Desktop  alice       target only
 
-   Without WS-ALICE's clock difference stated, the 09:14 connection is
-   three minutes apart and pairs only as "possible"; with it, the times
-   agree to within seconds.
+   Without WS-ALICE's clock difference stated, its connections are three
+   minutes apart and pair only as "possible"; with it, the times agree to
+   within seconds. A service installed on SRV-FILE01 at 11:05 with nothing
+   from the network near it is named in the notes, not shown as a
+   connection.
 `

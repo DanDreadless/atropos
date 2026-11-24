@@ -352,6 +352,10 @@ dialog p { margin: 6px 0; }
 .cnhit { fill: none; stroke: transparent; stroke-width: 14; cursor: pointer; }
 .cnhit:focus-visible { stroke: var(--accent-bg); }
 .cncount { font-size: 11px; fill: var(--dim); text-anchor: middle; font-family: var(--mono); pointer-events: none; }
+.cnkindtag { font-size: 10px; fill: var(--dim); font-family: var(--mono); pointer-events: none; }
+.cnkeytags { font-family: var(--mono); }
+.chip.static.cnkind { font-size: 11px; }
+#cnkind { margin-left: 8px; }
 .cnnode { cursor: pointer; }
 .cnnode circle { fill: var(--panel); stroke: var(--faint); stroke-width: 1.5; }
 .cnnode.host circle { fill: var(--accent-bg); stroke: var(--accent); stroke-width: 2.5; }

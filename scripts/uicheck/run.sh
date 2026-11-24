@@ -41,7 +41,7 @@ TOKEN="$(grep -o 'token=[0-9a-f]*' "$WORK/serve.log" | head -1 | cut -d= -f2)"
 
 native() { if command -v cygpath >/dev/null; then cygpath -m "$1"; else echo "$1"; fi; }
 (cd "$ROOT" && go run ./scripts/uicheck/mkiso "$OUT/disc.iso") || exit 1
-(cd "$ROOT" && go run ./scripts/mkrdp -out "$OUT/rdp" >/dev/null) || exit 1
+(cd "$ROOT" && go run ./scripts/mklateral -out "$OUT/lateral" >/dev/null) || exit 1
 cd "$HERE" && ATROPOS_URL="http://127.0.0.1:$PORT/" ATROPOS_TOKEN="$TOKEN" ATROPOS_URL2="http://127.0.0.1:$((PORT+1))/" ATROPOS_TOKEN2="$TOKEN2" BROWSER="$(native "$BROWSER")" TESTDATA="$(native "$ROOT/testdata")" OUT="$(native "$OUT")" node drive.js </dev/null
 rc=$?
 echo "screenshots: $OUT"

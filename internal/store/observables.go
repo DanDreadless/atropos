@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"strconv"
 	"strings"
 )
 
@@ -16,11 +17,14 @@ import (
 // from a sealed run, never change, and are rebuilt under a new version when
 // how they are taken changes.
 //
-// So far only Remote Desktop is read (act "rdp-out" on the computer
-// connecting, "rdp-in" on the computer connected to); SMB, PsExec, WinRM,
-// devices and hashes are to follow (the plan, H.2).
+// An act names the kind of connection and which end recorded it: "rdp-out"
+// on the computer connecting, "rdp-in" on the computer connected to; "smb-"
+// for a file share, "exec-" for a program started remotely (PsExec, a
+// service or task created over the network); "logon-in" for a network logon,
+// which only supports the others. WinRM, WMI, devices and hashes are to
+// follow (the plan, H.2).
 
-const observablesVersion = 1
+const observablesVersion = 2
 
 const observablesSchema = `
 CREATE TABLE IF NOT EXISTS observables (
@@ -29,11 +33,11 @@ CREATE TABLE IF NOT EXISTS observables (
   evidence_id INTEGER NOT NULL,
   ts_utc      INTEGER NOT NULL,
   host        TEXT NOT NULL,      -- the event's host
-  act         TEXT NOT NULL,      -- what the event shows: rdp-out, rdp-in
+  act         TEXT NOT NULL,      -- what the event shows: rdp-out, rdp-in, smb-in, exec-out, logon-in...
   what        TEXT NOT NULL,      -- the event, briefly: "RDP client connecting (1024)"
-  kind        TEXT NOT NULL,      -- ip, host, account
+  kind        TEXT NOT NULL,      -- ip, host, account, share, service, program
   value       TEXT NOT NULL,
-  role        TEXT NOT NULL,      -- source, target, subject
+  role        TEXT NOT NULL,      -- source, target, subject, object
   version     INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS observables_run ON observables(run_id, version);
@@ -63,8 +67,10 @@ type ObservedEvent struct {
 	Items      []Observable `json:"items"`
 }
 
-// Channels read for Remote Desktop.
+// Channels read.
 const (
+	chSystem   = "System"
+	chSysmon   = "Microsoft-Windows-Sysmon/Operational"
 	chSecurity = "Security"
 	chRDPCli   = "Microsoft-Windows-TerminalServices-RDPClient/Operational"
 	chRCM      = "Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational"
@@ -81,8 +87,8 @@ func (s *Store) computeObservables(runID int64) error {
 	// Only event-log records of the channels read; the category narrows
 	// them before any JSON is looked at.
 	rows, err := s.r.Query(`SELECT id, evidence_id, ts_utc, host, fields FROM events
-		WHERE run_id = ? AND source = 'evtx' AND category IN ('account', 'network')
-		AND json_extract(fields, '$.channel') IN (?,?,?,?,?)`, runID, chSecurity, chRDPCli, chRCM, chLSM, chCoreTS)
+		WHERE run_id = ? AND source = 'evtx' AND category IN ('account', 'network', 'execution', 'persistence')
+		AND json_extract(fields, '$.channel') IN (?,?,?,?,?,?,?)`, runID, chSecurity, chRDPCli, chRCM, chLSM, chCoreTS, chSystem, chSysmon)
 	if err != nil {
 		return err
 	}
@@ -182,6 +188,23 @@ func observeEvent(oe *ObservedEvent, fieldsJSON string) bool {
 	case chSecurity + "/4624":
 		switch get("LogonType") {
 		case "10", "12": // remote interactive; cached remote interactive
+		case "3":
+			// A network logon: by itself it says only that something
+			// authenticated from there, so it supports the other acts.
+			// Computer accounts, anonymous logons and the host itself are
+			// left out: they are constant and say nothing of a person.
+			ip, ok := normIP(get("IpAddress"))
+			user := get("TargetUserName")
+			if !ok || isLoopbackIP(ip) || user == "" || strings.HasSuffix(user, "$") || strings.EqualFold(user, "ANONYMOUS LOGON") {
+				return false
+			}
+			oe.Act, oe.What = "logon-in", "Network logon (Security 4624, type 3)"
+			add("ip", ip, "source")
+			if h := normHostName(get("WorkstationName")); h != "" {
+				add("host", h, "source")
+			}
+			account(get("TargetDomainName"), user, "target")
+			return true
 		default:
 			return false
 		}
@@ -199,14 +222,18 @@ func observeEvent(oe *ObservedEvent, fieldsJSON string) bool {
 		}
 		account(get("AccountDomain"), get("AccountName"), "target")
 	case chSecurity + "/4648":
-		ti := get("TargetInfo")
-		if !strings.HasPrefix(strings.ToUpper(ti), "TERMSRV/") {
+		svc, rest, _ := strings.Cut(get("TargetInfo"), "/")
+		switch strings.ToUpper(svc) {
+		case "TERMSRV":
+			oe.Act, oe.What = "rdp-out", "Explicit credentials for Remote Desktop (Security 4648)"
+		case "CIFS":
+			oe.Act, oe.What = "smb-out", "Explicit credentials for a file share (Security 4648)"
+		default:
 			return false
 		}
-		oe.Act, oe.What = "rdp-out", "Explicit credentials for Remote Desktop (Security 4648)"
 		t := get("TargetServerName")
-		if t == "" || t == "localhost" {
-			t = ti[len("TERMSRV/"):]
+		if t == "" || strings.EqualFold(t, "localhost") {
+			t = rest
 		}
 		target(t)
 		account(get("TargetDomainName"), get("TargetUserName"), "target")
@@ -239,10 +266,221 @@ func observeEvent(oe *ObservedEvent, fieldsJSON string) bool {
 	case chRDPCli + "/1102":
 		oe.Act, oe.What = "rdp-out", "Remote Desktop client connected (1102)"
 		target(get("Value"))
+	case chSecurity + "/5140", chSecurity + "/5145":
+		if !observeShare(oe, f.EventID, get, add, account) {
+			return false
+		}
+	case chSystem + "/7045", chSecurity + "/4697":
+		// A service installed. The record has no source: the analysis
+		// ties it to a network logon or share access near it in time.
+		name := get("ServiceName")
+		if name == "" {
+			return false
+		}
+		oe.Act = "exec-in"
+		if f.EventID == "7045" {
+			oe.What = "Service installed: " + name + " (System 7045)"
+			add("program", get("ImagePath"), "object")
+		} else {
+			oe.What = "Service installed: " + name + " (Security 4697)"
+			add("program", get("ServiceFileName"), "object")
+			account(get("SubjectDomainName"), get("SubjectUserName"), "target")
+		}
+		add("service", name, "object")
+	case chSecurity + "/4688", chSysmon + "/1":
+		image, user := get("NewProcessName"), ""
+		if f.EventID == "1" {
+			image, user = get("Image"), get("User")
+		} else if u := get("SubjectUserName"); u != "" && !strings.HasSuffix(u, "$") {
+			user = u
+			if d := get("SubjectDomainName"); d != "" {
+				user = d + `\` + u
+			}
+		}
+		if !observeCommand(oe, image, get("CommandLine"), user, add) {
+			return false
+		}
 	default:
 		return false
 	}
 	return len(oe.Items) > 0
+}
+
+// observeShare reads Security 5140 (a share connected to) and 5145 (an
+// object on it checked). Shares every domain member reads (SYSVOL, NETLOGON,
+// print$), computer accounts and the host itself are left out. On IPC$ only
+// the named pipes of remote execution count: the service and task managers,
+// and pipes named as PsExec and its imitators name them.
+func observeShare(oe *ObservedEvent, eid string, get func(string) string, add func(string, string, string), account func(string, string, string)) bool {
+	ip, ok := normIP(get("IpAddress"))
+	user := get("SubjectUserName")
+	if !ok || isLoopbackIP(ip) || strings.HasSuffix(user, "$") {
+		return false
+	}
+	share := get("ShareName")
+	if i := strings.LastIndexByte(share, '\\'); i >= 0 {
+		share = share[i+1:]
+	}
+	shareU := strings.ToUpper(share)
+	rel := get("RelativeTargetName")
+	relL := strings.ToLower(rel)
+	switch {
+	case shareU == "" || shareU == "SYSVOL" || shareU == "NETLOGON" || shareU == "PRINT$":
+		return false
+	case shareU == "IPC$":
+		if eid != "5145" {
+			return false
+		}
+		switch {
+		case relL == "svcctl":
+			oe.Act, oe.What = "exec-in", "Service manager reached over the network (svcctl, Security 5145)"
+		case relL == "atsvc":
+			oe.Act, oe.What = "exec-in", "Task Scheduler reached over the network (atsvc, Security 5145)"
+		case strings.HasSuffix(relL, "-stdin") || strings.HasSuffix(relL, "-stdout") || strings.HasSuffix(relL, "-stderr") ||
+			strings.HasPrefix(relL, "psexesvc") || strings.HasPrefix(relL, "remcom") || strings.HasPrefix(relL, "paexec"):
+			oe.Act, oe.What = "exec-in", "Pipe named as PsExec names them: "+rel+" (Security 5145)"
+		default:
+			return false
+		}
+	case eid == "5145" && isProgram(relL) && writes(get("AccessMask")):
+		// A program written to ADMIN$ (the Windows folder) is how PsExec
+		// and its kind deliver their service; elsewhere it is a file copy,
+		// named so it stands out.
+		oe.Act, oe.What = "smb-in", "Program written to "+share+": "+rel+" (Security 5145)"
+		if shareU == "ADMIN$" {
+			oe.Act = "exec-in"
+		}
+		add("program", rel, "object")
+	case eid == "5140":
+		oe.Act, oe.What = "smb-in", "Share connected: "+share+" (Security 5140)"
+	default:
+		oe.Act, oe.What = "smb-in", "Share object checked: "+share+`\`+rel+" (Security 5145)"
+	}
+	add("ip", ip, "source")
+	account(get("SubjectDomainName"), user, "target")
+	add("share", share, "object")
+	return true
+}
+
+func isProgram(name string) bool {
+	for _, ext := range []string{".exe", ".dll", ".bat", ".cmd", ".ps1", ".vbs", ".sys"} {
+		if strings.HasSuffix(name, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// writes reports whether an access mask asks to write data or append to a
+// file (WriteData 0x2, AppendData 0x4).
+func writes(mask string) bool {
+	m, err := strconv.ParseUint(strings.TrimSpace(mask), 0, 64)
+	return err == nil && m&0x6 != 0
+}
+
+// observeCommand reads a process created (Security 4688 with its command
+// line, Sysmon 1) that names another computer: PsExec and its kind, or sc,
+// against \\name are remote execution; any other command naming \\name or
+// \\name\share (net use, copy, a program run from a share) is the share. The
+// PsExec service itself starting is remote execution seen at the target.
+func observeCommand(oe *ObservedEvent, image, cmd, user string, add func(string, string, string)) bool {
+	base := strings.ToLower(image)
+	if i := strings.LastIndexAny(base, `\/`); i >= 0 {
+		base = base[i+1:]
+	}
+	if base == "psexesvc.exe" {
+		oe.Act, oe.What = "exec-in", "PsExec service started (PSEXESVC.exe)"
+		add("program", image, "object")
+		return true
+	}
+	var target string
+	for _, s := range []string{image, cmd} {
+		if t := uncHosts(s); len(t) > 0 {
+			target = t[0]
+			break
+		}
+	}
+	if target == "" {
+		return false
+	}
+	prog := base
+	if prog == "" {
+		prog = "a program"
+	}
+	switch base {
+	case "psexec.exe", "psexec64.exe", "paexec.exe", "paexec64.exe", "remcom.exe", "sc.exe":
+		oe.Act, oe.What = "exec-out", `Program run against \\`+target+": "+prog
+	default:
+		oe.Act, oe.What = "smb-out", `Command naming \\`+target+": "+prog
+	}
+	if ip, ok := normIP(target); ok {
+		add("ip", ip, "target")
+	} else {
+		add("host", target, "target")
+	}
+	if u := credentialArg(cmd); u != "" {
+		add("account", u, "target")
+	}
+	add("account", user, "subject")
+	add("program", image, "object")
+	return true
+}
+
+// uncHosts lists the computers a command line names as \\name, in order,
+// leaving out the local computer and device paths (\\?\, \\.\).
+func uncHosts(s string) []string {
+	var out []string
+	for i := 0; i+2 < len(s); i++ {
+		if s[i] != '\\' || s[i+1] != '\\' {
+			continue
+		}
+		if i > 0 && !strings.ContainsRune(" \t\"'=>:(,", rune(s[i-1])) {
+			continue
+		}
+		j := i + 2
+		for j < len(s) && !strings.ContainsRune("\\/\"' ,;|&<>\t", rune(s[j])) {
+			j++
+		}
+		name := s[i+2 : j]
+		i = j
+		if ip, ok := normIP(name); ok {
+			if !isLoopbackIP(ip) {
+				out = append(out, ip)
+			}
+			continue
+		}
+		if name == "" || name == "?" || name == "." || strings.ContainsAny(name, "*%$") {
+			continue
+		}
+		if h := normHostName(name); h != "" {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+// credentialArg is the account a command gives to connect as: PsExec's
+// -u name, net use's /user:name or /u:name.
+func credentialArg(cmd string) string {
+	f := strings.Fields(cmd)
+	for i, a := range f {
+		la := strings.ToLower(a)
+		switch {
+		case la == "-u" && i+1 < len(f):
+			return strings.Trim(f[i+1], `"`)
+		case strings.HasPrefix(la, "/user:"):
+			return strings.Trim(a[6:], `"`)
+		case strings.HasPrefix(la, "/u:"):
+			return strings.Trim(a[3:], `"`)
+		}
+	}
+	return ""
+}
+
+// isLoopbackIP: the host itself.
+func isLoopbackIP(ip string) bool {
+	a, err := netip.ParseAddr(ip)
+	return err == nil && a.IsLoopback()
 }
 
 func fieldString(v any) string {

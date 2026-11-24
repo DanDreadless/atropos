@@ -680,7 +680,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.goto(URL, { waitUntil: 'networkidle0' });
 
   // ---- connections between hosts ----
-  // Three made-up hosts (scripts/mkrdp), described first, each one's logs
+  // Three made-up hosts (scripts/mklateral), described first, each one's logs
   // added under it through the add dialog.
   const rdpHosts = [['WS-ALICE', '10.1.1.20', '3 minutes ahead'], ['SRV-FILE01', '10.1.1.50', ''], ['DC01', '10.1.1.10', '']];
   for (const [name, ip, clock] of rdpHosts) {
@@ -690,7 +690,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       await post('api/details', { host: n, values: { ip_addresses: a, clock_offset: c, other_names: n + '.corp.example', time_zone: 'UTC' } });
       return x;
     }, name, ip, clock);
-    const files = fs.readdirSync(path.join(OUT, 'rdp', name)).map((f) => path.join(OUT, 'rdp', name, f));
+    const files = fs.readdirSync(path.join(OUT, 'lateral', name)).map((f) => path.join(OUT, 'lateral', name, f));
     const before = Number(await text('#evcount'));
     await page.click('#add');
     await page.waitForSelector('#dlg[open] select');
@@ -702,24 +702,32 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await settled();
   }
   await page.click('#nav [data-view=connections]');
-  await page.waitForFunction(() => document.querySelectorAll('#cnrows .cnrow').length >= 5, { timeout: 20000 }).catch(() => {});
+  await page.waitForFunction(() => document.querySelectorAll('#cnrows .cnrow').length >= 8, { timeout: 20000 }).catch(() => {});
   // The case holds another host from earlier checks, with no connections.
-  ok(/^5 connections \(2 seen at both ends\) between 4 hosts and 2 other/.test(await text('#cnsummary')), 'the Connections tab finds the five connections: ' + await text('#cnsummary'));
-  ok(await count('.cngraph .cnnode') === 6 && await count('.cngraph .cnnode.host') === 4 && await count('.cngraph .cnedge') === 5 && await count('.cngraph .cnedge.strong') === 2,
-    'the graph draws each host and address once, an arrow for each way they connected, the paired ones strong');
+  ok(/^8 connections \(4 seen at both ends\) between 4 hosts and 2 other computers or addresses: 5 remote desktop, 1 file share, 2 started remotely/.test(await text('#cnsummary')),
+    'the Connections tab finds the eight connections of three kinds: ' + await text('#cnsummary'));
+  ok(await count('.cngraph .cnnode') === 6 && await count('.cngraph .cnnode.host') === 4 && await count('.cngraph .cnedge') === 8 && await count('.cngraph .cnedge.strong') === 4,
+    'the graph draws each host and address once, an arrow for each way and kind of connection, the paired ones strong');
+  ok((await page.$$eval('.cngraph .cncount', (t) => t.map((x) => x.textContent))).sort().join() === 'Exec 1,Exec 1,RDP 1,RDP 1,RDP 1,RDP 1,RDP 1,Share 1',
+    'each arrow is labelled with its kind and count');
   const cnText = await text('#cnrows');
-  ok(cnText.includes('WS-ALICE → SRV-FILE01') && cnText.includes("after correcting WS-ALICE's clock (stated as 3 minutes ahead)") && cnText.includes('203.0.113.45 is not a host of this case'),
-    'each connection says why: the names, the clock correction, and an address outside the case');
+  ok(cnText.includes('WS-ALICE → SRV-FILE01') && cnText.includes("after correcting WS-ALICE's clock (stated as 3 minutes ahead)") && cnText.includes('203.0.113.45 is not a host of this case') &&
+    cnText.includes('services installed on DC01: PSEXESVC') && cnText.includes('shares on SRV-FILE01: Finance'),
+    'each connection says why: the names, the clock correction, an address outside the case, the shares and services');
   ok((await page.$$eval('#cnrows .cnrow .anpath', (r) => r.map((x) => x.firstChild.textContent))).join() ===
-    '2026-11-20 08:55:10,2026-11-20 09:14:18,2026-11-20 09:41:03,2026-11-20 10:05:42,2026-11-20 10:30:15', 'connections are listed in corrected time order');
+    '2026-11-20 08:55:10,2026-11-20 09:14:18,2026-11-20 09:22:30,2026-11-20 09:41:03,2026-11-20 09:48:10,2026-11-20 10:05:42,2026-11-20 10:20:00,2026-11-20 10:30:15', 'connections are listed in corrected time order');
   await shot('18-connections-graph');
+  await page.click('#cnkind [data-kind=exec]');
+  ok(/^2 connections \(started remotely\)/.test(await text('#cnsummary')) && await count('#cnrows .cnrow') === 2 && await count('.cngraph .cnedge') === 2 &&
+    (await text('#cnrows')).includes('PsExec'), 'the kind buttons show one kind at a time: ' + await text('#cnsummary'));
+  await page.click('#cnkind [data-kind=""]');
   await page.evaluate(() => [...document.querySelectorAll('.cngraph .cnnode')].find((g) => g.textContent.endsWith('WS-ALICE')).dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 })));
   await page.evaluate(() => [...document.querySelectorAll('.cngraph .cnnode')].find((g) => g.textContent.endsWith('WS-ALICE')).dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 })));
-  await page.waitForFunction(() => document.querySelectorAll('#cnrows .cnrow').length === 3, { timeout: 5000 }).catch(() => {});
-  ok(await count('#cnrows .cnrow') === 3 && !(await page.$eval('#cnall', (b) => b.hidden)), 'picking a host lists only its connections, with a way back to all');
+  await page.waitForFunction(() => document.querySelectorAll('#cnrows .cnrow').length === 5, { timeout: 5000 }).catch(() => {});
+  ok(await count('#cnrows .cnrow') === 5 && !(await page.$eval('#cnall', (b) => b.hidden)), 'picking a host lists only its connections, with a way back to all');
   await page.click('#cnmode [data-mode=lanes]');
-  ok(await count('.cnlanes .cnconn') === 5 && await count('.cnlanes .cnconn.dim') === 2 && await count('.cnlanes .cnend.missing') === 3,
-    "the lanes draw every connection in time, the picked host's in full, with a hollow end where nothing was recorded");
+  ok(await count('.cnlanes .cnconn') === 8 && await count('.cnlanes .cnconn.dim') === 3 && await count('.cnlanes .cnend.missing') === 4 && await count('.cnlanes .cnkindtag') === 8,
+    "the lanes draw every connection in time with its kind, the picked host's in full, with a hollow end where nothing was recorded");
   await page.click('#cnall');
   await page.evaluate(() => [...document.querySelectorAll('#cnrows .cnrow')][1].querySelector('.cnactions button').click());
   ok((await text('#cnrows .cnrow.on')).includes('Remote Desktop client connecting (1024)') && (await text('#cnrows .cnrow.on')).includes('by its clock'),

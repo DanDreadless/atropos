@@ -12,7 +12,9 @@ import (
 
 // Connections pairs the two ends of the same connection recorded on two
 // hosts of the case: one host's Remote Desktop client connecting, and the
-// other's logon from it. Each end is found in that host's own evidence; a
+// other's logon from it; a command on one naming a share on the other, and
+// that share's access; PsExec run on one, and its service installed on the
+// other. Each end is found in that host's own evidence; a
 // pair is made when each names the other (by a stated name or address, or an
 // address learned from a logon record that gives both) and the times agree
 // once each host's stated clock difference is taken off. A connection seen
@@ -61,7 +63,7 @@ type ConnEnd struct {
 
 // Connection is one connection from one computer to another.
 type Connection struct {
-	Kind       string   `json:"kind"` // rdp
+	Kind       string   `json:"kind"` // rdp, smb (a file share), exec (a program started remotely)
 	From       string   `json:"from"`
 	To         string   `json:"to"`
 	Start      int64    `json:"start_utc,string"` // corrected
@@ -139,7 +141,7 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	evs, ready, err := s.ObservedEvents("rdp-in", "rdp-out")
+	evs, ready, err := s.ObservedEvents("rdp-in", "rdp-out", "smb-in", "smb-out", "exec-in", "exec-out", "logon-in")
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +187,7 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 	// the workstation and the address it came from.
 	conflict := map[string]bool{}
 	for _, e := range evs {
-		if e.Act != "rdp-in" {
+		if !strings.HasSuffix(e.Act, "-in") {
 			continue
 		}
 		ip, name := item(e, "ip", "source"), item(e, "host", "source")
@@ -227,6 +229,12 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 	nodes := map[string]ConnNode{}
 	for _, h := range ids {
 		nodes[hostNode(h.Name)] = ConnNode{ID: hostNode(h.Name), Label: h.Name, Kind: "host", InCase: true}
+	}
+	label := func(id string) string {
+		if n, ok := nodes[id]; ok {
+			return n.Label
+		}
+		return id
 	}
 	// where gives the node of the host an event was recorded on.
 	where := func(e store.ObservedEvent) (string, *store.HostIdentity) {
@@ -302,49 +310,131 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 	type cluster struct {
 		node    string // the host that recorded it
 		id      *store.HostIdentity
+		family  string // rdp, or smb for shares, remote execution and network logons
+		kinds   map[string]bool
 		other   string // the computer at the other end
 		why     string // how the other end was named
 		start   int64
+		last    int64
 		corr    int64
 		account string
 		events  []store.ObservedEvent
+		byTime  []string // events tied to it by time alone
 		paired  bool
 	}
+	// kind is what the connection was, from the most telling of its events.
+	kindOf := func(cl *cluster) string {
+		switch {
+		case cl.family == "rdp":
+			return "rdp"
+		case cl.kinds["exec"]:
+			return "exec"
+		case cl.kinds["smb"]:
+			return "smb"
+		}
+		return "" // network logons alone: not shown
+	}
 	var ins, outs []*cluster
+	type sourceless struct {
+		e   store.ObservedEvent
+		rec string
+		id  *store.HostIdentity
+	}
+	var loose []sourceless
 	open := map[string]*cluster{}
 	for _, e := range evs {
 		rec, hid := where(e)
-		var role, acctRole string
-		if e.Act == "rdp-in" {
-			role, acctRole = "source", "target"
-		} else {
-			role, acctRole = "target", "target"
+		kind, dir, _ := strings.Cut(e.Act, "-")
+		family := "smb"
+		if kind == "rdp" {
+			family = "rdp"
+		}
+		role := "target"
+		if dir == "in" {
+			role = "source"
 		}
 		other, why := resolve(e, role, rec)
-		key := e.Act + "\x00" + rec
-		if e.Act == "rdp-in" {
-			key += "\x00" + other // incoming: one connection per source
+		if other == "" {
+			if dir == "in" && family == "smb" {
+				loose = append(loose, sourceless{e, rec, hid})
+			}
+			continue
+		}
+		if other == rec {
+			continue // the host naming itself
+		}
+		key := dir + "\x00" + family + "\x00" + rec
+		if dir == "in" || family == "smb" {
+			key += "\x00" + other // one connection per computer at the other end
 		}
 		cl := open[key]
-		if cl == nil || e.TSUTC-cl.start > int64(connCluster) {
-			cl = &cluster{node: rec, id: hid, start: e.TSUTC, corr: corrected(e.TSUTC, hid)}
+		if cl == nil || e.TSUTC-cl.last > int64(connCluster) {
+			cl = &cluster{node: rec, id: hid, family: family, kinds: map[string]bool{}, start: e.TSUTC, corr: corrected(e.TSUTC, hid)}
 			open[key] = cl
-			if e.Act == "rdp-in" {
+			if dir == "in" {
 				ins = append(ins, cl)
 			} else {
 				outs = append(outs, cl)
 			}
 		}
 		cl.events = append(cl.events, e)
+		cl.kinds[kind] = true
+		cl.last = e.TSUTC
 		// The other end: a host of the case is preferred to a bare address
 		// or name (a client's 1024 has the name typed, its 1102 the address).
-		if other != "" && (cl.other == "" || (!strings.HasPrefix(cl.other, "host:") && strings.HasPrefix(other, "host:"))) {
+		if cl.other == "" || (!strings.HasPrefix(cl.other, "host:") && strings.HasPrefix(other, "host:")) {
 			cl.other, cl.why = other, why
 		}
-		if a := item(e, "account", acctRole); a != "" && (cl.account == "" || (!strings.Contains(cl.account, `\`) && strings.Contains(a, `\`))) {
+		a := item(e, "account", "target")
+		if a == "" && dir == "out" {
+			a = item(e, "account", "subject")
+		}
+		if a != "" && (cl.account == "" || (!strings.Contains(cl.account, `\`) && strings.Contains(a, `\`))) {
 			cl.account = a
 		}
 	}
+	// A service installed records no source. It is tied to the nearest share
+	// access or network logon on the same host, within the clustering time.
+	var untied []string
+	for _, l := range loose {
+		var best *cluster
+		var bestD int64
+		for _, cl := range ins {
+			if cl.family != "smb" || cl.node != l.rec {
+				continue
+			}
+			var d int64
+			switch {
+			case l.e.TSUTC < cl.start:
+				d = cl.start - l.e.TSUTC
+			case l.e.TSUTC > cl.last:
+				d = l.e.TSUTC - cl.last
+			}
+			if d <= int64(connCluster) && (best == nil || d < bestD) {
+				best, bestD = cl, d
+			}
+		}
+		if best == nil {
+			untied = append(untied, fmt.Sprintf("%s on %s (event %d)", l.e.What, label(l.rec), l.e.EventID))
+			continue
+		}
+		best.events = append(best.events, l.e)
+		best.kinds["exec"] = true
+		best.byTime = append(best.byTime, fmt.Sprintf("%s (event %d) records no source; it is tied to this connection by time alone", l.e.What, l.e.EventID))
+		sort.SliceStable(best.events, func(a, b int) bool { return best.events[a].TSUTC < best.events[b].TSUTC })
+	}
+	if len(untied) > 0 {
+		sort.Strings(untied)
+		c.notes = append(c.notes, fmt.Sprintf("%d remote-execution record%s had no network logon or share access within %s to say where %s came from, so %s not shown as connections: %s",
+			len(untied), plural(len(untied), "", "s"), fmtDur(connCluster), plural(len(untied), "it", "they"), plural(len(untied), "it is", "they are"), strings.Join(untied, "; ")))
+	}
+	keep := ins[:0]
+	for _, cl := range ins {
+		if kindOf(cl) != "" {
+			keep = append(keep, cl)
+		}
+	}
+	ins = keep
 
 	end := func(cl *cluster) *ConnEnd {
 		ce := &ConnEnd{Node: cl.node, Start: cl.start, Corrected: cl.corr, Account: cl.account}
@@ -352,12 +442,6 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 			ce.Events = append(ce.Events, ConnEvent{ID: e.EventID, TS: e.TSUTC, What: e.What})
 		}
 		return ce
-	}
-	label := func(id string) string {
-		if n, ok := nodes[id]; ok {
-			return n.Label
-		}
-		return id
 	}
 	clockWords := func(h *store.HostIdentity) string {
 		if h == nil || !h.ClockStated || h.Clock == 0 {
@@ -369,6 +453,51 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 			dir, d = "behind", -d
 		}
 		return fmt.Sprintf("%s's clock (stated as %s %s)", h.Name, fmtDur(d), dir)
+	}
+	outWords := func(cl *cluster) string {
+		switch kindOf(cl) {
+		case "rdp":
+			return fmt.Sprintf("%s's Remote Desktop client connected to %s", label(cl.node), cl.why)
+		case "exec":
+			return fmt.Sprintf("%s ran a program against %s", label(cl.node), cl.why)
+		}
+		return fmt.Sprintf("%s ran a command naming a share on %s", label(cl.node), cl.why)
+	}
+	inWords := func(cl *cluster) string {
+		switch kindOf(cl) {
+		case "rdp":
+			return fmt.Sprintf("%s recorded a Remote Desktop logon from %s", label(cl.node), cl.why)
+		case "exec":
+			return fmt.Sprintf("%s recorded a service or task started remotely from %s", label(cl.node), cl.why)
+		}
+		return fmt.Sprintf("%s recorded share access from %s", label(cl.node), cl.why)
+	}
+	// details names the shares, services and programs an end involved.
+	details := func(cl *cluster) []string {
+		var out []string
+		for _, k := range []struct{ kind, words string }{{"share", "shares"}, {"service", "services installed"}, {"program", "programs"}} {
+			seen := map[string]bool{}
+			var vs []string
+			for _, e := range cl.events {
+				for _, it := range e.Items {
+					if it.Kind == k.kind && it.Role == "object" && !seen[it.Value] {
+						seen[it.Value] = true
+						vs = append(vs, it.Value)
+					}
+				}
+			}
+			if len(vs) > 0 {
+				out = append(out, fmt.Sprintf("%s on %s: %s", k.words, label(cl.node), strings.Join(vs, ", ")))
+			}
+		}
+		return append(out, cl.byTime...)
+	}
+	stronger := func(a, b string) string {
+		rank := map[string]int{"smb": 1, "exec": 2, "rdp": 3}
+		if rank[b] > rank[a] {
+			return b
+		}
+		return a
 	}
 
 	// Pair the nearest ends first.
@@ -382,7 +511,7 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 			continue
 		}
 		for _, i := range ins {
-			if i.node != o.other || i.other != o.node {
+			if i.family != o.family || i.node != o.other || i.other != o.node {
 				continue
 			}
 			dt := i.corr - o.corr
@@ -397,13 +526,11 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 			continue
 		}
 		cd.o.paired, cd.i.paired = true, true
-		conn := Connection{Kind: "rdp", From: cd.o.node, To: cd.i.node, Start: cd.o.corr, SeenOn: "both", Confidence: "strong",
+		conn := Connection{Kind: stronger(kindOf(cd.o), kindOf(cd.i)), From: cd.o.node, To: cd.i.node, Start: cd.o.corr, SeenOn: "both", Confidence: "strong",
 			Source: end(cd.o), Target: end(cd.i)}
 		dt := cd.dt
 		conn.Apart = &dt
-		conn.Reasons = append(conn.Reasons,
-			fmt.Sprintf("%s's Remote Desktop client connected to %s", label(cd.o.node), cd.o.why),
-			fmt.Sprintf("%s recorded a Remote Desktop logon from %s", label(cd.i.node), cd.i.why))
+		conn.Reasons = append(conn.Reasons, outWords(cd.o), inWords(cd.i))
 		var corr []string
 		for _, w := range []string{clockWords(cd.o.id), clockWords(cd.i.id)} {
 			if w != "" {
@@ -427,40 +554,51 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		case cd.o.account != "" && cd.i.account != "":
 			conn.Account = cd.i.account
 			conn.Confidence = "possible"
-			conn.Reasons = append(conn.Reasons, fmt.Sprintf("different accounts at each end: %s on %s, %s on %s (other credentials can be given at the logon prompt)",
+			conn.Reasons = append(conn.Reasons, fmt.Sprintf("different accounts at each end: %s on %s, %s on %s (other credentials can be given when connecting)",
 				cd.o.account, label(cd.o.node), cd.i.account, label(cd.i.node)))
 		default:
 			conn.Account = cd.i.account + cd.o.account
 		}
+		conn.Reasons = append(conn.Reasons, details(cd.o)...)
+		conn.Reasons = append(conn.Reasons, details(cd.i)...)
 		rep.Connections = append(rep.Connections, conn)
 	}
 	for _, o := range outs {
 		if o.paired || o.other == "" {
 			continue
 		}
-		conn := Connection{Kind: "rdp", From: o.node, To: o.other, Start: o.corr, Account: o.account, SeenOn: "source", Confidence: "one-end", Source: end(o)}
-		conn.Reasons = append(conn.Reasons, fmt.Sprintf("%s's Remote Desktop client connected to %s", label(o.node), o.why))
-		if nodes[o.other].InCase {
-			conn.Reasons = append(conn.Reasons, fmt.Sprintf("%s has no matching logon within %s: the connection may have failed, or that host's logs for the time are missing or were not added", label(o.other), fmtDur(connWindow)))
-		} else {
+		k := kindOf(o)
+		conn := Connection{Kind: k, From: o.node, To: o.other, Start: o.corr, Account: o.account, SeenOn: "source", Confidence: "one-end", Source: end(o)}
+		conn.Reasons = append(conn.Reasons, outWords(o))
+		switch {
+		case !nodes[o.other].InCase:
 			conn.Reasons = append(conn.Reasons, fmt.Sprintf("%s is not a host of this case", label(o.other)))
+		case k == "rdp":
+			conn.Reasons = append(conn.Reasons, fmt.Sprintf("%s has no matching logon within %s: the connection may have failed, or that host's logs for the time are missing or were not added", label(o.other), fmtDur(connWindow)))
+		default:
+			conn.Reasons = append(conn.Reasons, fmt.Sprintf("%s has no matching record within %s: share access is logged only when file share auditing is on, and service installs are in its System log, which may not have been added", label(o.other), fmtDur(connWindow)))
 		}
+		conn.Reasons = append(conn.Reasons, details(o)...)
 		rep.Connections = append(rep.Connections, conn)
 	}
 	for _, i := range ins {
 		if i.paired || i.other == "" {
 			continue
 		}
-		conn := Connection{Kind: "rdp", From: i.other, To: i.node, Start: i.corr, Account: i.account, SeenOn: "target", Confidence: "one-end", Target: end(i)}
-		conn.Reasons = append(conn.Reasons, fmt.Sprintf("%s recorded a Remote Desktop logon from %s", label(i.node), i.why))
+		k := kindOf(i)
+		conn := Connection{Kind: k, From: i.other, To: i.node, Start: i.corr, Account: i.account, SeenOn: "target", Confidence: "one-end", Target: end(i)}
+		conn.Reasons = append(conn.Reasons, inWords(i))
 		switch n := nodes[i.other]; {
-		case n.InCase:
+		case n.InCase && k == "rdp":
 			conn.Reasons = append(conn.Reasons, fmt.Sprintf("%s has no record of connecting within %s: its client log may have been cleared or not added, or another program was used", n.Label, fmtDur(connWindow)))
+		case n.InCase:
+			conn.Reasons = append(conn.Reasons, fmt.Sprintf("%s has no record of it within %s: the commands a computer runs are logged only with process auditing and command lines (Security 4688) or Sysmon, and a share opened in Explorer leaves no such record", n.Label, fmtDur(connWindow)))
 		case n.Kind == "loopback":
 			conn.Reasons = append(conn.Reasons, "it came from the host itself: "+n.Detail)
 		default:
 			conn.Reasons = append(conn.Reasons, fmt.Sprintf("%s is not a host of this case", n.Label))
 		}
+		conn.Reasons = append(conn.Reasons, details(i)...)
 		rep.Connections = append(rep.Connections, conn)
 	}
 	sort.SliceStable(rep.Connections, func(a, b int) bool {
@@ -541,7 +679,7 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		rep.Notes = append(rep.Notes, "Some evidence is still being read for connections; open this again shortly for the full picture.")
 	}
 	rep.Notes = append(rep.Notes,
-		"Only Remote Desktop is read so far: the client's log (RDPClient 1024, 1102) and explicit credentials (Security 4648 to TERMSRV) on the computer connecting; Security 4624 type 10 or 12 and 4778, RemoteConnectionManager 1149, LocalSessionManager 21, 22 and 25, and RdpCoreTS 131 on the computer connected to.",
+		`Read so far: Remote Desktop (the client's log, RDPClient 1024 and 1102, and Security 4648 to TERMSRV on the computer connecting; Security 4624 type 10 or 12 and 4778, RemoteConnectionManager 1149, LocalSessionManager 21, 22 and 25, and RdpCoreTS 131 on the computer connected to); file shares (commands naming \\computer, from Security 4688 with command lines or Sysmon 1, and Security 4648 to cifs on the computer connecting; Security 5140 and 5145 on the computer connected to); and programs started remotely (PsExec, PAExec, RemCom and sc run against \\computer on the one; the service and task managers' pipes, PsExec's pipes, programs written to ADMIN$, services installed, System 7045 and Security 4697, on the other). Network logons (Security 4624 type 3) support these but are not shown alone: a domain controller or file server has thousands. WinRM and WMI are not read yet.`,
 		fmt.Sprintf("Ends are paired when each names the other and they are within %s once stated clock differences are taken off; strongly when within %s and with the same account. A pair is consistent with one connection, not proof of it.", fmtDur(connWindow), fmtDur(connStrong)))
 	return rep, nil
 }
@@ -611,7 +749,7 @@ func WriteConnectionsText(w io.Writer, r *ConnectionsReport) error {
 	fmt.Fprintf(w, "Connections between hosts: %d (from %d events)\n", len(r.Connections), r.Events)
 	for _, c := range r.Connections {
 		seen := map[string]string{"both": "both ends", "source": "the connecting end only", "target": "the end connected to only"}[c.SeenOn]
-		fmt.Fprintf(w, "\n%s UTC  %s -> %s  Remote Desktop", ts(c.Start), label[c.From], label[c.To])
+		fmt.Fprintf(w, "\n%s UTC  %s -> %s  %s", ts(c.Start), label[c.From], label[c.To], ConnKindWords[c.Kind])
 		if c.Account != "" {
 			fmt.Fprintf(w, "  %s", c.Account)
 		}
@@ -641,3 +779,13 @@ func joinIDs(ids []int64) string {
 	}
 	return b.String()
 }
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// ConnKindWords names each kind of connection.
+var ConnKindWords = map[string]string{"rdp": "Remote Desktop", "smb": "File share", "exec": "Program started remotely"}

@@ -6,7 +6,7 @@
 'use strict';
 
 let connectionsLoaded = false;
-const CN = { mode: 'graph', rep: null, pick: null, pos: null, selected: null };
+const CN = { mode: 'graph', kind: '', rep: null, pick: null, pos: null, selected: null };
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 function sv(tag, attrs, ...kids) {
@@ -25,6 +25,9 @@ function sv(tag, attrs, ...kids) {
 
 const CONF_WORDS = { strong: 'strong', possible: 'possible', 'one-end': 'one end only' };
 const SEEN_WORDS = { both: 'both ends', source: 'the connecting end only', target: 'the end connected to only' };
+// Each kind of connection: its name, and the short tag drawn on its arrows.
+const KIND_WORDS = { rdp: 'Remote Desktop', smb: 'File share', exec: 'Started remotely' };
+const KIND_TAG = { rdp: 'RDP', smb: 'Share', exec: 'Exec' };
 
 function cnLabel(id) {
   const n = CN.rep && CN.rep.nodes.find((x) => x.id === id);
@@ -37,20 +40,39 @@ function setCnMode(m) {
   drawConnections();
 }
 
+function setCnKind(k) {
+  CN.kind = k;
+  CN.selected = null;
+  for (const b of $('cnkind').children) b.classList.toggle('on', b.dataset.kind === k);
+  drawConnections();
+}
+
+// The connections and edges of the kind chosen.
+function kindConns() { return CN.rep ? CN.rep.connections.filter((c) => !CN.kind || c.kind === CN.kind) : []; }
+function kindEdges() { return CN.rep ? CN.rep.edges.filter((e) => !CN.kind || e.kind === CN.kind) : []; }
+
 async function loadConnections() {
   connectionsLoaded = true;
   $('cnsummary').replaceChildren('Reading…');
   try {
-    const r = await api('/api/analysis/connections');
-    CN.rep = r;
+    CN.rep = await api('/api/analysis/connections');
     CN.pos = null;
-    const both = r.connections.filter((c) => c.seen_on === 'both').length;
-    const hosts = r.nodes.filter((n) => n.in_case).length;
-    $('cnsummary').replaceChildren(h('b', {}, fmtInt(r.connections.length)), r.connections.length === 1 ? ' connection' : ' connections',
-      ` (${fmtInt(both)} seen at both ends) between ${fmtInt(hosts)} host${hosts === 1 ? '' : 's'} and ${fmtInt(r.nodes.length - hosts)} other computer${r.nodes.length - hosts === 1 ? '' : 's'} or address${r.nodes.length - hosts === 1 ? '' : 'es'}`,
-      r.ready ? '' : ' (still reading some evidence)');
     drawConnections();
   } catch (e) { $('cnsummary').replaceChildren('The connections could not be read'); fail(e); }
+}
+
+function drawSummary() {
+  const r = CN.rep;
+  const conns = kindConns();
+  const both = conns.filter((c) => c.seen_on === 'both').length;
+  const hosts = r.nodes.filter((n) => n.in_case).length;
+  const others = r.nodes.length - hosts;
+  const byKind = Object.keys(KIND_WORDS).map((k) => [k, r.connections.filter((c) => c.kind === k).length]).filter(([, n]) => n);
+  $('cnsummary').replaceChildren(h('b', {}, fmtInt(conns.length)), conns.length === 1 ? ' connection' : ' connections',
+    CN.kind ? ` (${KIND_WORDS[CN.kind].toLowerCase()})` : '',
+    ` (${fmtInt(both)} seen at both ends) between ${fmtInt(hosts)} host${hosts === 1 ? '' : 's'} and ${fmtInt(others)} other computer${others === 1 ? '' : 's'} or address${others === 1 ? '' : 'es'}`,
+    !CN.kind && byKind.length > 1 ? ': ' + byKind.map(([k, n]) => `${fmtInt(n)} ${KIND_WORDS[k].toLowerCase()}`).join(', ') : '',
+    r.ready ? '' : ' (still reading some evidence)');
 }
 
 // pickConn narrows the list to a node or an edge; null shows everything.
@@ -61,17 +83,18 @@ function pickConn(p) {
 }
 
 function pickedConns() {
-  const all = CN.rep ? CN.rep.connections : [];
+  const all = kindConns();
   const p = CN.pick;
   if (!p) return all;
   if (p.node) return all.filter((c) => c.from === p.node || c.to === p.node);
-  return all.filter((c) => c.from === p.from && c.to === p.to);
+  return all.filter((c) => c.from === p.from && c.to === p.to && c.kind === p.kind);
 }
 
 function drawConnections() {
   const r = CN.rep;
   const box = $('cncanvas');
   if (!r) { box.replaceChildren(); return; }
+  drawSummary();
   if (!r.nodes.length) {
     box.replaceChildren(h('p', { class: 'anempty' }, 'No hosts are described yet. Describe them on the Details tab, with their addresses, then add their logs.'));
   } else if (CN.mode === 'graph') drawGraph(box, r);
@@ -85,6 +108,7 @@ function drawLegend() {
     h('span', { class: 'cnkey strong' }, 'strong: both ends, within a minute, the same account'),
     h('span', { class: 'cnkey possible' }, 'possible: both ends, further apart or different accounts'),
     h('span', { class: 'cnkey oneend' }, 'one end only'),
+    h('span', { class: 'cnkeytags' }, Object.keys(KIND_TAG).map((k) => `${KIND_TAG[k]}: ${KIND_WORDS[k].toLowerCase()}`).join(' · ')),
     h('span', { class: 'cnkey nodehost' }, 'host of the case'),
     h('span', { class: 'cnkey nodeext' }, 'outside the case'));
 }
@@ -148,39 +172,52 @@ function drawGraph(box, r) {
       sv('path', { d: 'M0,0 L10,5 L0,10 z', class: 'cnarrowhead ' + k }))));
   svg.append(defs);
   const rad = (id) => (r.nodes.find((x) => x.id === id) || {}).in_case ? 22 : 11;
+  const edges = kindEdges();
   const edgeEls = [];
+  // Arrows between the same two computers (either way, or of several
+  // kinds) fan out so that each shows.
+  const pairKey = (e) => (e.from < e.to ? e.from + '\0' + e.to : e.to + '\0' + e.from);
+  const siblings = {};
+  for (const e of edges) (siblings[pairKey(e)] = siblings[pairKey(e)] || []).push(e);
   const pathFor = (e) => {
     const a = at[e.from], b = at[e.to];
     const dx = b.x - a.x, dy = b.y - a.y, d = Math.sqrt(dx * dx + dy * dy) || 1;
-    // Bend the edge when the other direction is drawn too, so both show.
-    const twin = r.edges.some((x) => x.from === e.to && x.to === e.from);
-    const bend = twin ? 28 : 0;
+    const sib = siblings[pairKey(e)];
+    const k = sib.indexOf(e), n = sib.length;
+    // Measured across the line from the lower id to the higher, whichever
+    // way this arrow points.
+    const bend = (k - (n - 1) / 2) * 56 * (e.from < e.to ? 1 : -1);
     const mx = (a.x + b.x) / 2 - (dy / d) * bend, my = (a.y + b.y) / 2 + (dx / d) * bend;
     const ra = rad(e.from) + 3, rb = rad(e.to) + 5;
     const ax = a.x + ((mx - a.x) / Math.hypot(mx - a.x, my - a.y)) * ra, ay = a.y + ((my - a.y) / Math.hypot(mx - a.x, my - a.y)) * ra;
     const bx = b.x - ((b.x - mx) / Math.hypot(b.x - mx, b.y - my)) * rb, by = b.y - ((b.y - my) / Math.hypot(b.x - mx, b.y - my)) * rb;
-    return { d: `M${ax},${ay} Q${mx},${my} ${bx},${by}`, lx: (ax + 2 * mx + bx) / 4, ly: (ay + 2 * my + by) / 4 };
+    // The label sits just outside its own curve, away from its siblings.
+    const out = bend === 0 ? 0 : Math.sign(bend) * 14;
+    return { d: `M${ax},${ay} Q${mx},${my} ${bx},${by}`, lx: (ax + 2 * mx + bx) / 4 - (dy / d) * out, ly: (ay + 2 * my + by) / 4 + (dx / d) * out };
   };
-  for (const e of r.edges) {
+  for (const e of edges) {
     const kind = e.strong ? 'strong' : e.possible ? 'possible' : 'oneend';
     const p = pathFor(e);
-    const on = CN.pick && CN.pick.from === e.from && CN.pick.to === e.to;
-    const dim = CN.pick && CN.pick.node && e.from !== CN.pick.node && e.to !== CN.pick.node;
-    const title = `${cnLabel(e.from)} → ${cnLabel(e.to)}: ${e.count} Remote Desktop connection${e.count === 1 ? '' : 's'}` +
+    const on = CN.pick && CN.pick.from === e.from && CN.pick.to === e.to && CN.pick.kind === e.kind;
+    const dim = CN.pick && (CN.pick.node ? e.from !== CN.pick.node && e.to !== CN.pick.node : !on);
+    const kw = KIND_WORDS[e.kind] || e.kind;
+    const title = `${cnLabel(e.from)} → ${cnLabel(e.to)}: ${e.count} ${kw.toLowerCase()} connection${e.count === 1 ? '' : 's'}` +
       ` (${e.strong} strong, ${e.possible} possible, ${e.one_end} seen at one end only), ${fmtNs(e.first_utc, 0)}` + (e.last_utc !== e.first_utc ? ` to ${fmtNs(e.last_utc, 0)}` : '') + ' UTC';
+    const pick = { from: e.from, to: e.to, kind: e.kind };
     const path = sv('path', { d: p.d, class: edgeClass(e) + (on ? ' on' : '') + (dim ? ' dim' : ''), 'stroke-width': Math.min(6, 1.6 + Math.log2(e.count)), 'marker-end': `url(#cnarrow-${kind})` });
     const hit = sv('path', { d: p.d, class: 'cnhit', tabindex: 0, role: 'button', 'aria-label': title,
-      onclick: (ev) => { ev.stopPropagation(); pickConn({ from: e.from, to: e.to }); },
-      onkeydown: (ev) => { if (ev.key === 'Enter') pickConn({ from: e.from, to: e.to }); } }, sv('title', {}, title));
-    const lbl = sv('text', { x: p.lx, y: p.ly - 4, class: 'cncount' + (dim ? ' dim' : '') }, String(e.count));
+      onclick: (ev) => { ev.stopPropagation(); pickConn(pick); },
+      onkeydown: (ev) => { if (ev.key === 'Enter') pickConn(pick); } }, sv('title', {}, title));
+    const lbl = sv('text', { x: p.lx, y: p.ly - 4, class: 'cncount' + (dim ? ' dim' : '') }, `${KIND_TAG[e.kind] || e.kind} ${e.count}`);
     edgeEls.push({ e, path, hit, lbl });
     svg.append(path, hit, lbl);
   }
+  const conns = kindConns();
   for (const n of r.nodes) {
     const p = at[n.id];
     const on = CN.pick && CN.pick.node === n.id;
     const cls = 'cnnode ' + (n.in_case ? 'host' : n.kind) + (on ? ' on' : '');
-    const count = r.connections.filter((c) => c.from === n.id || c.to === n.id).length;
+    const count = conns.filter((c) => c.from === n.id || c.to === n.id).length;
     const title = `${n.label}${n.in_case ? ' (a host of the case)' : ''}: ${count} connection${count === 1 ? '' : 's'}` + (n.detail ? `. ${n.detail}` : '');
     const g = sv('g', { class: cls, transform: `translate(${p.x},${p.y})`, tabindex: 0, role: 'button', 'aria-label': title },
       sv('title', {}, title),
@@ -216,8 +253,8 @@ function drawGraph(box, r) {
 // One lane per computer, time across; an arrow for each connection, from
 // the lane of the computer connecting to the lane of the one connected to.
 function drawLanes(box, r) {
-  const conns = r.connections;
-  const lanes = r.nodes.filter((n) => n.in_case || conns.some((c) => c.from === n.id || c.to === n.id));
+  const conns = kindConns();
+  const lanes = r.nodes.filter((n) => n.in_case || r.connections.some((c) => c.from === n.id || c.to === n.id));
   const left = 150, right = 30, top = 28, laneH = 46;
   const w = Math.max(560, box.clientWidth || 800), hgt = top + lanes.length * laneH + 10;
   const y = Object.fromEntries(lanes.map((n, i) => [n.id, top + i * laneH + laneH / 2]));
@@ -230,8 +267,10 @@ function drawLanes(box, r) {
       sv('text', { x: 10, y: y[n.id] + 4, class: 'cnlanelabel' + (n.in_case ? ' host' : '') }, n.label));
   });
   if (!conns.length) { box.replaceChildren(svg); return; }
-  let t0 = BigInt(conns[0].start_utc), t1 = t0;
-  for (const c of conns) { const t = BigInt(c.start_utc); if (t < t0) t0 = t; if (t > t1) t1 = t; }
+  // The time across is that of every kind, so it stays put when the kind
+  // shown changes.
+  let t0 = BigInt(r.connections[0].start_utc), t1 = t0;
+  for (const c of r.connections) { const t = BigInt(c.start_utc); if (t < t0) t0 = t; if (t > t1) t1 = t; }
   const pad = (t1 - t0) / 20n + 60000000000n;
   t0 -= pad; t1 += pad;
   const span = Number(t1 - t0);
@@ -253,11 +292,12 @@ function drawLanes(box, r) {
     const dir = y2 > y1 ? 1 : -1;
     const on = CN.selected === c;
     const dim = CN.pick && !pickedConns().includes(c);
-    const title = `${fmtNs(c.start_utc, 0)} UTC  ${cnLabel(c.from)} → ${cnLabel(c.to)}${c.account ? '  ' + c.account : ''}: ${CONF_WORDS[c.confidence]}, seen at ${SEEN_WORDS[c.seen_on]}`;
+    const title = `${fmtNs(c.start_utc, 0)} UTC  ${KIND_WORDS[c.kind] || c.kind}  ${cnLabel(c.from)} → ${cnLabel(c.to)}${c.account ? '  ' + c.account : ''}: ${CONF_WORDS[c.confidence]}, seen at ${SEEN_WORDS[c.seen_on]}`;
     const g = sv('g', { class: 'cnconn ' + kind + (on ? ' on' : '') + (dim ? ' dim' : ''), tabindex: 0, role: 'button', 'aria-label': title,
       onclick: () => selectConn(c), onkeydown: (ev) => { if (ev.key === 'Enter') selectConn(c); } },
       sv('title', {}, title),
       sv('line', { x1: cx, x2: cx, y1: y1 + dir * 6, y2: y2 - dir * 8, class: 'cnconnline', 'marker-end': `url(#cnlarrow-${kind})` }),
+      sv('text', { x: cx + 5, y: (y1 + y2) / 2 + 3, class: 'cnkindtag' }, KIND_TAG[c.kind] || c.kind),
       // A filled dot where that end's evidence was found, hollow where none was.
       sv('circle', { cx, cy: y1, r: 4.5, class: c.source ? 'cnend' : 'cnend missing' }),
       sv('circle', { cx, cy: y2, r: 4.5, class: c.target ? 'cnend' : 'cnend missing' }),
@@ -282,7 +322,7 @@ function drawConnRows() {
   const list = pickedConns();
   const out = [];
   if (CN.pick) {
-    out.push(h('p', { class: 'hint cnpicked' }, CN.pick.node ? `Connections to and from ${cnLabel(CN.pick.node)}` : `Connections from ${cnLabel(CN.pick.from)} to ${cnLabel(CN.pick.to)}`));
+    out.push(h('p', { class: 'hint cnpicked' }, CN.pick.node ? `Connections to and from ${cnLabel(CN.pick.node)}` : `${KIND_WORDS[CN.pick.kind] || ''} connections from ${cnLabel(CN.pick.from)} to ${cnLabel(CN.pick.to)}`));
   }
   for (const c of list) {
     const on = CN.selected === c;
@@ -300,6 +340,7 @@ function drawConnRows() {
     out.push(h('div', { class: 'anrow cnrow' + (on ? ' on' : '') },
       h('div', { class: 'anpath' },
         h('span', { class: 'mono' }, fmtNs(c.start_utc, 0)),
+        h('span', { class: 'chip static cnkind' }, KIND_WORDS[c.kind] || c.kind),
         h('span', {}, cnLabel(c.from), ' → ', cnLabel(c.to)),
         c.account ? h('span', { class: 'dimc' }, c.account) : '',
         h('span', { class: 'chip static cnconf ' + (c.confidence === 'one-end' ? 'oneend' : c.confidence) }, CONF_WORDS[c.confidence]),
@@ -310,13 +351,14 @@ function drawConnRows() {
         h('button', { class: 'link', onclick: () => selectConn(c) }, on ? 'Hide the events' : 'Each end\'s events'),
         h('button', { class: 'link', onclick: () => showEvents(c.event_ids) }, `Show the ${c.event_ids.length} event${c.event_ids.length === 1 ? '' : 's'} on the timeline`))));
   }
-  if (!list.length) out.push(h('p', { class: 'anempty' }, r.events ? 'No connections were found.' : 'No Remote Desktop records have been found in the evidence yet. Add the hosts\' Security and Terminal Services logs.'));
+  if (!list.length) out.push(h('p', { class: 'anempty' }, !r.events ? 'No records of connections have been found in the evidence yet. Add the hosts\' Security, System and Terminal Services logs.' : CN.kind ? 'No connections of this kind were found.' : 'No connections were found.'));
   out.push(h('div', { class: 'anhead' }, h('h3', {}, 'Notes'), h('ul', { class: 'annotes' }, ...r.notes.map((n) => h('li', {}, n)))));
   $('cnrows').replaceChildren(...out);
 }
 
 function setupConnections() {
   $('cnmode').addEventListener('click', (ev) => { const b = ev.target.closest('button'); if (b) setCnMode(b.dataset.mode); });
+  $('cnkind').addEventListener('click', (ev) => { const b = ev.target.closest('button'); if (b) setCnKind(b.dataset.kind); });
   $('cnrun').onclick = loadConnections;
   $('cnall').onclick = () => pickConn(null);
   let rt;
