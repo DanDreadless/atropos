@@ -58,6 +58,24 @@ func seed(t *testing.T, s *Store) (eventID, annotationID int64) {
 	if _, err := s.SetDetails("", map[string]string{"case_reference": "SEED/1"}); err != nil {
 		t.Fatal(err)
 	}
+	// A host, and the submission assigned to it and then to no host.
+	h, err := s.AddHost("SEED-PC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AssignBatch(e.BatchID, &h.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AssignBatch(e.BatchID, nil, "seeded from nowhere"); err != nil {
+		t.Fatal(err)
+	}
+	// Excluded and included again: the item stays in view.
+	if err := s.SetExcluded(e.ID, true, "seed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetExcluded(e.ID, false, ""); err != nil {
+		t.Fatal(err)
+	}
 	return eventID, annotationID
 }
 
@@ -68,7 +86,7 @@ func TestAppendOnlyTablesRejectUpdateAndDelete(t *testing.T) {
 	seed(t, s)
 	col := map[string]string{
 		"details": "value", "case_meta": "value", "evidence": "name", "runs": "parser", "run_results": "status", "events": "message",
-		"evidence_text": "body", "facts": "value", "annotations": "body", "groups": "name", "audit": "details",
+		"evidence_text": "body", "facts": "value", "annotations": "body", "groups": "name", "audit": "details", "exclusions": "reason", "run_stats": "source", "run_stats_done": "version", "hosts": "name", "batch_hosts": "source",
 	}
 	for _, table := range appendOnlyTables {
 		var n int

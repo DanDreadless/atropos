@@ -13,6 +13,9 @@ func TestSearchByOrigin(t *testing.T) {
 	add := func(name, origin string, parent *int64, batch int64, depth int, events int) int64 {
 		e := &Evidence{SHA256: fmt.Sprintf("%064d", len(name)*1000+int(batch)*10+depth) + "", SHA1: "s", MD5: "m", Size: 1, Name: name, Origin: origin,
 			ParentID: parent, BatchID: batch, Depth: depth, Kind: "text", DetectReason: "test"}
+		if name == "NTUSER.DAT" {
+			e.Kind = "windows-registry-hive"
+		}
 		e.SHA256 = strings.Repeat("0", 64-len(name)) + strings.Map(func(r rune) rune {
 			if r >= 'a' && r <= 'f' || r >= '0' && r <= '9' {
 				return r
@@ -68,6 +71,16 @@ func TestSearchByOrigin(t *testing.T) {
 		{"file:app_1", 2},                       // and so is an underscore
 		{"file:appx1", 0},                       //
 		{"-file:elsewhere", 6},                  //
+		{"kind:windows-registry-hive", 3},       // every item of one kind
+		{"kind:Windows-Registry-Hive", 3},       // in any case
+		{"kind:text", 7},                        //
+		{"-kind:text", 3},                       //
+		{"kind:no-such-kind", 0},                //
+		{"item:NTUSER.DAT", 3},                  // every item of that name, as the Item column shows it
+		{"item:ntuser.dat", 3},                  // in any case
+		{"item:ntuser", 0},                      // the whole name, not part of it
+		{`item:"app_100%.log"`, 2},              // quoted
+		{"-item:other.log", 6},                  //
 		{"file:other from other", 4},            // combined with words
 	} {
 		rows, err := s.Search(Query{Text: c.q, Limit: 100})

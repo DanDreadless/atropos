@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -34,12 +35,16 @@ type Event struct {
 // Context is everything a parser is given. File is a read-only handle to the
 // vault copy of the evidence.
 type Context struct {
-	File  *os.File
-	Size  int64
-	Name  string // submitted name, for display only
-	Kind  string
-	Host  string                // host established for this batch, if any
-	Local timeutil.LocalContext // how to interpret zoneless local times
+	File *os.File
+	Size int64
+	Name string // submitted name, for display only
+	// Origin is where the item was taken from (a path on the examiner's
+	// machine, inside an image, or as dropped). Never used to identify the
+	// file; a parser may read the profile's owner from it (ProfileUser).
+	Origin string
+	Kind   string
+	Host   string                // host established for this batch, if any
+	Local  timeutil.LocalContext // how to interpret zoneless local times
 
 	// Segments are other files in the case that may be further segments of
 	// the same split image. Set only for an image kind that is split across
@@ -76,14 +81,17 @@ const (
 	CatFileOpening = "file-opening" // a file or folder was opened
 	CatFileSystem  = "file-system"  // a file or directory time from the volume
 	CatBrowser     = "browser"      // web browsing and downloads
-	CatAccount     = "account"      // logons, logoffs and account changes
-	CatNetwork     = "network"      // connections, shares, name lookups
-	CatPersistence = "persistence"  // services and scheduled tasks
-	CatDevice      = "device"       // external devices
-	CatRegistry    = "registry"     // a registry key was written
-	CatSecurity    = "security"     // detections, and tampering with logs or protection
-	CatDeletion    = "deletion"     // a file was deleted
-	CatLog         = "log"          // any other logged entry
+	// CatBrowserAuto is a page the browser loaded by itself: a hop in a
+	// redirect chain, a frame inside a page, a start page.
+	CatBrowserAuto = "browser-automatic"
+	CatAccount     = "account"     // logons, logoffs and account changes
+	CatNetwork     = "network"     // connections, shares, name lookups
+	CatPersistence = "persistence" // services and scheduled tasks
+	CatDevice      = "device"      // external devices
+	CatRegistry    = "registry"    // a registry key was written
+	CatSecurity    = "security"    // detections, and tampering with logs or protection
+	CatDeletion    = "deletion"    // a file was deleted
+	CatLog         = "log"         // any other logged entry
 )
 
 // For returns the dedicated parser for a detected kind, or nil.
@@ -188,3 +196,31 @@ func FieldsJSON(m map[string]any) string {
 
 // Clean is exported for the pipeline.
 func Clean(s string) string { return clean(s) }
+
+// profileOwner matches a Windows profile folder in a path: Users\NAME\ or
+// Documents and Settings\NAME\.
+var profileOwner = regexp.MustCompile(`(?i)(?:^|[/\\!:])(?:users|documents and settings)[/\\]([^/\\]+)[/\\]`)
+
+// ProfileUser is the Windows account whose profile folder the item was taken
+// from, when its origin says so, as in C:\Users\dan\AppData\...\History or
+// an image's Users/dan/...; "" when it does not. It is an inference from a
+// folder name, and the events that carry it say so.
+func ProfileUser(origin string) string {
+	m := profileOwner.FindStringSubmatch(origin)
+	if m == nil {
+		return ""
+	}
+	switch strings.ToLower(m[1]) {
+	case "public", "default", "default user", "all users":
+		return ""
+	}
+	return m[1]
+}
+
+// SameHost says whether two names are one computer: equal ignoring case, or
+// the same before the first dot (WS-042 and ws-042.corp.example).
+func SameHost(a, b string) bool {
+	short := func(s string) string { s, _, _ = strings.Cut(strings.TrimSpace(s), "."); return s }
+	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+	return strings.EqualFold(a, b) || (a != "" && strings.EqualFold(short(a), short(b)))
+}

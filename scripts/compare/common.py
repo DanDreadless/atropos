@@ -16,9 +16,9 @@ sys.stdout.reconfigure(errors="replace")
 EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
 
 
-def load(path, source=None, evidence_id=None):
-    """Atropos events from a JSON-lines export, optionally of one source or evidence item."""
-    out = []
+def iload(path, source=None, evidence_id=None):
+    """Atropos events from a JSON-lines export one at a time, optionally of one source or
+    evidence item: for exports too large to hold in memory."""
     with open(path, encoding="utf-8") as f:
         for line in f:
             e = json.loads(line)
@@ -26,8 +26,12 @@ def load(path, source=None, evidence_id=None):
                 continue
             if evidence_id and e["evidence_id"] != evidence_id:
                 continue
-            out.append(e)
-    return out
+            yield e
+
+
+def load(path, source=None, evidence_id=None):
+    """Atropos events from a JSON-lines export, optionally of one source or evidence item."""
+    return list(iload(path, source, evidence_id))
 
 
 def ns(dt):

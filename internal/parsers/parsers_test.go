@@ -427,7 +427,7 @@ func TestChromiumHistory(t *testing.T) {
 		t.Fatalf("got %d events, want 4 (the zero visit time carries no information)", len(r.events))
 	}
 	e := r.events[0]
-	if utc(e) != "2024-01-17T21:20:00.123456Z" || e.Type != "url-visited" || e.Path != "https://example.com/a" || e.Ref != "visits.id 10" ||
+	if utc(e) != "2024-01-17T21:20:00.123456Z" || e.Type != "url-visited (link)" || e.Path != "https://example.com/a" || e.Ref != "visits.id 10" ||
 		e.Stamp.ZoneFrom != timeutil.ZoneNative || e.Fields["title"] != "Example A" {
 		t.Errorf("visit: %s %+v", utc(e), e)
 	}
@@ -473,10 +473,14 @@ func TestChromiumHistoryInFull(t *testing.T) {
 		fmt.Sprintf(`INSERT INTO visits VALUES
 			(10,1,%d,0,'',%d,30000000,0,'',''),
 			(11,2,%d,10,'https://ext.test/ref',%d,1500,10,'',''),
-			(12,3,%d,0,'',0,0,0,'DEVICE-GUID','')`,
+			(12,3,%d,0,'',0,0,0,'DEVICE-GUID',''),
+			(13,2,%d,10,'',%d,0,0,'',''),
+			(14,2,%d,0,'',%d,0,0,'','')`,
 			at("2024-03-01T10:00:00Z"), 1|0x02000000|0x10000000|0x20000000,
 			at("2024-03-01T10:00:30Z"), 0|0x80000000|0x20000000,
-			at("2024-03-01T08:00:00Z")),
+			at("2024-03-01T08:00:00Z"),
+			at("2024-03-01T10:00:29Z"), 0|0x10000000, // the first hop of a redirect chain
+			at("2024-03-01T10:00:31Z"), 3|0x10000000|0x20000000), // a frame inside a page
 		`INSERT INTO visit_source VALUES (12,0)`,
 		`INSERT INTO keyword_search_terms VALUES (2,1,'How To','how to')`,
 		`INSERT INTO content_annotations VALUES (10,'','en',2),(11,'','',1)`,
@@ -498,10 +502,11 @@ func TestChromiumHistoryInFull(t *testing.T) {
 	by := map[string]Event{}
 	types := map[string]int{}
 	for _, e := range r.events {
-		by[e.Ref+" "+e.Type] = e
-		types[e.Type]++
+		kind := strings.SplitN(e.Type, " (", 2)[0] // url-visited (typed) is a url-visited
+		by[e.Ref+" "+kind] = e
+		types[kind]++
 	}
-	if types["url-visited"] != 3 || types["url-last-visited"] != 1 || types["download-started"] != 2 || types["download-finished"] != 1 || types["download-last-opened"] != 1 {
+	if types["url-visited"] != 5 || types["url-last-visited"] != 1 || types["download-started"] != 2 || types["download-finished"] != 1 || types["download-last-opened"] != 1 {
 		t.Fatalf("event types: %v", types)
 	}
 	v := by["visits.id 10 url-visited"]
@@ -511,11 +516,32 @@ func TestChromiumHistoryInFull(t *testing.T) {
 		v.Fields["url_typed_count"] != int64(1) || v.Fields["synced_from_another_device"] != nil || v.Fields["from_url"] != nil {
 		t.Errorf("typed search visit: %q %+v", v.Message, v.Fields)
 	}
+	// How the page was reached is in the Meaning; the visit carries its own
+	// id and its site, for following the chain and grouping by site.
+	if v.Type != "url-visited (typed)" || v.Category != CatBrowser || v.Source != "browser" || v.Fields["navigation"] != "user" ||
+		v.Fields["visit_id"] != int64(10) || v.Fields["domain"] != "search.test" {
+		t.Errorf("typed visit: %s %s %s %+v", v.Type, v.Category, v.Source, v.Fields)
+	}
 	v = by["visits.id 11 url-visited"]
 	if v.Fields["from_url"] != "https://search.test/?q=how+to" || v.Fields["opener_url"] != "https://search.test/?q=how+to" ||
 		v.Fields["external_referrer_url"] != "https://ext.test/ref" || fmt.Sprint(v.Fields["transition_qualifiers"]) != "[chain_end server_redirect]" ||
 		v.Fields["page_had_password_field"] != true || v.Fields["foreground_seconds"] != nil || v.Fields["visit_duration_seconds"] != 0.002 {
 		t.Errorf("referred visit: %+v", v.Fields)
+	}
+	if v.Type != "url-visited (link, after a redirect)" || v.Category != CatBrowser || v.Fields["from_visit_id"] != int64(10) || v.Fields["opener_visit_id"] != int64(10) {
+		t.Errorf("referred visit: %s %s %+v", v.Type, v.Category, v.Fields)
+	}
+	// A hop in a redirect chain, and a frame inside a page, were loaded by
+	// the browser, not chosen: they are evidence of something else.
+	for _, ref := range []string{"visits.id 13", "visits.id 14"} {
+		a := by[ref+" url-visited"]
+		if a.Category != CatBrowserAuto || a.Fields["navigation"] != "automatic" || a.Fields["navigation_reason"] == nil ||
+			!strings.HasPrefix(a.Message, "Loaded by the browser") {
+			t.Errorf("%s: %s %s %q %+v", ref, a.Type, a.Category, a.Message, a.Fields)
+		}
+	}
+	if by["visits.id 13 url-visited"].Type != "url-visited (redirected through)" || by["visits.id 14 url-visited"].Type != "url-visited (frame)" {
+		t.Errorf("automatic loads: %q %q", by["visits.id 13 url-visited"].Type, by["visits.id 14 url-visited"].Type)
 	}
 	// A visit that sync brought from another device must say so.
 	v = by["visits.id 12 url-visited"]
@@ -523,7 +549,12 @@ func TestChromiumHistoryInFull(t *testing.T) {
 		!strings.Contains(v.Message, "[synced: recorded on another device]") {
 		t.Errorf("synced visit: %q %+v", v.Message, v.Fields)
 	}
-	if !strings.Contains(strings.Join(r.notes, "\n"), "1 of 3 visits were brought here by browser sync") {
+	// Synced visits are a source of their own, so one chip separates this
+	// machine's browsing from other devices'.
+	if v.Source != "browser-synced" {
+		t.Errorf("synced visit source: %q", v.Source)
+	}
+	if !strings.Contains(strings.Join(r.notes, "\n"), "1 of 5 visits were brought here by browser sync") {
 		t.Errorf("no note about synced visits: %q", r.notes)
 	}
 	// The address outlived its visit records; the never-visited one says nothing.
@@ -986,5 +1017,23 @@ func TestEvtxSavedFromAnotherLog(t *testing.T) {
 	}
 	if len(r.notes) == 0 || !strings.Contains(r.notes[0], "saved from another one") {
 		t.Errorf("notes: %v", r.notes)
+	}
+}
+
+// The owner of a browser profile is read from the folder the file came
+// from, and only from a real profile folder.
+func TestProfileUser(t *testing.T) {
+	for origin, want := range map[string]string{
+		`C:\Users\dan\AppData\Local\Google\Chrome\User Data\Default\History`:                "dan",
+		`disk.E01!/Users/Jo Smith/AppData/Roaming/Mozilla/Firefox/Profiles/x/places.sqlite`: "Jo Smith",
+		`D:\Documents and Settings\olduser\Local Settings\History`:                          "olduser",
+		`upload:Default/History`:               "",
+		`C:\Users\Public\Documents\History`:    "",
+		`upload:Users/Default/AppData/History`: "",
+		`C:\cases\myusers\History`:             "",
+	} {
+		if got := ProfileUser(origin); got != want {
+			t.Errorf("%s: %q, want %q", origin, got, want)
+		}
 	}
 }

@@ -156,11 +156,12 @@ func seeded(t *testing.T) *harness {
 
 type eventsResp struct {
 	Events []struct {
-		ID       int64    `json:"id"`
-		TS       string   `json:"ts_utc"`
-		TZSource string   `json:"tz_source"`
-		Message  string   `json:"message"`
-		Tags     []string `json:"tags"`
+		ID         int64    `json:"id"`
+		TS         string   `json:"ts_utc"`
+		TZSource   string   `json:"tz_source"`
+		Message    string   `json:"message"`
+		Tags       []string `json:"tags"`
+		EvidenceID int64    `json:"evidence_id"`
 	} `json:"events"`
 }
 
@@ -535,5 +536,54 @@ func TestPicturesAreShownAndNothingElse(t *testing.T) {
 	// Another site in the browser may not load it.
 	if code, _, _ := h.do("GET", fmt.Sprintf("/api/evidence/%d/picture", ids["dot.png"]), nil, map[string]string{"Sec-Fetch-Site": "cross-site"}); code != http.StatusForbidden {
 		t.Errorf("cross-site: %d", code)
+	}
+}
+
+// Excluding an item over HTTP takes its events off the timeline and marks it
+// in the evidence list; it needs a reason, and can be undone.
+func TestExcludeOverHTTP(t *testing.T) {
+	h := seeded(t)
+	var all eventsResp
+	h.get("/api/events", &all)
+	before := len(all.Events)
+	if before == 0 || all.Events[0].EvidenceID == 0 {
+		t.Fatalf("seeded case has %d events", before)
+	}
+	id := all.Events[0].EvidenceID
+	path := fmt.Sprintf("/api/evidence/%d/exclude", id)
+	if code := h.post(path, map[string]any{"exclude": true, "reason": ""}, nil); code != 400 {
+		t.Errorf("exclusion without a reason: %d", code)
+	}
+	if code := h.post("/api/evidence/999/exclude", map[string]any{"exclude": true, "reason": "x"}, nil); code != 404 {
+		t.Errorf("exclusion of unknown evidence: %d", code)
+	}
+	if code := h.post(path, map[string]any{"exclude": true, "reason": "belongs to another case"}, nil); code != 200 {
+		t.Fatalf("exclude: %d", code)
+	}
+	h.get("/api/events", &all)
+	for _, e := range all.Events {
+		if e.EvidenceID == id {
+			t.Fatalf("an event of excluded item %d is still on the timeline", id)
+		}
+	}
+	var ev struct {
+		Evidence []store.Evidence `json:"evidence"`
+	}
+	h.get("/api/evidence", &ev)
+	found := false
+	for _, e := range ev.Evidence {
+		if e.ID == id {
+			found = e.Excluded && e.ExcludeReason == "belongs to another case"
+		}
+	}
+	if !found {
+		t.Errorf("the evidence list does not mark item %d excluded: %+v", id, ev.Evidence)
+	}
+	if code := h.post(path, map[string]any{"exclude": false, "reason": ""}, nil); code != 200 {
+		t.Fatalf("include: %d", code)
+	}
+	h.get("/api/events", &all)
+	if len(all.Events) != before {
+		t.Errorf("%d events after including again, want %d", len(all.Events), before)
 	}
 }

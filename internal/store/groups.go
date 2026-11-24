@@ -47,7 +47,7 @@ const openGroups = `FROM groups g WHERE g.archives IS NULL AND NOT EXISTS (SELEC
 func (s *Store) Groups() ([]Group, error) {
 	rows, err := s.r.Query(`SELECT g.id, g.name, g.note, g.actor, g.made_utc,
 		(SELECT count(DISTINCT a.event_id) FROM annotations a
-			JOIN events e ON e.id = a.event_id JOIN current_runs c ON c.run_id = e.run_id
+			JOIN events e ON e.id = a.event_id JOIN current_runs c ON c.run_id = e.run_id AND c.evidence_id` + notExcluded + `
 			WHERE a.kind='group' AND a.body = g.name COLLATE NOCASE
 			AND NOT EXISTS (SELECT 1 FROM annotations x WHERE x.kind='retract' AND x.refers_to=a.id)) ` + openGroups + ` ORDER BY g.id`)
 	if err != nil {

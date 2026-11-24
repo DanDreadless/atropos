@@ -27,7 +27,7 @@ import (
 const usage = `atropos %s
 
   atropos serve   --case DIR [--listen 127.0.0.1:8484]
-  atropos ingest  --case DIR PATH...
+  atropos ingest  --case DIR [--host NAME | --not-from-host TEXT] PATH...
   atropos verify  --case DIR
   atropos export  --case DIR [--format csv|jsonl|timesketch|bodyfile] [--query TEXT] [--group NAME] [-o FILE]
   atropos report  --case DIR [--format html|json] [-o FILE]
@@ -45,6 +45,13 @@ Options for any command that takes --case:
   --examiner NAME      recorded in the audit log (default: your login name)
   --local-zone ZONE    IANA zone (e.g. Europe/London) you state for local
                        timestamps whose zone the evidence does not establish
+
+Options for ingest:
+  --host NAME          the computer the files come from; added to the case's
+                       hosts if new. Its events carry the name, and a time zone
+                       stated for it on the Details tab reads local times
+  --not-from-host TEXT the files come from no single computer (a packet
+                       capture, firewall or cloud logs); say where from
 
 Options for serve and ingest:
   --parse-timeout D    stop a parser that runs longer than this (default 30m; 0 for no limit)
@@ -93,6 +100,8 @@ func main() {
 	query := fl.String("query", "", "export only events matching this search")
 	group := fl.String("group", "", "export only events in this group")
 	out := fl.String("o", "", "output file (default stdout)")
+	hostName := fl.String("host", "", "ingest: the computer the files come from")
+	notFromHost := fl.String("not-from-host", "", "ingest: the files come from no single computer; where from")
 	parseTimeout := fl.Duration("parse-timeout", 30*time.Minute, "stop a parser that runs longer than this (0 for no limit)")
 	maxUnpack := fl.Int64("max-unpack-gb", ingest.DefaultMaxUnpack>>30, "most that one submission's archives may expand to, in GiB")
 	inProcess := fl.Bool("in-process", false, "parse in this process instead of an isolated worker")
@@ -163,6 +172,14 @@ func main() {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		s.Audit("session.start", "case", map[string]any{"listen": *listen, "tool_version": store.ToolVersion, "isolated_parsers": !*inProcess})
+		// A case made by an earlier version lacks the indexes and run
+		// summaries that keep searches fast on millions of events. They are
+		// built while the page is in use; until then searches work as before.
+		go func() {
+			if err := s.BuildDerived(ctx); err != nil && ctx.Err() == nil {
+				fmt.Fprintln(os.Stderr, "atropos: preparing faster searches for this case:", err)
+			}
+		}()
 		err = web.Serve(ctx, *listen, token, s, in, func() {
 			fmt.Printf("Atropos %s — case %s\n\nOpen this address (it signs your browser in; keep it private):\n\n  http://%s/?token=%s\n\nPress Ctrl+C to stop.\n", store.ToolVersion, *caseDir, *listen, token)
 		})
@@ -180,6 +197,24 @@ func main() {
 		batch, err := s.NextBatch()
 		if err != nil {
 			fatal(err)
+		}
+		switch {
+		case *hostName != "" && *notFromHost != "":
+			fatal("give --host or --not-from-host, not both")
+		case *hostName != "":
+			h, err := s.AddHost(*hostName)
+			if err != nil {
+				fatal(err)
+			}
+			if err := s.AssignBatch(batch, &h.ID, ""); err != nil {
+				fatal(err)
+			}
+		case *notFromHost != "":
+			if err := s.AssignBatch(batch, nil, *notFromHost); err != nil {
+				fatal(err)
+			}
+		default:
+			fmt.Fprintln(os.Stderr, "atropos: no --host given: these files are assigned to no host (assign the submission on the Evidence tab later)")
 		}
 		var top []*store.Evidence
 		failed := 0

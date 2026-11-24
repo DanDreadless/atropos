@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -471,5 +472,155 @@ func TestAnomaliesAndDetailsOverHTTP(t *testing.T) {
 		if resp.StatusCode != 401 {
 			t.Errorf("%s without the token: %d", p, resp.StatusCode)
 		}
+	}
+}
+
+// A large folder arrives in chunks, all in one submission. Nothing is parsed
+// until the last; the page can ask what has arrived and send the rest after
+// a chunk broke off; unreadable files are recorded in the audit log; and a
+// submission the page abandons is parsed after it has been idle.
+func TestChunkedUpload(t *testing.T) {
+	h := start(t)
+	part := func(name, content string) string {
+		return "--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"" + name + "\"\r\n\r\n" + content + "\r\n"
+	}
+	send := func(q, body string) (int, map[string]any) {
+		code, _, resp := h.do("POST", "/api/upload"+q, io.NopCloser(strings.NewReader(body)), map[string]string{"Content-Type": "multipart/form-data; boundary=B"})
+		var out map[string]any
+		json.Unmarshal(resp, &out)
+		return code, out
+	}
+	code, r := send("?final=0", part("profile/a.log", "2024-01-01T00:00:00Z one")+"--B--\r\n")
+	if code != 200 {
+		t.Fatalf("first chunk: %d %v", code, r)
+	}
+	batch := int64(r["batch"].(float64))
+	// A chunk that breaks off keeps what arrived, and the submission open.
+	code, r = send(fmt.Sprintf("?batch=%d&final=0", batch), part("profile/b.log", "2024-01-02T00:00:00Z two")+part("profile/c.log", "2024-01-03T00:00:00Z thr"))
+	if code == 200 || !strings.Contains(fmt.Sprint(r["error"]), "stays open") {
+		t.Fatalf("a broken chunk: %d %v", code, r)
+	}
+	var got struct {
+		Paths []string `json:"paths"`
+	}
+	if h.get(fmt.Sprintf("/api/upload/%d", batch), &got); strings.Join(sortStrings(got.Paths), ",") != "profile/a.log,profile/b.log" {
+		t.Errorf("received so far: %v", got.Paths)
+	}
+	var ev struct {
+		Evidence []store.Evidence `json:"evidence"`
+	}
+	h.get("/api/evidence", &ev)
+	for _, e := range ev.Evidence {
+		if e.Status == "parsed" {
+			t.Errorf("%s parsed before the upload was finished", e.Name)
+		}
+	}
+	if code, r = send(fmt.Sprintf("?batch=%d&final=0", batch), part("profile/c.log", "2024-01-03T00:00:00Z three")+"--B--\r\n"); code != 200 {
+		t.Fatalf("the rest: %d %v", code, r)
+	}
+	if code := h.post("/api/upload/unreadable", map[string]any{"batch": batch, "paths": []string{"profile/locked.db"}, "error": "NotReadableError"}, nil); code != 200 {
+		t.Errorf("recording unreadable files: %d", code)
+	}
+	if code, r = send(fmt.Sprintf("?batch=%d&final=1", batch), "--B--\r\n"); code != 200 {
+		t.Fatalf("closing: %d %v", code, r)
+	}
+	h.wait()
+	h.get("/api/evidence", &ev)
+	if len(ev.Evidence) != 3 {
+		t.Fatalf("%d items, want 3", len(ev.Evidence))
+	}
+	for _, e := range ev.Evidence {
+		if e.BatchID != batch || e.Status != "parsed" {
+			t.Errorf("%s: submission %d status %s", e.Name, e.BatchID, e.Status)
+		}
+	}
+	if code, _ := send(fmt.Sprintf("?batch=%d&final=0", batch), part("late.log", "x")+"--B--\r\n"); code != 400 {
+		t.Errorf("a closed submission took more files: %d", code)
+	}
+	rows, _ := h.s.ListAudit(50)
+	found := false
+	for _, a := range rows {
+		found = found || (a.Action == "upload.unreadable" && strings.Contains(string(a.Details), "profile/locked.db"))
+	}
+	if !found {
+		t.Error("unreadable files are not in the audit log")
+	}
+
+	// A submission the page abandons is parsed once it has been idle.
+	openBatchIdle = 50 * time.Millisecond
+	defer func() { openBatchIdle = 2 * time.Minute }()
+	code, r = send("?final=0", part("left.log", "2024-02-01T00:00:00Z left behind")+"--B--\r\n")
+	if code != 200 {
+		t.Fatalf("abandoned chunk: %d %v", code, r)
+	}
+	for i := 0; i < 200; i++ {
+		time.Sleep(10 * time.Millisecond)
+		h.get("/api/evidence", &ev)
+		if ev.Evidence[len(ev.Evidence)-1].Status == "parsed" {
+			return
+		}
+	}
+	t.Errorf("an abandoned submission was not parsed: %+v", ev.Evidence[len(ev.Evidence)-1])
+}
+
+func sortStrings(s []string) []string { sort.Strings(s); return s }
+
+// An upload names its host, or says it is from none and where it came from;
+// its events carry the host; reassigning parses the submission again under
+// the new one.
+func TestUploadToAHost(t *testing.T) {
+	h := start(t)
+	var host store.Host
+	if code := h.post("/api/hosts", map[string]any{"name": "WS-042"}, &host); code != 200 || host.ID == 0 {
+		t.Fatalf("add host: %d %+v", code, host)
+	}
+	var dc store.Host
+	h.post("/api/hosts", map[string]any{"name": "DC-01"}, &dc)
+	body := "--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"app.log\"\r\n\r\n2024-01-01T00:00:00Z started\r\n--B--\r\n"
+	send := func(q string) (int, map[string]any) {
+		code, _, resp := h.do("POST", "/api/upload"+q, io.NopCloser(strings.NewReader(body)), map[string]string{"Content-Type": "multipart/form-data; boundary=B"})
+		var out map[string]any
+		json.Unmarshal(resp, &out)
+		return code, out
+	}
+	if code, r := send("?not_from_host="); code != 400 || !strings.Contains(fmt.Sprint(r["error"]), "where it came from") {
+		t.Errorf("not from a host, with no description: %d %v", code, r)
+	}
+	code, r := send(fmt.Sprintf("?host=%d", host.ID))
+	if code != 200 {
+		t.Fatalf("upload: %d %v", code, r)
+	}
+	batch := int64(r["batch"].(float64))
+	h.wait()
+	var ev eventsResp
+	h.get("/api/events", &ev)
+	if len(ev.Events) != 1 {
+		t.Fatalf("%d events", len(ev.Events))
+	}
+	var full struct {
+		Event store.EventRow `json:"event"`
+	}
+	h.get(fmt.Sprintf("/api/event/%d", ev.Events[0].ID), &full)
+	if full.Event.Host != "WS-042" {
+		t.Errorf("event host %q", full.Event.Host)
+	}
+	if code := h.post(fmt.Sprintf("/api/submissions/%d/host", batch), map[string]any{"host_id": dc.ID}, nil); code != 200 {
+		t.Fatalf("reassign: %d", code)
+	}
+	h.wait()
+	h.get("/api/events", &ev)
+	h.get(fmt.Sprintf("/api/event/%d", ev.Events[0].ID), &full)
+	if len(ev.Events) != 1 || full.Event.Host != "DC-01" {
+		t.Errorf("after reassigning: %d events, host %q", len(ev.Events), full.Event.Host)
+	}
+	var list struct {
+		Evidence []store.Evidence `json:"evidence"`
+	}
+	h.get("/api/evidence", &list)
+	if list.Evidence[0].Assigned == nil || list.Evidence[0].Assigned.HostName != "DC-01" {
+		t.Errorf("evidence assignment: %+v", list.Evidence[0].Assigned)
+	}
+	if code := h.post("/api/submissions/999/host", map[string]any{"host_id": dc.ID}, nil); code != 404 {
+		t.Errorf("unknown submission: %d", code)
 	}
 }

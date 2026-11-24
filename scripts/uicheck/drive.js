@@ -64,7 +64,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // The sample volume gives 49 file table times (a named stream is not an event of its own) and 55 from its transaction log. The sample hive gives 1157, three of them its RecentDocs lists.
   ok(total === 739 + 1157 + 49 + 55 + 2 + 1 + 1, `timeline shows every event after upload (${total})`);
   ok((await text('#evcount')) === '6', 'evidence count in the navigation updates');
-  ok(await count('#facets .chip') >= 6, 'facet chips appear');
+  ok(await count('#facets .chip') >= 6 && await count('#tzfacets .chip') >= 1, 'facet chips appear');
+  ok(await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('#facets .facetrow')].map((r) => r.querySelector('.label').textContent);
+    const tz = document.querySelector('#tzfacets .label');
+    const histo = document.getElementById('histo');
+    return rows.join(',').startsWith('Evidence of,Source') && tz && tz.textContent === 'Time zone from' &&
+      document.querySelector('#facets .facetrow:nth-child(2)').getBoundingClientRect().top > document.querySelector('#facets .facetrow').getBoundingClientRect().bottom - 1 &&
+      document.getElementById('tzfacets').getBoundingClientRect().top >= histo.getBoundingClientRect().bottom - 1;
+  }), 'Source chips sit on a row under Evidence of, and the time zone chips under the chart');
   ok(await count('#bars div') > 3, 'histogram has bars');
   await shot('02-timeline');
 
@@ -89,7 +97,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await setQ('source:evtx', 739);
   await setQ('source:evtx 4624', await (async () => { const r = await (await apiFetch('api/summary?q=' + encodeURIComponent('source:evtx 4624'))).json(); return r.count; })());
   await setQ('', total);
-  await page.evaluate(() => [...document.querySelectorAll('#facets .chip')].find((c) => c.textContent.startsWith('assumed')).click());
+  await page.evaluate(() => [...document.querySelectorAll('#tzfacets .chip')].find((c) => c.textContent.startsWith('assumed')).click());
   await page.waitForFunction(() => document.querySelector('#summary b').textContent === '1');
   ok((await page.$eval('#q', (i) => i.value)) === 'tz:assumed', 'clicking a facet adds its filter to the search box');
   ok(await count('#win .row.assumed') === 1, 'assumed-zone event is visibly marked in the table');
@@ -97,9 +105,32 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.waitForSelector('#detail .note.warn');
   ok((await text('#detail .note.warn')).startsWith('ASSUMED'), 'detail panel warns that the zone was assumed');
   await shot('03-assumed');
-  await page.evaluate(() => document.querySelector('#facets .chip.on').click());
+  await page.evaluate(() => document.querySelector('#tzfacets .chip.on').click());
   await page.waitForFunction((t) => document.querySelector('#summary b').textContent.replace(/,/g, '') === String(t), {}, total);
   ok(true, 'clicking the facet again removes the filter');
+  // The chips count what the search finds, not the whole case.
+  const chipNames = (label) => page.evaluate((l) => {
+    const kids = [...document.querySelectorAll('#facets .facetrow > *')];
+    const at = kids.findIndex((k) => k.classList.contains('label') && k.textContent === l);
+    const out = [];
+    for (let i = at + 1; i < kids.length && !kids[i].classList.contains('label'); i++) out.push(kids[i].firstChild.textContent);
+    return out.sort().join(',');
+  }, label);
+  const word = '4624';
+  await setQ(word, await (async () => (await (await apiFetch('api/summary?q=' + word)).json()).count)());
+  const fc = (await (await apiFetch('api/facets?q=' + word)).json()).facets;
+  const caseFacets = (await (await apiFetch('api/case')).json()).facets;
+  await page.waitForFunction((want) => {
+    const kids = [...document.querySelectorAll('#facets .facetrow > *')];
+    const at = kids.findIndex((k) => k.classList.contains('label') && k.textContent === 'Source');
+    const out = [];
+    for (let i = at + 1; i < kids.length && !kids[i].classList.contains('label'); i++) out.push(kids[i].firstChild.textContent);
+    return out.sort().join(',') === want;
+  }, { timeout: 8000 }, Object.keys(fc.source).sort().join(',')).catch(() => {});
+  ok(await chipNames('Source') === Object.keys(fc.source).sort().join(',') && await chipNames('Evidence of') === Object.keys(fc.category).sort().join(',') &&
+    Object.keys(fc.source).length < Object.keys(caseFacets.source).length,
+    'typing in the search box narrows the Evidence of and Source chips to what it finds: ' + await chipNames('Source'));
+  await setQ('', total);
 
   // ---- MACB and what events are evidence of ----
   await setQ('source:mft', 49);
@@ -260,10 +291,43 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.type('#evq', 'evil');
   await page.click('#evrows .erow');
   await page.evaluate(() => [...document.querySelectorAll('#evrows .evdetail button')].find((b) => b.textContent === 'Parse again').click());
+  // The row says a run is waiting or under way, not the last run's status.
+  const marked = await page.waitForFunction(() => ['queued', 'processing'].includes(document.querySelector('#evrows .erow .pill')?.textContent), { polling: 'raf', timeout: 3000 }).then(() => true, () => false);
+  ok(marked, '"Parse again" marks the row queued or processing at once');
   await sleep(1500); await settled();
+  await page.waitForFunction(() => document.querySelector('#evrows .erow .pill')?.textContent === 'parsed', { timeout: 10000 }).catch(() => {});
+  ok(await page.$eval('#evrows .erow .pill', (p) => p.textContent) === 'parsed', "the row shows the new run's status when it ends");
   await page.click('#nav [data-view=timeline]');
   await setQ('', total);
   ok(true, 're-parse leaves the timeline with the same number of events');
+
+  // ---- exclude and include again ----
+  await page.click('#nav [data-view=evidence]');
+  await page.waitForSelector('#evrows .erow');
+  const evilEvents = await page.$eval('#evrows .erow .num', (n) => Number(n.textContent.replace(/,/g, '') || 0));
+  if (!(await visible('#evrows .evdetail'))) await page.click('#evrows .erow');
+  await page.evaluate(() => [...document.querySelectorAll('#evrows .evdetail button')].find((b) => b.textContent === 'Exclude from case…').click());
+  await page.waitForSelector('.excludeform input');
+  await page.evaluate(() => [...document.querySelectorAll('.excludeform button')].find((b) => b.textContent === 'Exclude').click());
+  await sleep(300);
+  ok(await page.$eval('#evrows .erow .pill', (p) => p.textContent) !== 'excluded', 'excluding without a reason is refused');
+  await page.type('.excludeform input', 'added by mistake');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => document.querySelector('#evrows .erow .pill')?.textContent === 'excluded', { timeout: 8000 }).catch(() => {});
+  ok(await page.$eval('#evrows .erow .pill', (p) => p.textContent) === 'excluded' && (await text('#evrows .evdetail')).includes('added by mistake'),
+    'Exclude from case marks the item excluded, with the reason');
+  await page.click('#nav [data-view=timeline]');
+  await setQ('', total - evilEvents);
+  ok(true, `the excluded item's ${evilEvents} events leave the timeline`);
+  ok(!(await page.$eval('#origin', (s) => [...s.options].some((x) => x.value.toLowerCase() === 'item:evil.log'))), 'and the From list');
+  await page.click('#nav [data-view=evidence]');
+  await page.waitForSelector('#evrows .evdetail');
+  await page.evaluate(() => [...document.querySelectorAll('#evrows .evdetail button')].find((b) => b.textContent === 'Include again').click());
+  await page.waitForFunction(() => document.querySelector('#evrows .erow .pill')?.textContent === 'parsed', { timeout: 8000 }).catch(() => {});
+  ok(await page.$eval('#evrows .erow .pill', (p) => p.textContent) === 'parsed', 'Include again restores it');
+  await page.click('#nav [data-view=timeline]');
+  await setQ('', total);
+  ok(true, 'and its events come back');
 
   // ---- drop ----
   await page.evaluate(() => {
@@ -277,8 +341,47 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     dt.items.add(new File(['2025-02-02T02:02:02Z dropped on the page\n'], 'dropped.log'));
     window.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
   });
+  await page.waitForSelector('#dlg[open] select');
+  await page.select('#dlg select', 'none');
+  await page.type('#dlg textarea', 'dropped by the browser check');
+  await page.evaluate(() => [...document.querySelectorAll('#dlg button')].find((b) => b.textContent === 'Add').click());
   await page.waitForFunction((t) => document.querySelector('#summary b').textContent.replace(/,/g, '') === String(t + 1), { timeout: 30000 }, total);
   ok(!(await visible('#drop')), 'dropped file is ingested and the timeline refreshes by itself');
+
+  // ---- a large drop goes in chunks, survives a chunk that breaks off, and shows its progress ----
+  await page.evaluate(() => {
+    window.__progress = [];
+    new MutationObserver(() => { const t = document.getElementById('ingest').textContent; if (t) window.__progress.push(t); })
+      .observe(document.getElementById('ingest'), { childList: true, subtree: true, characterData: true });
+  });
+  await page.setRequestInterception(true);
+  let cut = 0, chunkNo = 0;
+  const cutOne = (r) => {
+    // Break the second chunk off once, as a locked file would.
+    if (r.method() === 'POST' && /\/api\/upload\?batch=\d+&final=0/.test(r.url()) && ++chunkNo === 2) { cut++; r.abort('failed'); } else r.continue();
+  };
+  page.on('request', cutOne);
+  await page.evaluate(() => {
+    const dt = new DataTransfer();
+    for (let i = 0; i < 230; i++) dt.items.add(new File([`2025-03-03T03:${String(i % 60).padStart(2, '0')}:00Z bulk line ${i}
+`], `bulk-${i}.log`));
+    window.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+  });
+  await page.waitForSelector('#dlg[open] select');
+  await page.select('#dlg select', 'none');
+  await page.type('#dlg textarea', 'dropped by the browser check');
+  await page.evaluate(() => [...document.querySelectorAll('#dlg button')].find((b) => b.textContent === 'Add').click());
+  await page.waitForFunction((t) => document.querySelector('#summary b').textContent.replace(/,/g, '') === String(t + 231), { timeout: 60000 }, total).catch(() => {});
+  page.off('request', cutOne);
+  await page.setRequestInterception(false);
+  // The cut was deliberate: it is not a page error.
+  const expected = (e) => /requestfailed: \S+\/api\/upload\?batch=\d+&final=0 net::ERR_FAILED/.test(e) || e === 'console error: Failed to load resource: net::ERR_FAILED';
+  if (errors.filter(expected).length <= 2) errors.splice(0, errors.length, ...errors.filter((e) => !expected(e)));
+  const bulk = (await (await apiFetch('api/evidence')).json()).evidence.filter((e) => e.name.startsWith('bulk-'));
+  ok(cut === 1 && bulk.length === 230 && new Set(bulk.map((e) => e.batch_id)).size === 1 && (await summaryCount()) === total + 231,
+    `230 dropped files arrive in one submission despite a chunk breaking off (${bulk.length} stored, ${new Set(bulk.map((e) => e.batch_id)).size} submission(s), ${cut} cut, timeline +${(await summaryCount()) - total})`);
+  const seen = await page.evaluate(() => window.__progress);
+  ok(seen.some((t) => /Uploading \d+ of 230 files .* of .* \(\d+%\)/.test(t)), 'the upload shows files and bytes sent with a percentage');
 
   // ---- files: looking inside an image ----
   const before = { ev: Number(await text('#evcount')), n: await summaryCount() };
@@ -328,8 +431,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.select('#origin', fromValue);
   await page.waitForFunction(() => document.querySelector('#summary b').textContent === '3');
   ok((await page.$eval('#q', (i) => i.value)) === fromValue, 'choosing an image writes a from: filter into the search box');
+  // Items: every name in the Item column, from the evidence parsed.
+  const evList = (await (await apiFetch('api/evidence')).json()).evidence;
+  const nameEvents = {};
+  for (const e of evList) if (!e.duplicate_of && e.event_count) nameEvents[e.name.toLowerCase()] = (nameEvents[e.name.toLowerCase()] || 0) + e.event_count;
+  const itemOpts = await page.$eval('#origin', (s) => [...s.options].filter((x) => x.value.startsWith('item:')).map((x) => x.value.slice(5).replace(/"/g, '').toLowerCase()));
+  ok(itemOpts.slice().sort().join('|') === Object.keys(nameEvents).sort().join('|'), 'the From list offers every item name in the Item column: ' + itemOpts.join(', '));
+  const someName = itemOpts.find((k) => nameEvents[k] < total) || itemOpts[0];
+  const someValue = await page.$eval('#origin', (s, n) => [...s.options].find((x) => x.value.startsWith('item:') && x.value.slice(5).replace(/"/g, '').toLowerCase() === n).value, someName);
+  await page.select('#origin', someValue);
+  await page.waitForFunction((n) => document.querySelector('#summary b').textContent.replace(/,/g, '') === String(n), { timeout: 8000 }, nameEvents[someName]).catch(() => {});
+  ok((await page.$eval('#q', (i) => i.value)) === someValue && (await text('#summary b')).replace(/,/g, '') === String(nameEvents[someName]),
+    'choosing an item shows the events of every item of that name: ' + someValue);
+  ok(await page.evaluate(() => [...document.querySelectorAll('#win .row')].every((r) => r.children[9].textContent.toLowerCase() === document.querySelector('#q').value.slice(5).replace(/"/g, '').toLowerCase())),
+    'and the Item column shows only that name');
+  await page.select('#origin', fromValue);
+  await page.waitForFunction(() => document.querySelector('#summary b').textContent === '3');
   const sourceSum = () => page.evaluate(() => {
-    const kids = [...document.querySelectorAll('#facets > *')];
+    const kids = [...document.querySelectorAll('#facets .facetrow > *')];
     let on = false, sum = 0;
     for (const k of kids) {
       if (k.classList.contains('label')) on = k.textContent === 'Source';
@@ -380,14 +499,44 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   ok(!(await page.$eval('#view-help', (v) => v.hidden)) && await count('#view-help h2') >= 15, 'Help opens a guide with a section for each part of the interface');
   const tocTargets = await page.$$eval('#helptoc button', (bs) => bs.map((b) => b.dataset.to));
   ok(tocTargets.length === await count('#view-help h2') && await page.evaluate((ids) => ids.every((id) => document.getElementById(id)), tocTargets), 'every entry in its contents list leads to a section');
+  const shownTopics = () => page.$$eval('.helptopic', (ts) => ts.filter((t) => !t.hidden).map((t) => t.dataset.id));
+  ok((await shownTopics()).join() === 'h-start' && (await text('.helptopic:not([hidden])')).includes('Atropos user guide'), 'the guide opens on its first topic alone, with its introduction');
   await page.click('#helptoc button[data-to=h-search]');
-  await sleep(700);
-  ok(await page.evaluate(() => { const r = document.getElementById('h-search').getBoundingClientRect(); return r.top >= 0 && r.top < window.innerHeight / 2; }), 'choosing an entry scrolls to it');
-  ok(page.url().includes('view=help'), 'the address bar remembers the guide like any other view');
+  await sleep(200);
+  ok((await shownTopics()).join() === 'h-search' && await page.evaluate(() => { const r = document.getElementById('h-search').getBoundingClientRect(); return r.top >= 0 && r.top < window.innerHeight / 2; }) &&
+    await page.$eval('#helptoc button.on', (b) => b.dataset.to) === 'h-search', 'choosing an entry shows that topic alone, marked in the contents');
+  ok(page.url().includes('view=help') && page.url().includes('topic=h-search'), 'the address bar remembers the guide and its topic');
+  await page.evaluate(() => [...document.querySelectorAll('.helptopic:not([hidden]) .helpfoot button')].pop().click());
+  ok((await shownTopics()).join() === 'h-from', 'the button at the foot of a topic goes on to the next');
+  await page.type('#helpq', 'logon type');
+  await sleep(200);
+  const hitsShown = await page.$$eval('#helptoc button[data-to]', (bs) => bs.filter((b) => !b.hidden).map((b) => b.dataset.to));
+  ok(hitsShown.includes('h-evidenceof') && hitsShown.length < 6 && (await shownTopics()).join() === hitsShown[0] && (await text('#helphits')).includes('mention'),
+    'searching the guide lists only the topics that mention the words, and opens the first: ' + hitsShown.join(', '));
+  await page.click('#helpq', { clickCount: 3 }); await page.keyboard.press('Escape');
+  ok((await page.$$eval('#helptoc button[data-to]', (bs) => bs.filter((b) => b.hidden).length)) === 0, 'clearing the search brings every topic back');
+  await page.click('#helptoc button[data-to=h-evidenceof]');
+  ok((await page.$$eval('.helptopic:not([hidden]) .evcard', (r) => r.length)) === 13, 'the guide explains every kind of "Evidence of"');
   await shot('07d-help');
   await page.click('#nav [data-view=timeline]');
   await page.keyboard.press('?');
   ok(!(await page.$eval('#view-help', (v) => v.hidden)), 'pressing ? opens the guide');
+  await page.click('#nav [data-view=timeline]');
+
+  // ---- details, with no host named by the evidence ----
+  await page.click('#nav [data-view=details]');
+  await page.waitForSelector('#dtbody .dtform');
+  ok(await count('#dtbody .dtnohost') === 1 && (await text('#dtbody .dtnohost')).includes('SYSTEM registry hive') && await count('#dtbody .dtform') === 2 &&
+    await count('#dtbody input[aria-label="Computer name"]') === 1, 'with no host named by the evidence, a host form is there to fill in, starting with its name');
+  await page.evaluate(() => [...document.querySelectorAll('#dtbody .dtsave button')].pop().click());
+  ok((await text('#toast')).includes("computer's name"), 'saving it without a name asks for one');
+  await page.type('#dtbody input[aria-label="Computer name"]', 'LAB-PC-01');
+  await page.type('#dtbody input[aria-label="Serial number"]', 'SN-12345');
+  await page.evaluate(() => [...document.querySelectorAll('#dtbody .dtsave button')].pop().click());
+  await page.waitForFunction(() => [...document.querySelectorAll('#dtbody .dtform summary')].some((s) => s.textContent.includes('LAB-PC-01')), { timeout: 8000 }).catch(() => {});
+  ok(await page.evaluate(() => [...document.querySelectorAll('#dtbody .dtform summary')].some((s) => s.textContent.includes('Host LAB-PC-01') && s.textContent.includes('1 of'))) &&
+    await page.$eval('#dtbody input[aria-label="LAB-PC-01: Serial number"]', (el) => el.value) === 'SN-12345' && await count('#dtbody .dtnohost') === 0,
+    'the host is saved under that name with what was filled in');
   await page.click('#nav [data-view=timeline]');
 
   // ---- audit and verify ----
@@ -459,10 +608,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // ---- case and host details ----
   await page.click('#nav [data-view=details]');
   await page.waitForSelector('#dtbody .dtform');
-  ok((await text('#dtbody')).includes('WKSTN-07') === false && await count('#dtbody .dtform') === 1, 'details start with the case form alone');
+  ok(await count('#dtbody .dtform') === 2 && await page.evaluate(() => [...document.querySelectorAll('#dtbody .dtform summary')].some((x) => x.textContent.includes('WKSTN-07 (named by the evidence)'))) && await count('#dtbody .dtnohost') === 0,
+    'a host the evidence names has its form ready beside the case form');
   await page.type('#dthost', 'WKSTN-07');
   await page.click('#dtadd');
-  await page.waitForFunction(() => document.querySelectorAll('#dtbody .dtform').length === 2);
+  await page.waitForSelector('#dtbody .dtform[open] input[aria-label="WKSTN-07: Serial number"]');
   await page.type('#dtbody .dtform[open] input[aria-label="WKSTN-07: Serial number"]', 'PF3<b>ABC</b>');
   await page.type('#dtbody .dtform[open] input[aria-label="WKSTN-07: Clock difference"]', '4 minutes fast');
   await page.click('#dtbody .dtform[open] .dtsave button');
@@ -472,6 +622,44 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   ok((await text('#dtbody')).includes('2 of ') && (await text('#dtbody')).includes('Stated by uicheck'), 'the form says how much is stated and by whom');
   const rep2 = await (await page.evaluate(async () => (await fetch('api/report?format=html')).text()));
   ok(rep2.includes('Hosts examined') && rep2.includes('PF3&lt;b&gt;ABC&lt;/b&gt;') && rep2.includes('4 minutes fast'), 'the case report carries the host details, escaped');
+
+  // ---- browser history, read out ----
+  await page.click('#nav [data-view=timeline]');
+  await setQ('item:sqlite-database', 5);
+  const chipLabels = await page.$$eval('#facets .chip', (cs) => cs.map((c) => c.firstChild.textContent));
+  ok(chipLabels.includes('browser-synced') && chipLabels.includes('browser-automatic'),
+    'synced visits are a source of their own and pages the browser loaded by itself a kind of their own: ' + chipLabels.join(', '));
+  ok((await page.$$eval('#win .row', (rs) => rs.map((r) => r.children[5].textContent))).includes('url-visited (typed)'), 'the Meaning column says how a page was reached');
+  // Two chips in one row mean either: browser, then browser-automatic as well.
+  const chip = (label) => page.evaluate((l) => [...document.querySelectorAll('#facets .facetrow')][0].querySelectorAll('.chip').forEach((c) => { if (c.firstChild.textContent === l) c.click(); }), label);
+  await chip('browser');
+  await page.waitForFunction(() => document.querySelector('#summary b').textContent === '4', { timeout: 8000 }).catch(() => {});
+  const auto = await page.evaluate(() => [...[...document.querySelectorAll('#facets .facetrow')][0].querySelectorAll('.chip')].find((c) => c.firstChild.textContent === 'browser-automatic').querySelector('i').textContent);
+  await chip('browser-automatic');
+  await page.waitForFunction(() => document.querySelector('#summary b').textContent === '5', { timeout: 8000 }).catch(() => {});
+  ok(auto === '1' && await summaryCount() === 5, `a second chip in the same row adds its events (browser 4 + browser-automatic ${auto} = ${await summaryCount()})`);
+  await setQ('item:sqlite-database', 5);
+  await page.evaluate(() => [...document.querySelectorAll('#win .row')].find((r) => r.textContent.includes('files.test/landing')).click());
+  await page.waitForFunction(() => [...document.querySelectorAll('#detail h3')].some((x) => x.textContent === 'Browsing'));
+  const visitText = await text('#detail');
+  ok(visitText.includes('How it was reached') && visitText.includes('link, after a redirect') && visitText.includes('Came from') && visitText.includes('https://search.test/?q=how+to'),
+    'a visit is read out: how it was reached and where it came from');
+  ok(await page.$$eval('#detail a', (a) => a.length) === 0, 'addresses in the panel are text, never links');
+  await page.evaluate(() => [...document.querySelectorAll('#detail button')].find((b) => b.textContent === 'open the visit it came from').click());
+  await page.waitForFunction(() => document.getElementById('detail').textContent.includes('Searched for'), { timeout: 8000 }).catch(() => {});
+  const fromText = await text('#detail');
+  ok(fromText.includes('Searched for') && fromText.includes('how to') && fromText.includes('Profile of') && fromText.includes('inferred'),
+    'the referring visit opens, with its search and the profile owner marked as inferred');
+  await shot('14-browsing');
+  await page.evaluate(() => [...document.querySelectorAll('#detail button')].find((b) => b.textContent === 'everything from this site').click());
+  await page.waitForFunction(() => document.querySelector('#q').value === 'domain:search.test');
+  await page.waitForFunction(() => document.querySelector('#summary b').textContent === '3', { timeout: 8000 }).catch(() => {});
+  ok(await summaryCount() === 3, 'everything from a site includes its subdomains (search.test, go.search.test, www.search.test)');
+  await setQ('item:sqlite-database download', 1);
+  await page.click('#win .row');
+  await page.waitForFunction(() => [...document.querySelectorAll('#detail h3')].some((x) => x.textContent === 'Download'));
+  ok(await page.$$eval('#detail ol.chain li', (l) => l.length) === 2 && (await text('#detail')).includes('Saved to'), 'a download is read out with its redirect chain');
+  await page.keyboard.press('Escape');
   await shot('17-details');
   await page.goto(URL, { waitUntil: 'networkidle0' });
 

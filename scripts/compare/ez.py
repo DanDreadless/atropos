@@ -25,7 +25,7 @@ import re
 import sys
 from collections import defaultdict
 
-from common import load, report
+from common import iload, load, report
 
 csv.field_size_limit(1 << 30)
 
@@ -185,40 +185,57 @@ def norm_path(p):
 
 
 def mft(export, path, evid):
-    """Per file-table entry: the four $STANDARD_INFORMATION times and, where both give them, the four $FILE_NAME times."""
-    ours = defaultdict(dict)
-    for e in load(export, "mft", evid):
+    """Per file-table entry: the four $STANDARD_INFORMATION times, and the $FILE_NAME times of
+    every name the entry has (MFTECmd writes a row per name; Atropos an event per moment that
+    the entry's other times do not already show)."""
+    ours = defaultdict(lambda: {"si": {}, "fn": set(), "path": None})
+    for e in iload(export, "mft", evid):
         f = e["fields"]
-        kind = "fn" if "$FN" in e["timestamp_desc"] or "file_name" in e["timestamp_desc"].lower() else "si"
-        for letter, name in zip("MACB", ("m", "a", "c", "b")):
+        o = ours[(f["entry"], f["sequence"])]
+        o["path"] = o["path"] or e["path"]
+        fn = e["timestamp_desc"].startswith("$FN")
+        for letter in "MACB":
             if letter in e["macb"]:
-                ours[(f["entry"], f["sequence"])][kind + name] = e["ts_utc_ns"]
-        ours[(f["entry"], f["sequence"])]["path"] = e["path"]
-    cols = {"sib": "Created0x10", "sim": "LastModified0x10", "sic": "LastRecordChange0x10", "sia": "LastAccess0x10",
-            "fnb": "Created0x30", "fnm": "LastModified0x30", "fnc": "LastRecordChange0x30", "fna": "LastAccess0x30"}
+                if fn:
+                    o["fn"].add((letter, e["ts_utc_ns"]))
+                else:
+                    o["si"][letter] = e["ts_utc_ns"]
+    si_cols = {"M": "LastModified0x10", "A": "LastAccess0x10", "C": "LastRecordChange0x10", "B": "Created0x10"}
+    fn_cols = {"M": "LastModified0x30", "A": "LastAccess0x30", "C": "LastRecordChange0x30", "B": "Created0x30"}
     theirs = {}
-    for r in rows(path):
-        theirs.setdefault((int(r["EntryNumber"]), int(r["SequenceNumber"])), r)
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        for r in csv.DictReader(f):  # streamed: a real $MFT gives a CSV of gigabytes
+            if r["IsAds"].lower() == "true":
+                continue  # a stream's row repeats its file's times
+            key = (int(r["EntryNumber"]), int(r["SequenceNumber"]))
+            t = theirs.setdefault(key, {"si": {L: t_ns(r[c]) for L, c in si_cols.items() if r[c]}, "fns": [],
+                                        "where": f"{r['ParentPath']}/{r['FileName']}, in use {r['InUse']}"})
+            # The tool leaves a $FILE_NAME time empty when it equals the $STANDARD_INFORMATION one.
+            t["fns"].append({L: t_ns(r[c] or r[si_cols[L]]) for L, c in fn_cols.items() if r[c] or r[si_cols[L]]})
     diff, times, missing = [], 0, 0
     for key in sorted(set(ours) | set(theirs)):
         if key not in theirs:
-            diff.append(f"entry {key}: only in Atropos ({ours[key].get('path')})")
+            diff.append(f"entry {key}: only in Atropos ({ours[key]['path']})")
             continue
         if key not in ours:
             missing += 1
             if missing <= 20:
-                r = theirs[key]
-                diff.append(f"entry {key}: only in the other tool ({r['ParentPath']}\\{r['FileName']}, in use {r['InUse']})")
+                diff.append(f"entry {key}: only in the other tool ({theirs[key]['where']})")
             continue
         o, r = ours[key], theirs[key]
-        for k, col in cols.items():
-            # The tool leaves a $FILE_NAME time empty when it equals the $STANDARD_INFORMATION one.
-            their = r[col] or (r[cols["si" + k[2]]] if k.startswith("fn") else "")
-            if k not in o or not their:
-                continue
+        for L, their in r["si"].items():
             times += 1
-            if not same(o[k], t_ns(their)):
-                diff.append(f"entry {key}: {col} {o[k]} here, {their} there")
+            if L not in o["si"] or not same(o["si"][L], their):
+                diff.append(f"entry {key}: $SI {L} {o['si'].get(L)} here, {their} there")
+        shown = list(o["si"].values()) + [t for _, t in o["fn"]]
+        for L, t in sorted(o["fn"]):
+            times += 1
+            if not any(L in fn and same(t, fn[L]) for fn in r["fns"]):
+                diff.append(f"entry {key}: $FN {L} {t} here, in none of its {len(r['fns'])} names there")
+        for fn in r["fns"]:
+            for L, their in fn.items():
+                if their[0] is not None and not any(same(x, their) for x in shown):
+                    diff.append(f"entry {key}: $FN {L} {their} there, not shown here")
     if missing > 20:
         diff.append(f"... {missing} entries in all are only in the other tool")
     return report("File table", "MFTECmd", path, f"{len(ours)} entries", f"{len(theirs)} entries, {times} times compared", diff)

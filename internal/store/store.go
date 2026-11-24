@@ -27,6 +27,9 @@ type Store struct {
 	r     *sql.DB // readers
 	mu    sync.Mutex
 	Actor string
+	// noStats makes every count read the events, for tests that compare
+	// the two ways of counting.
+	noStats bool
 }
 
 func dsn(path string, ro bool) string {
@@ -53,6 +56,22 @@ func Open(path, actor string) (*Store, error) {
 	if _, err := w.Exec(schema); err != nil {
 		w.Close()
 		return nil, fmt.Errorf("schema: %w", err)
+	}
+	// Added on 23 November 2026 without a new storage format: a case made
+	// earlier gains the tables when opened, and holds no rows in them.
+	if _, err := w.Exec(exclusionsSchema + statsSchema + hostsSchema); err != nil {
+		w.Close()
+		return nil, fmt.Errorf("schema: %w", err)
+	}
+	// run_stats gained a host column (summaries version 2); a table made
+	// earlier gets it, and its version 1 rows are simply not used.
+	var hasHost int
+	w.QueryRow(`SELECT count(*) FROM pragma_table_info('run_stats') WHERE name = 'host'`).Scan(&hasHost)
+	if hasHost == 0 {
+		if _, err := w.Exec(`ALTER TABLE run_stats ADD COLUMN host TEXT NOT NULL DEFAULT ''`); err != nil {
+			w.Close()
+			return nil, fmt.Errorf("schema: %w", err)
+		}
 	}
 	for _, t := range immutabilityTriggers() {
 		if _, err := w.Exec(t); err != nil {
@@ -225,6 +244,14 @@ type Evidence struct {
 	EventCount int64  `json:"event_count"`
 	Notes      string `json:"notes"`
 	ZoneCtx    string `json:"zone_context"`
+	// Excluded is set when the item, or the item it came out of
+	// (ExcludedBy), has been excluded from the case's view.
+	Excluded      bool   `json:"excluded,omitempty"`
+	ExcludedBy    int64  `json:"excluded_by,omitempty"`
+	ExcludeReason string `json:"exclude_reason,omitempty"`
+	// Assigned is where its submission came from: a host, or no host and a
+	// stated source; nil when the submission was never assigned.
+	Assigned *Assignment `json:"assigned,omitempty"`
 }
 
 func (s *Store) AddEvidence(e *Evidence) error {
@@ -281,7 +308,14 @@ func (s *Store) listEvidence(where string, args ...any) ([]Evidence, error) {
 		}
 		out = append(out, e)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	if err := s.markHosts(out); err != nil {
+		return nil, err
+	}
+	return out, s.markExcluded(out)
 }
 
 // ----------------------------------------------------------------- runs ----
@@ -406,7 +440,11 @@ func (r *Run) Finish(status, notes string) (digest string, err error) {
 	digest = hex.EncodeToString(r.digest.Sum(nil))
 	_, err = r.s.w.Exec(`INSERT INTO run_results(run_id,status,event_count,event_digest,notes,finished_utc) VALUES (?,?,?,?,?,?)`,
 		r.ID, status, r.count, digest, notes, time.Now().UTC().UnixNano())
-	return digest, err
+	if err != nil {
+		return digest, err
+	}
+	// The run is sealed: count it once for the chips, totals and chart.
+	return digest, r.s.computeStats(r.ID)
 }
 
 // VerifyRuns recomputes each sealed run's event digest from the stored rows.

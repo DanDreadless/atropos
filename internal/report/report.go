@@ -282,7 +282,7 @@ s{color:#8b9098} .pre{white-space:pre-wrap}
 <td class="num">{{.Size}}</td>
 <td>{{.Kind}}<div class="dim">{{.DetectReason}}</div></td>
 <td>{{utc .ReceivedUTC}}<div class="dim">{{.ReceivedBy}}</div></td>
-<td>{{.Status}}{{if .Parser}} ({{.Parser}}){{end}}, {{.EventCount}} events{{if .ZoneCtx}}<div class="dim">zone: {{.ZoneCtx}}</div>{{end}}{{if .Notes}}<div class="dim">{{.Notes}}</div>{{end}}</td></tr>{{end}}</table>
+<td>{{.Status}}{{if .Parser}} ({{.Parser}}){{end}}, {{.EventCount}} events{{if .ZoneCtx}}<div class="dim">zone: {{.ZoneCtx}}</div>{{end}}{{if .Notes}}<div class="dim">{{.Notes}}</div>{{end}}{{if .Excluded}}<div class="bad">Excluded from the case{{if ne .ExcludedBy .ID}} with #{{.ExcludedBy}}{{end}} by the examiner: {{.ExcludeReason}}. Its events are not in this report's timeline or findings.</div>{{end}}</td></tr>{{end}}</table>
 
 <h2>Parse runs</h2>
 <p class="dim">Every run is listed, including runs a later run superseded. The digest is SHA-256 over the run's events in order.</p>

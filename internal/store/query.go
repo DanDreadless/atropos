@@ -51,12 +51,14 @@ var filterKeys = map[string]string{
 }
 
 // memberSQL matches events carrying a live annotation of one kind and body.
-const memberSQL = `EXISTS (SELECT 1 FROM annotations a WHERE a.event_id=e.id AND a.kind=? AND a.body=? COLLATE NOCASE
+// It is written as a list of event ids so that the database can start from
+// the annotations, which are few, rather than test every event.
+const memberSQL = `e.id IN (SELECT a.event_id FROM annotations a WHERE a.kind=? AND a.body=? COLLATE NOCASE
 	AND NOT EXISTS (SELECT 1 FROM annotations x WHERE x.kind='retract' AND x.refers_to=a.id))`
 
 // descendantsSQL matches events of one evidence item and of every item that
 // was unpacked or copied out of it, at any depth.
-const descendantsSQL = `e.evidence_id IN (WITH RECURSIVE d(id) AS (SELECT ? UNION SELECT c.id FROM evidence c JOIN d ON c.parent_id = d.id) SELECT id FROM d)`
+const descendantsSQL = `c.evidence_id IN (WITH RECURSIVE d(id) AS (SELECT ? UNION SELECT x.id FROM evidence x JOIN d ON x.parent_id = d.id) SELECT id FROM d)`
 
 type compiled struct {
 	where []string
@@ -114,6 +116,22 @@ func ftsPhrase(term string) (string, bool) {
 func (q *Query) compile() compiled {
 	var c compiled
 	var pos []string
+	// Several values of one field (source:mft source:evtx) are alternatives,
+	// as picking two chips in one row means: either. They are gathered here
+	// and written as one condition where the first of them stands. Values
+	// excluded with "-" each apply.
+	alts := map[string][]any{}
+	for _, t := range splitTerms(q.Text) {
+		if strings.HasPrefix(t, "-") || strings.HasPrefix(t, `"`) {
+			continue
+		}
+		if i := strings.IndexByte(t, ':'); i > 0 {
+			key, val := strings.ToLower(t[:i]), strings.Trim(t[i+1:], `"`)
+			if _, ok := filterKeys[key]; ok && val != "" {
+				alts[key] = append(alts[key], val)
+			}
+		}
+	}
 	for _, t := range splitTerms(q.Text) {
 		neg := false
 		if strings.HasPrefix(t, "-") && len(t) > 1 {
@@ -123,12 +141,22 @@ func (q *Query) compile() compiled {
 		if i := strings.IndexByte(t, ':'); i > 0 && !strings.HasPrefix(t, `"`) {
 			key, val := strings.ToLower(t[:i]), strings.Trim(t[i+1:], `"`)
 			if col, ok := filterKeys[key]; ok && val != "" {
-				op := "="
 				if neg {
-					op = "<>"
+					c.where = append(c.where, col+" <> ? COLLATE NOCASE")
+					c.args = append(c.args, val)
+					continue
 				}
-				c.where = append(c.where, col+" "+op+" ? COLLATE NOCASE")
-				c.args = append(c.args, val)
+				vals, first := alts[key]
+				if !first {
+					continue // already written with the first of its alternatives
+				}
+				delete(alts, key)
+				conds := make([]string, len(vals))
+				for i := range vals {
+					conds[i] = col + " = ? COLLATE NOCASE"
+				}
+				c.where = append(c.where, "("+strings.Join(conds, " OR ")+")")
+				c.args = append(c.args, vals...)
 				continue
 			}
 			if (key == "tag" || key == "group") && val != "" {
@@ -187,7 +215,7 @@ func (q *Query) compile() compiled {
 			}
 			if key == "evidence" {
 				if n, err := strconv.ParseInt(val, 10, 64); err == nil {
-					c.where = append(c.where, not+"e.evidence_id = ?")
+					c.where = append(c.where, not+"c.evidence_id = ?")
 					c.args = append(c.args, n)
 					continue
 				}
@@ -205,17 +233,52 @@ func (q *Query) compile() compiled {
 			// submission:3 is everything added together in the third submission.
 			if key == "submission" {
 				if n, err := strconv.ParseInt(val, 10, 64); err == nil {
-					c.where = append(c.where, not+"e.evidence_id IN (SELECT id FROM evidence WHERE batch_id = ?)")
+					c.where = append(c.where, not+"c.evidence_id IN (SELECT id FROM evidence WHERE batch_id = ?)")
 					c.args = append(c.args, n)
 					continue
 				}
+			}
+			// domain:example.com is browser events for that site and its
+			// subdomains (www.example.com); visit:12 is the browser's own
+			// visit number, for following a visit to the one it came from
+			// (with evidence:, since each history file numbers its own).
+			// Both read only browser events, through the source index.
+			if (key == "domain" || key == "visit") && val != "" {
+				browserOnly := `(e.source = 'browser' COLLATE NOCASE OR e.source = 'browser-synced' COLLATE NOCASE)`
+				if key == "domain" {
+					v := strings.TrimPrefix(strings.ToLower(val), "www.")
+					like := "%." + strings.NewReplacer(`!`, `!!`, `%`, `!%`, `_`, `!_`).Replace(v)
+					c.where = append(c.where, not+"("+browserOnly+` AND (json_extract(e.fields,'$.domain') = ? OR json_extract(e.fields,'$.domain') LIKE ? ESCAPE '!'))`)
+					c.args = append(c.args, v, like)
+					continue
+				}
+				if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+					c.where = append(c.where, not+"("+browserOnly+` AND json_extract(e.fields,'$.visit_id') = ?)`)
+					c.args = append(c.args, n)
+					continue
+				}
+			}
+			// item:NTUSER.DAT is every item of that name, as the timeline's
+			// Item column shows it: all the hives of that name, wherever they
+			// came from. item:"a name with spaces" for a name with spaces.
+			if key == "item" && val != "" {
+				c.where = append(c.where, not+"c.evidence_id IN (SELECT id FROM evidence WHERE name = ? COLLATE NOCASE)")
+				c.args = append(c.args, val)
+				continue
+			}
+			// kind:windows-registry-hive is every item of one kind, as the
+			// Evidence tab names it, wherever it came from.
+			if key == "kind" && val != "" {
+				c.where = append(c.where, not+"c.evidence_id IN (SELECT id FROM evidence WHERE kind = ? COLLATE NOCASE)")
+				c.args = append(c.args, val)
+				continue
 			}
 			// file:ntuser matches events from items whose name, or whose path
 			// (including the path inside an image or archive), contains the text.
 			if key == "file" && val != "" {
 				// "!" escapes the two characters LIKE treats as wildcards; a backslash is common in paths and is left alone.
 				like := "%" + strings.NewReplacer(`!`, `!!`, `%`, `!%`, `_`, `!_`).Replace(val) + "%"
-				c.where = append(c.where, not+`e.evidence_id IN (SELECT id FROM evidence WHERE name LIKE ? ESCAPE '!' OR origin LIKE ? ESCAPE '!')`)
+				c.where = append(c.where, not+`c.evidence_id IN (SELECT id FROM evidence WHERE name LIKE ? ESCAPE '!' OR origin LIKE ? ESCAPE '!')`)
 				c.args = append(c.args, like, like)
 				continue
 			}
@@ -244,7 +307,7 @@ func (q *Query) compile() compiled {
 		c.args = append(c.args, q.To)
 	}
 	if q.EvidenceID != 0 {
-		c.where = append(c.where, "e.evidence_id = ?")
+		c.where = append(c.where, "c.evidence_id = ?")
 		c.args = append(c.args, q.EvidenceID)
 	}
 	if q.Group != "" {
@@ -254,7 +317,9 @@ func (q *Query) compile() compiled {
 	return c
 }
 
-const eventFrom = ` FROM events e JOIN current_runs c ON c.run_id = e.run_id `
+// eventFrom is how every reading of the timeline starts: the current run of
+// each item, leaving out items excluded from the case's view.
+const eventFrom = ` FROM events e JOIN current_runs c ON c.run_id = e.run_id AND c.evidence_id` + notExcluded + ` `
 
 func (c compiled) sql() string {
 	if len(c.where) == 0 {
@@ -284,6 +349,12 @@ func (s *Store) Search(q Query) ([]EventRow, error) {
 	order := " ORDER BY e.ts_utc, e.id"
 	if q.Desc {
 		order = " ORDER BY e.ts_utc DESC, e.id DESC"
+	}
+	if s.sparse(q) {
+		// Few events match: find them by the filter's index and sort them,
+		// rather than walk the whole timeline in time order looking for them.
+		// The unary + stops the time index being used for the order.
+		order = strings.NewReplacer("e.ts_utc", "+e.ts_utc", "e.id", "+e.id").Replace(order)
 	}
 	if q.AfterID != 0 {
 		if q.Desc {
@@ -348,7 +419,10 @@ type Summary struct {
 	MaxTS  int64 `json:"max_ts,string"`
 	Bucket int64 `json:"bucket_ns,string"`
 	Start  int64 `json:"start_ts,string"`
-	Bars   []Bar `json:"bars"`
+	// Buckets is the number of bars the span takes, at most the number
+	// asked for: fewer when the bars were widened to whole hours.
+	Buckets int64 `json:"buckets"`
+	Bars    []Bar `json:"bars"`
 }
 
 type Bar struct {
@@ -359,9 +433,16 @@ type Bar struct {
 // Summarise returns the match count, time span and a histogram for a query.
 func (s *Store) Summarise(q Query, buckets int) (Summary, error) {
 	c := q.compile()
+	stats := s.byStats(q)
 	var sum Summary
 	var mn, mx *int64
-	if err := s.r.QueryRow(`SELECT count(*), min(e.ts_utc), max(e.ts_utc)`+eventFrom+c.sql(), c.args...).Scan(&sum.Count, &mn, &mx); err != nil {
+	var err error
+	if stats {
+		err = s.r.QueryRow(`SELECT COALESCE(sum(e.n), 0), min(e.min_ts), max(e.max_ts)`+statsFrom+c.sql(), c.args...).Scan(&sum.Count, &mn, &mx)
+	} else {
+		err = s.r.QueryRow(`SELECT count(*), min(e.ts_utc), max(e.ts_utc)`+eventFrom+c.sql(), c.args...).Scan(&sum.Count, &mn, &mx)
+	}
+	if err != nil {
 		return sum, err
 	}
 	sum.Bars = []Bar{}
@@ -375,8 +456,22 @@ func (s *Store) Summarise(q Query, buckets int) (Summary, error) {
 	span := sum.MaxTS - sum.MinTS
 	sum.Bucket = span/int64(buckets) + 1
 	sum.Start = sum.MinTS
-	args := append([]any{sum.Start, sum.Bucket}, c.args...)
-	rows, err := s.r.Query(`SELECT (e.ts_utc - ?) / ? AS b, count(*)`+eventFrom+c.sql()+` GROUP BY b ORDER BY b`, args...)
+	var rows *sql.Rows
+	if stats && sum.Bucket >= hourNS {
+		// From the hourly summaries: bars of whole hours, starting on an
+		// hour, so each hour's events fall in exactly one bar.
+		// The start moves back to its hour, so the width is worked out from
+		// there: the bars must still cover the span in the number asked.
+		sum.Start = floorDiv(sum.MinTS, hourNS) * hourNS
+		sum.Bucket = (sum.MaxTS-sum.Start)/int64(buckets) + 1
+		sum.Bucket = (sum.Bucket + hourNS - 1) / hourNS * hourNS
+		args := append([]any{sum.Start, sum.Bucket}, c.args...)
+		rows, err = s.r.Query(`SELECT (e.hour * `+fmt.Sprint(hourNS)+` - ?) / ? AS b, sum(e.n)`+statsFrom+c.sql()+` GROUP BY b ORDER BY b`, args...)
+	} else {
+		args := append([]any{sum.Start, sum.Bucket}, c.args...)
+		rows, err = s.r.Query(`SELECT (e.ts_utc - ?) / ? AS b, count(*)`+eventFrom+c.sql()+` GROUP BY b ORDER BY b`, args...)
+	}
+	sum.Buckets = (sum.MaxTS-sum.Start)/sum.Bucket + 1
 	if err != nil {
 		return sum, err
 	}
@@ -405,30 +500,82 @@ func (s *Store) Facets() (map[string]map[string]int64, error) { return s.FacetsF
 
 // FacetsFor counts the events matching q by source, zone provenance and
 // category: the numbers on the timeline's chips, for what is being looked at.
+// FacetsFor counts the events matching q by source, zone provenance and
+// category, for the chips under the search box. Each group is counted with
+// its own filters left out (source counts ignore source:, and so on), as
+// faceted searches do: the other choices in a group stay visible while one
+// is chosen, and every count still follows the rest of the search.
+// Groups whose search comes out the same share one pass.
 func (s *Store) FacetsFor(q Query) (map[string]map[string]int64, error) {
-	out := map[string]map[string]int64{"source": {}, "tz_source": {}, "category": {}}
-	c := q.compile()
-	where := ""
-	if len(c.where) > 0 {
-		where = " WHERE " + strings.Join(c.where, " AND ")
+	out := map[string]map[string]int64{"source": {}, "tz_source": {}, "category": {}, "host": {}}
+	groups := []struct{ key, col string }{{"source", "source"}, {"tz", "tz_source"}, {"category", "category"}, {"host", "host"}}
+	byText := map[string][]string{} // search text -> output groups counted with it
+	var order []string
+	for _, g := range groups {
+		var keep []string
+		for _, t := range splitTerms(q.Text) {
+			k, _, ok := strings.Cut(strings.TrimPrefix(t, "-"), ":")
+			if ok && strings.EqualFold(k, g.key) {
+				continue
+			}
+			keep = append(keep, t)
+		}
+		text := strings.Join(keep, " ")
+		if _, seen := byText[text]; !seen {
+			order = append(order, text)
+		}
+		byText[text] = append(byText[text], g.col)
 	}
-	// One pass over the timeline for all three, rather than a pass each.
-	rows, err := s.r.Query(`SELECT e.source, e.tz_source, e.category, count(*)`+eventFrom+where+` GROUP BY 1, 2, 3`, c.args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var src, tz, cat string
-		var n int64
-		if err := rows.Scan(&src, &tz, &cat, &n); err != nil {
+	for _, text := range order {
+		qq := q
+		qq.Text = text
+		c := qq.compile()
+		where := ""
+		if len(c.where) > 0 {
+			where = " WHERE " + strings.Join(c.where, " AND ")
+		}
+		var rows *sql.Rows
+		var err error
+		if s.byStats(qq) {
+			rows, err = s.r.Query(`SELECT e.source, e.tz_source, e.category, e.host, sum(e.n)`+statsFrom+where+` GROUP BY 1, 2, 3, 4`, c.args...)
+		} else {
+			rows, err = s.r.Query(`SELECT e.source, e.tz_source, e.category, e.host, count(*)`+eventFrom+where+` GROUP BY 1, 2, 3, 4`, c.args...)
+		}
+		if err != nil {
 			return nil, err
 		}
-		out["source"][src] += n
-		out["tz_source"][tz] += n
-		out["category"][cat] += n
+		want := map[string]bool{}
+		for _, col := range byText[text] {
+			want[col] = true
+		}
+		for rows.Next() {
+			var src, tz, cat, host string
+			var n int64
+			if err := rows.Scan(&src, &tz, &cat, &host, &n); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if want["source"] {
+				out["source"][src] += n
+			}
+			if want["tz_source"] {
+				out["tz_source"][tz] += n
+			}
+			if want["category"] {
+				out["category"][cat] += n
+			}
+			// Events with no host have no chip: there is nothing to filter on.
+			if want["host"] && host != "" {
+				out["host"][host] += n
+			}
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 type TextHit struct {
@@ -456,7 +603,7 @@ func (s *Store) SearchText(text string, limit int) ([]TextHit, error) {
 	}
 	rows, err := s.r.Query(`SELECT f.rowid, ev.name, ev.kind, snippet(evidence_text_fts, 0, '[', ']', ' … ', 16)
 		FROM evidence_text_fts f JOIN evidence ev ON ev.id = f.rowid
-		WHERE evidence_text_fts MATCH ? LIMIT ?`, strings.Join(pos, " AND "), limit)
+		WHERE evidence_text_fts MATCH ? AND ev.id`+notExcluded+` LIMIT ?`, strings.Join(pos, " AND "), limit)
 	if err != nil {
 		return nil, fmt.Errorf("text search: %w", err)
 	}
@@ -477,7 +624,7 @@ func (s *Store) SearchText(text string, limit int) ([]TextHit, error) {
 // leaving out strings pulled from binary files.
 func (s *Store) StreamFullText(fn func(evidenceID int64, name, origin, body string) error) error {
 	rows, err := s.r.Query(`SELECT t.evidence_id, e.name, e.origin, t.body FROM evidence_text t JOIN evidence e ON e.id = t.evidence_id
-		WHERE t.method = 'full text' AND e.duplicate_of IS NULL ORDER BY t.evidence_id`)
+		WHERE t.method = 'full text' AND e.duplicate_of IS NULL AND e.id` + notExcluded + ` ORDER BY t.evidence_id`)
 	if err != nil {
 		return err
 	}
@@ -651,4 +798,13 @@ func (s *Store) JournalParent(e *EventRow) (*JournalFolder, error) {
 	}
 	out.Note = "the folder's path as the file table records it now; it may have been renamed or moved since the journal record was written"
 	return &out, nil
+}
+
+// floorDiv divides rounding towards minus infinity, for times before 1970.
+func floorDiv(a, b int64) int64 {
+	q := a / b
+	if a%b != 0 && (a < 0) != (b < 0) {
+		q--
+	}
+	return q
 }

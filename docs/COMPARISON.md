@@ -8,7 +8,7 @@ Atropos output compared, record by record, with independent parsers of the same 
 
 | Tool | Version | Used for |
 |---|---|---|
-| dissect.regf, dissect.ntfs, dissect.esedb, dissect.eventlog (Fox-IT) | 3.14, 3.16, 3.18, 3.11 | registry keys, the file table, SRUM, event logs |
+| dissect.regf, dissect.ntfs, dissect.esedb, dissect.eventlog (Fox-IT) | 3.14, 3.16, 3.18, 3.11 | registry keys, the file table, SRUM, event logs; dissect.ntfs 3.16 again on 23 November, on Kali, for every `$FILE_NAME` of the owner's `$MFT` (`mft_dissect_dump.py`) |
 | regipy (Martin Korman) | 6.5.0 | UserAssist, Amcache |
 | python-evtx (Willi Ballenthin) | 0.8.1 | event logs |
 | Hindsight (Ryan Benson) | 20260600 | the meaning of Chromium's history codes |
@@ -17,8 +17,9 @@ Atropos output compared, record by record, with independent parsers of the same 
 | libewf (pyewf, Joachim Metz) | 20260924 | E01 images |
 | SIDR (Stroz Friedberg) | main branch, 15 November 2026 (its golden reports) | the Windows Search index |
 | libvshadow (pyvshadow, Joachim Metz) | current on 14 November 2026 | volume shadow copy catalog |
+| The Sleuth Kit (Brian Carrier) | 4.14.0, Kali Linux's package, run on 23 November 2026 | NTFS, FAT and ext volumes (`fls -m`, `icat`); `mactime` on the bodyfile export |
 
-The first round used independent libraries; the second, on 14 November, used the Zimmerman tools (`scripts/compare/ez.py`). **Not yet compared with: LECmd on loose shortcut files, AmcacheParser (not in the .NET 4 set), RegRipper, Plaso, The Sleuth Kit or DHParser.**
+The first round used independent libraries; the second, on 14 November, used the Zimmerman tools (`scripts/compare/ez.py`). **Not yet compared with: LECmd on loose shortcut files, AmcacheParser (not in the .NET 4 set), RegRipper, Plaso or DHParser.** The Sleuth Kit was added on 23 November 2026.
 
 ## Inputs
 
@@ -38,7 +39,7 @@ Public samples (`scripts/fetch-testdata.sh`):
 | `testdata/ext/ext4.raw` | `d88dd5f6774526a94ad74e061c6a4245fef302e03c917277fb4043e30ed8b434` |
 | `testdata/fat/fat12.raw` | `60aacdf576dad24743d80a66a045bcdfbbd0ef4d368cece060bf087ee114da2f` |
 
-The owner's own files, from a Windows 11 machine, read from copies and reported as counts: `NTUSER.DAT`, `UsrClass.dat`, `SAM`, `SECURITY`, `Amcache.hve`, `SRUDB.dat`, seven Defender detection records and one MPLog.
+The owner's own files, from a Windows 11 machine, read from copies and reported as counts: `NTUSER.DAT`, `UsrClass.dat`, `SAM`, `SECURITY`, `Amcache.hve`, `SRUDB.dat`, seven Defender detection records and one MPLog; and on 23 November the system volume's `$MFT` (1.37 GB, 1,335,808 records), `$LogFile` (64 MB) and `$J` (38 MB), exported with FTK Imager.
 
 ## Results
 
@@ -77,8 +78,15 @@ The owner's own files, from a Windows 11 machine, read from copies and reported 
 | Registry key times, UserAssist, BAM | RECmd with its `DFIRBatch.reb` | owner's SYSTEM and NTUSER.DAT | last-write time of the 930 keys the batch reports, to 100 ns; 222 UserAssist entries (program, last run, run count); 77 BAM entries (program, account, time) | no differences |
 | VHD, VHDX, VMDK readers | libvhdi (pyvhdi 20260901), libvmdk (pyvmdk 20260714), `scripts/compare/vdisk.py` | dfVFS's ntfs-fixed, -dynamic, -differential and -parent as VHD and VHDX, and ext2.vmdk | MD5 of each disk's contents | identical (the VMDK's is also the stored MD5 of ext2.E01, the same disk) |
 | E01 test writer | libewf | five images written by `imagetest.E01`: stored and compressed chunks, one to three segments, with and without a set identifier or a table base | libewf opens each and reads the same media | no differences |
-| FAT reader | dfVFS's own test expectations | dfVFS's `fat12.raw`, and `fat-differential.vhd`/`.vhdx` with their parents | names, sizes and contents of the 4 entries; the directory entry offset dfVFS uses as the inode number (0x62A0) | identical. Not yet compared with The Sleuth Kit: `scripts/compare/fls.py` is ready |
-| ext reader | dfVFS's own test expectations | dfVFS's `ext2.raw` and `ext4.raw` | inode numbers of the 5 names, mode, owner, group, size and link count of one file, the symbolic link's target, content; creation time present only on ext4 | identical. Not yet compared with The Sleuth Kit: `scripts/compare/fls.py` is ready |
+| FAT reader | dfVFS's own test expectations | dfVFS's `fat12.raw`, and `fat-differential.vhd`/`.vhdx` with their parents | names, sizes and contents of the 4 entries; the directory entry offset dfVFS uses as the inode number (0x62A0) | identical |
+| ext reader | dfVFS's own test expectations | dfVFS's `ext2.raw` and `ext4.raw` | inode numbers of the 5 names, mode, owner, group, size and link count of one file, the symbolic link's target, content; creation time present only on ext4 | identical |
+| FAT reader | The Sleuth Kit `fls -m -z UTC` (`fls.py`) | dfVFS's `fat12.raw` | path, deleted flag, size, modified, accessed and created times of 4 entries | no differences (23 November) |
+| ext reader | The Sleuth Kit `fls -m` (`fls.py`) | dfVFS's `ext2.raw` and `ext4.raw` | path, deleted flag, size, link target, modified, accessed, changed and created times of 6 entries each | no differences (23 November) |
+| `ntfs-mft` | The Sleuth Kit `fls -m` (`fls_ntfs.py`) | public `test.ntfs.dd`; the volume in the public `2011-10-19-Sample.E01` (its `$MFT` taken out with `icat`) | by MFT entry: path, deleted flag, the four `$STANDARD_INFORMATION` times and the four `$FILE_NAME` times, to the second; 32 and 22 entries, 128 and 88 `$FILE_NAME` times | no differences (23 November). Every `$FILE_NAME` time on both volumes equals one of the entry's `$SI` times, so Atropos showed no separate `$FN` event: that path is still unproven |
+| `ntfs-mft` | MFTECmd (`ez.py mft`, every name row) and dissect.ntfs | owner's `$MFT` | 1,268,224 entries; 5,935,962 times, `$SI` and the `$FN` of every name, to 100 ns | `$SI`: no differences. `$FN`: none after two fixes (below, 15 and 16), apart from 339 that are MFTECmd's (below), each confirmed in dissect's reading (23 November) |
+| `usn-journal` | MFTECmd | owner's `$J` | number of records | 321,401 on both sides. The last 484 KB of the exported file are not records (below); Atropos warns of them, MFTECmd passes over them |
+| E01 reader and file extraction | The Sleuth Kit `icat`, over media written out by libewf | public `2011-10-19-Sample.E01` | the `$MFT` Atropos extracts from the image against `icat VOLUME 0` | identical, SHA-256 `042c6032…aab2c8`; libewf's media MD5 equals the stored one (23 November) |
+| Bodyfile export | The Sleuth Kit `mactime -b -d -z UTC` | export of a case holding the FAT, ext and NTFS samples | `mactime` reads all 109 lines without a warning; 127 rows out | read cleanly (23 November). Rows dated `Xxx Xxx 00 0000` are times the file system does not keep (FAT has no change time, ext2 no creation time), which `fls`'s own body files leave at 0 the same way |
 | Windows Search | SIDR (Stroz Friedberg), its own reports on its public samples | `Windows.db` (Windows 11) and `Windows.edb` (Windows 10) | every property SIDR reports for every item: paths, file times, gather times, web addresses, activity start and end, application, content address | identical: 21,659 values of 839 items, and 8,783 values of 1,182 items. Local-clock activity times are labelled local where SIDR writes them as UTC; 119 of 170 indexed summaries in the ESE sample are not returned by go-ese |
 | Shadow copy list | libvshadow | public `vss.raw` | identifier, creation time and volume size of 2 copies | no differences |
 | Reading through shadow copies | dfVFS's own test, and the sample's design | public `vss.raw` | the 16 bytes at 0x1C9 and 8 near the end of copy 2; which files each copy holds (`vss1` and `vss2` were written after copies 1 and 2); unchanged files byte for byte | as expected. Not yet compared with libvshadow: `scripts/compare/vss.py` prints the MD5 of each copy for comparison with `TestReadThroughShadowCopies` |
@@ -100,6 +108,8 @@ Each was fixed, with a test, on the day it was found.
 8. **A delegate folder's modified time was not read.** SBECmd showed a modified time on six shellbag items where Atropos had none: items wrapped by a delegate folder hold an ordinary file entry at a fixed offset. Now read.
 9. **SRUM activity records showed the stored identifier**, `!!svchost.exe!2037/07/18:06:45:20!15eca![netsvcs]`, as the application. SrumECmd shows the program's name. Atropos now does too, keeping the stored form, the link time and the services in fields.
 10. **Known-folder targets in jump lists** (`knownfolder:{GUID}`) are now named where the GUID is known.
+15. **A file's other names had no times** (23 November, the owner's `$MFT` against MFTECmd). A file with several names (hard links, a POSIX name beside a Win32 one, a DOS short name renamed apart from its long name) has a `$FILE_NAME` attribute for each, with its own four times, among them when that name was made. The file-table library reports the first attribute's times only. 38,604 files on the owner's volume had names whose times differ; their times were not on the timeline. Each other name's moments are now `$FN` events naming it (`file_name`, `file_name_namespace`, `file_name_parent_entry`).
+16. **Names in extension records were not read from a bare `$MFT`, and 230 files were left out** (23 November, same comparison). When a file's attributes overflow its record and the attribute list is itself held outside the record, a bare `$MFT` cannot follow it. The library then misses those names, and a record with no name of its own it drops altogether: 230 files in use on the owner's volume were absent from the timeline. Atropos now finds every extension record holding a name in one pass, keyed by its base record and sequence number, as MFTECmd does; the 230 are read directly (`names_only_in_extension_records`), without their streams.
 14. **Logs saved from another log lost most of their records** (15 November). "Save filtered log file as" and `wevtutil epl` rewrite each record's header: the record numbers start again from 1 and the header's time can be zero. Atropos took both from the header, so of the 278 public attack samples only 103 parsed cleanly, 158 were partial and 16 gave no events at all. Each event's own `TimeCreated` and `EventRecordID` are now used, as Event Viewer and EvtxECmd use them; the rewritten values are kept as `record_written` and `record_number_in_file`. The library gives `TimeCreated` only as floating-point seconds, good to about a microsecond, so the exact stored FILETIME is found in the record's bytes. On an ordinary log nothing changes (the Security sample still matches to 100 ns).
 13. **ShimCache slack and the executed flag were not read** (15 November). On Windows 10 1703 and later each entry's data carries tagged items, and tag 0x100 marks it executed; and the registry cells holding the value are usually longer than the value, with entries from when the cache was longer in the unused end. Both now read; 424 and 20 on the owner's SYSTEM hive, agreeing with AppCompatCacheParser.
 12. **Transaction logs were not applied** (not a comparison finding, but measured by one): a hive copied from a running system lacked whatever was only in its logs. On regipy's real hives that was 3,020 keys.
@@ -109,12 +119,18 @@ Each was fixed, with a test, on the day it was found.
 
 - **dissect.eventlog, dissect.regf and python-evtx convert a FILETIME through a floating-point number**, which at present-day values is good to two or three microseconds. Atropos keeps all 100-nanosecond digits, and the event-log script proves it by reading the record headers itself. The scripts allow three microseconds against those libraries, and compare registry times against dissect's raw FILETIME instead of its converted one.
 - **python-evtx returned 389 of the 739 records** in the public log: it reads the number of chunks the file header counts, and this log has more.
+- **MFTECmd writes no row for a DOS short name**, so a DOS name whose times differ from its long name's is not in its output: 134 times on the owner's volume, all confirmed by dissect.ntfs.
+- **MFTECmd leaves out 205 deleted records** on the owner's volume that dissect.ntfs and Atropos both read (records at the end of the table, sequence 2).
+- **The Sleuth Kit 4.14.0 as packaged by Kali crashes on every E01** (23 November 2026): `img_stat`, `mmls` and `fls` end in a segmentation fault on the public `ext2.E01` and `2011-10-19-Sample.E01`, so its libewf support is broken. The media were written out with pyewf (`libewf-python` 20260924) and TSK run on the raw copy.
 - **dissect.esedb returned 2 rows of the owner's SRUM database with every column empty.** Atropos does not emit them.
 
 ## Deliberate differences
 
 - **UserAssist entries with no last-run time are not events** (1 in the public hive, 124 in the owner's). regipy lists them. An event needs a time; they are not lost, since the key's values are in the key's own event.
 - **A channel stored as a number** (in logs converted from ETW captures) is shown as that number; EvtxECmd shows nothing.
+- **A directory's size is 0 here** on FAT and ext; `fls` gives the size of its data (2,048, 1,024, 12,288 bytes). A FAT directory entry records no size at all; TSK counts its clusters. `fls.py` does not compare directory sizes.
+- **An exported `$J` can end in data that is not records.** FTK Imager's export of the owner's journal ends in 121 pages (484 KB) after the last record that hold no valid record. Atropos warns and marks the run partial; MFTECmd says nothing.
+- **The root directory (MFT entry 5) is an event here**; `fls -r` lists what is in the root, not the root itself.
 - **Four reserved file-table records (12 to 15) have times and no name.** dissect.ntfs lists them; Atropos does not show a record that is not a file.
 - **ShimCache entries with no time are not events** (130 in the owner's hive, one of them in slack). AppCompatCacheParser prints slack entries to the second; Atropos keeps their full time.
 - **A jump list entry never used has no time and is not an event** (1 in the owner's lists, pinned). Its shell link's times are on the timeline.
@@ -156,6 +172,13 @@ python vss.py ../../testdata/vss/vss.raw
 # FAT, exFAT and ext: The Sleuth Kit's fls, as a body file (standard library only)
 #   fls -r -p -m / -z UTC [-o SECTOR] IMAGE > body.txt
 python fls.py fat EXPORT.jsonl body.txt [EVIDENCE_ID] [p1]     # or ext
+#   NTFS: the same fls line on the volume; Atropos may read the volume or its $MFT (icat VOLUME 0 > MFT)
+python fls_ntfs.py EXPORT.jsonl body.txt [EVIDENCE_ID]
+#   Every $FILE_NAME of a $MFT as raw FILETIMEs, from dissect.ntfs (a second opinion on names MFTECmd leaves out)
+python mft_dissect_dump.py $MFT > dissect.tsv
+#   A real $MFT's export is gigabytes: export only its events (--query source:mft); ez.py mft streams it
+#   The bodyfile export: atropos export --format bodyfile -o atropos.body; mactime -b atropos.body -d -z UTC
+#   The Sleuth Kit packaged by Kali crashes on E01 (see above): write the media out first with pyewf
 # Registry: RECmd -d DIR --bn Root.reb (every key, deleted ones marked) or AllKeys.reb (whole branches); both are in scripts/compare
 ```
 
@@ -165,9 +188,8 @@ Each script exits non-zero when it finds a difference and prints the first forty
 
 ## Still to do
 
-- **Still to compare with a Zimmerman tool:** the rest of what RECmd's batch reports (USB devices, services' values, the recent-file and dialog lists, MountPoints2: only key times, UserAssist and BAM are compared so far), Amcache (AmcacheParser is not in the .NET 4 download: it needs the .NET 9 or 10 runtime installed, or `-NetVersion 10`), loose `.lnk` files (the owner's Recent folder holds none), `$FILE_NAME` times and the change journal on a real `$MFT` and `$J`, event log channels other than Security. And RegRipper, Plaso and The Sleuth Kit, none of which is installed here; `fls.py` is ready for The Sleuth Kit's `fls` output on FAT, exFAT and ext volumes.
+- **Still to compare with a Zimmerman tool:** the rest of what RECmd's batch reports (USB devices, services' values, the recent-file and dialog lists, MountPoints2: only key times, UserAssist and BAM are compared so far), Amcache (AmcacheParser is not in the .NET 4 download: it needs the .NET 9 or 10 runtime installed, or `-NetVersion 10`), loose `.lnk` files (the owner's Recent folder holds none), the change journal's records field by field (only their number is compared), event log channels other than Security. And RegRipper and Plaso. The Sleuth Kit has been run on FAT, ext and NTFS (on Kali), but not yet on exFAT or on a real `$MFT`.
 - **Gaps the Zimmerman tools showed:** the modified time of shellbag items inside archives (4 on the owner's machine); the shell item kinds listed above; SRUM's energy, push-notification and `vfuprov` tables, which SrumECmd reads.
 - **Not compared at all:** `$LogFile` and directory-index slack (LogFileParser, INDXParse), Notepad state, browser history values as distinct from code meanings (Hindsight run on a profile), and the whole timeline against Plaso.
-- **`$FILE_NAME` times:** the public volume produced no `$FN` events to compare. A real `$MFT` is needed.
-- **The bodyfile export** has still not been read by `mactime`.
+- **`$FILE_NAME` times:** compared with `fls` on the public volumes, and with MFTECmd and dissect.ntfs on the owner's real `$MFT` (23 November); no unexplained differences.
 - **Only one machine's data.** Every count above on real data is from one Windows 11 installation.

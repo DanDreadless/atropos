@@ -30,7 +30,7 @@ part = "/" + sys.argv[5] if len(sys.argv) > 5 else ""
 letters = (("M", 0), ("A", 1), ("C", 2), ("B", 3)) if kind == "ext" else (("M", 0), ("A", 1), ("B", 3))
 
 # Atropos: one entry per path, its times keyed by MACB letter.
-ours = defaultdict(lambda: {"times": {}, "deleted": False, "size": None})
+ours = defaultdict(lambda: {"times": {}, "deleted": False, "size": None, "dir": False, "target": None})
 for e in load(export, kind, evid):
     if e["macb"] == "":
         continue  # an ext inode's deletion time: fls's body file has no column for it
@@ -40,7 +40,10 @@ for e in load(export, kind, evid):
             continue
         p = p[len(part):]
     o = ours[p.lower()]
-    o["path"], o["size"], o["deleted"] = p, e["fields"].get("size"), bool(e["fields"].get("deleted"))
+    f = e["fields"]
+    o["path"], o["size"], o["deleted"] = p, f.get("size"), bool(f.get("deleted"))
+    o["dir"] = bool(f.get("is_dir")) or f.get("type") == "directory"
+    o["target"] = f.get("link_target")
     for letter, i in letters:
         if e["macb"][i] == letter:
             o["times"][letter] = e["ts_utc_ns"] // 10**9
@@ -57,12 +60,16 @@ with open(body, encoding="utf-8", errors="replace") as f:
             continue
         deleted = name.endswith(" (deleted)")
         name = name.removesuffix(" (deleted)")
+        # fls names a symbolic link "name -> target".
+        target = None
+        if " -> " in name:
+            name, target = name.split(" -> ", 1)
         base = name.rsplit("/", 1)[-1]
         # fls also lists what is not a file: the volume label, the FAT
         # tables, the boot sector and "." entries.
         if base in (".", "..") or name.startswith("/$") or "(Volume Label Entry)" in name or name.endswith("/$OrphanFiles"):
             continue
-        theirs[name.lower()] = {"path": name, "deleted": deleted, "size": int(c[6]),
+        theirs[name.lower()] = {"path": name, "deleted": deleted, "size": int(c[6]), "target": target,
                                 "times": {"A": int(c[7]), "M": int(c[8]), "C": int(c[9]), "B": int(c[10])}}
 
 diffs = []
@@ -76,8 +83,11 @@ for k in sorted(set(ours) | set(theirs)):
         continue
     if a["deleted"] != b["deleted"]:
         diffs.append(f"{a['path']}: deleted {a['deleted']} here, {b['deleted']} in fls")
-    if not a["path"].endswith("/") and a["size"] is not None and a["size"] != b["size"] and b["size"] != 0:
+    # A directory's size is left at 0 here on purpose; fls gives its data's size.
+    if not a["dir"] and a["size"] is not None and a["size"] != b["size"] and b["size"] != 0:
         diffs.append(f"{a['path']}: size {a['size']} here, {b['size']} in fls")
+    if b["target"] is not None and a["target"] != b["target"]:
+        diffs.append(f"{a['path']}: link target {a['target']!r} here, {b['target']!r} in fls")
     for letter, _ in letters:
         mine, other = a["times"].get(letter), b["times"].get(letter) or None
         if mine != other:

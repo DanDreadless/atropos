@@ -846,3 +846,98 @@ func TestUnpackSizeLimit(t *testing.T) {
 	}
 	c.verifyOK(t)
 }
+
+// An item sent for a new parse run is reported as pending from the moment it
+// is queued, even while another run holds the ingester, and as the current
+// item while it is parsed; the interface marks its row from this.
+func TestStatusNamesPendingItems(t *testing.T) {
+	c := newCase(t)
+	p := filepath.Join(t.TempDir(), "a.log")
+	os.WriteFile(p, []byte("2024-01-02T03:04:05Z one line\n"), 0o600)
+	c.ingest(t, p)
+	e := c.byName(t, "a.log")
+	if st := c.in.Status(); st.Busy || len(st.Pending) != 0 || st.CurrentID != 0 {
+		t.Fatalf("idle status: %+v", st)
+	}
+	c.in.mu.Lock() // another run is under way
+	c.in.ProcessAsync([]*store.Evidence{&e})
+	st := c.in.Status()
+	if !st.Busy || len(st.Pending) != 1 || st.Pending[0] != e.ID || st.CurrentID != 0 {
+		c.in.mu.Unlock()
+		t.Fatalf("queued status: %+v", st)
+	}
+	c.in.mu.Unlock()
+	for i := 0; i < 500 && c.in.Status().Busy; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if st := c.in.Status(); st.Busy || len(st.Pending) != 0 || st.CurrentID != 0 {
+		t.Fatalf("status after the run: %+v", st)
+	}
+}
+
+// A submission assigned to a host gives its events that host, and the zone
+// the examiner stated for the host applies to zoneless local times, below a
+// zone the evidence itself gives. A SYSTEM hive in the submission that names
+// another computer is noted on the item; a submission not from a host has no
+// host.
+func TestAssignedHost(t *testing.T) {
+	dir := t.TempDir()
+	logPath := func(name string) string {
+		p := filepath.Join(dir, name)
+		os.WriteFile(p, []byte("2024-07-15 12:00:00 "+name+" local entry\n"), 0o600)
+		return p
+	}
+	first := func(c *testCase, text string) store.EventRow {
+		t.Helper()
+		rows, err := c.s.Search(store.Query{Text: text})
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("%s: %d events (%v)", text, len(rows), err)
+		}
+		return rows[0]
+	}
+	c := newCase(t)
+	ws, _ := c.s.AddHost("WS-042")
+	if _, err := c.s.SetDetails("WS-042", map[string]string{"time_zone": "Asia/Tokyo"}); err != nil {
+		t.Fatal(err)
+	}
+
+	batch, _ := c.s.NextBatch()
+	c.s.AssignBatch(batch, &ws.ID, "")
+	one, _ := c.in.IntakePath(batch, logPath("one.log"))
+	c.in.Process([]*store.Evidence{one})
+	e := first(c, "one.log")
+	if e.Host != "WS-042" || e.TZSource != "examiner-set" || e.TZName != "Asia/Tokyo" || time.Unix(0, e.TSUTC).UTC().Format(time.RFC3339) != "2024-07-15T03:00:00Z" {
+		t.Errorf("assigned host: host=%q %s %s %s", e.Host, e.TZSource, e.TZName, time.Unix(0, e.TSUTC).UTC().Format(time.RFC3339))
+	}
+	if ev := c.byName(t, "one.log"); !strings.Contains(ev.ZoneCtx, "examiner-stated for host WS-042") || ev.Assigned == nil || ev.Assigned.HostName != "WS-042" {
+		t.Errorf("zone context %q, assignment %+v", ev.ZoneCtx, ev.Assigned)
+	}
+
+	// A SYSTEM hive in the same submission names another computer.
+	batch, _ = c.s.NextBatch()
+	c.s.AssignBatch(batch, &ws.ID, "")
+	hivePath := filepath.Join(dir, "SYSTEM")
+	os.WriteFile(hivePath, []byte("stand-in for a SYSTEM hive"), 0o600)
+	hive, _ := c.in.IntakePath(batch, hivePath)
+	c.s.AddFact(hive.ID, "host.name", "LAPTOP-9", "test")
+	two, _ := c.in.IntakePath(batch, logPath("two.log"))
+	c.in.Process([]*store.Evidence{two})
+	if e := first(c, "two.log"); e.Host != "WS-042" {
+		t.Errorf("the assignment should name the host: %q", e.Host)
+	}
+	if ev := c.byName(t, "two.log"); !strings.Contains(ev.Notes, `names the computer "LAPTOP-9"`) || ev.Status != "parsed" {
+		t.Errorf("disagreement not noted, or marked a fault: %s %q", ev.Status, ev.Notes)
+	}
+
+	// Not from a host: no host on the events.
+	batch, _ = c.s.NextBatch()
+	c.s.AssignBatch(batch, nil, "firewall export")
+	three, _ := c.in.IntakePath(batch, logPath("three.log"))
+	c.in.Process([]*store.Evidence{three})
+	if e := first(c, "three.log"); e.Host != "" || e.TZSource != "assumed" {
+		t.Errorf("not from a host: host=%q %s", e.Host, e.TZSource)
+	}
+	if !sameHost("ws-042.corp.example", "WS-042") || sameHost("WS-0421", "WS-042") {
+		t.Error("sameHost")
+	}
+}

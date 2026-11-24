@@ -69,7 +69,7 @@ var HostFields = []DetailField{
 	{"operating_system", "Operating system", "System", "Name, edition, version and build", false},
 	{"os_installed", "Operating system installed", "System", "Install date, with its time zone", false},
 	{"domain", "Domain or workgroup", "System", "", false},
-	{"time_zone", "Time zone", "System", "The zone the host was set to", false},
+	{"time_zone", "Time zone", "System", "The zone the host was set to, as a zone name such as Europe/London: Atropos then uses it for times this host's evidence records in local time (a zone read from its SYSTEM hive takes precedence)", false},
 	{"ip_addresses", "IP addresses", "System", "", false},
 	{"mac_addresses", "MAC addresses", "System", "", false},
 	{"accounts", "User accounts of interest", "System", "", true},
@@ -140,6 +140,13 @@ func (s *Store) SetDetails(host string, values map[string]string) (int, error) {
 	}
 	fields, target := CaseFields, "case"
 	if host != "" {
+		// Describing a host makes it one of the case's hosts, under the
+		// spelling it was first given.
+		h, err := s.AddHost(host)
+		if err != nil {
+			return 0, err
+		}
+		host = h.Name
 		fields, target = HostFields, "host:"+host
 	}
 	current, err := s.currentDetails()
@@ -279,6 +286,17 @@ func (s *Store) Details() (*AllDetails, error) {
 		}
 		stated[strings.ToLower(h)] = true
 		out.Hosts = append(out.Hosts, HostDetails{Name: h, Values: live, Found: found[strings.ToLower(h)]})
+	}
+	// Hosts the examiner has added but not yet described still have a form.
+	added, err := s.Hosts()
+	if err != nil {
+		return nil, err
+	}
+	for _, h := range added {
+		if !stated[strings.ToLower(h.Name)] {
+			stated[strings.ToLower(h.Name)] = true
+			out.Hosts = append(out.Hosts, HostDetails{Name: h.Name, Values: map[string]Detail{}, Found: found[strings.ToLower(h.Name)]})
+		}
 	}
 	for _, n := range names {
 		if !stated[strings.ToLower(n)] {

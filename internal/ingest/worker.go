@@ -38,6 +38,7 @@ type job struct {
 	Path          string // vault copy of the evidence
 	Size          int64
 	Name          string
+	Origin        string // where the item was taken from, for a parser that reads meaning from its folder
 	Kind          string
 	Host          string
 	ZoneFrom      string // timeutil.Zone* constant for zoneless local times
@@ -119,7 +120,7 @@ func runJob(j job, s sink) (err error) {
 	}
 	defer f.Close()
 	return p.Parse(&parsers.Context{
-		File: f, Size: j.Size, Name: j.Name, Kind: j.Kind, Host: j.Host, Local: lc,
+		File: f, Size: j.Size, Name: j.Name, Origin: j.Origin, Kind: j.Kind, Host: j.Host, Local: lc,
 		ReceivedYear: j.ReceivedYear, ReceivedMonth: j.ReceivedMonth, Segments: j.Segments, WorkDir: j.OutDir,
 		Emit: func(ev parsers.Event) error { return s.event(storeEvent(ev)) },
 		Fact: s.fact,

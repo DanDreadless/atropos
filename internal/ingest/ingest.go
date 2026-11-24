@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -73,12 +74,42 @@ type Status struct {
 	Queued  int    `json:"queued"`
 	Done    int    `json:"done"`
 	Last    string `json:"last,omitempty"`
+	// The evidence items waiting for a parse run or in one, and the one
+	// being parsed now, so the interface can mark them: an item's stored
+	// status describes its last finished run until the new one ends.
+	Pending   []int64 `json:"pending,omitempty"`
+	CurrentID int64   `json:"current_id,omitempty"`
 }
 
 func (in *Ingester) Status() Status {
 	in.stMu.Lock()
 	defer in.stMu.Unlock()
-	return in.status
+	st := in.status
+	st.Pending = append([]int64(nil), in.status.Pending...)
+	return st
+}
+
+// addPending records items as waiting for a parse run.
+func (in *Ingester) addPending(es []*store.Evidence) {
+	in.setStatus(func(s *Status) {
+		for _, e := range es {
+			if !slices.Contains(s.Pending, e.ID) {
+				s.Pending = append(s.Pending, e.ID)
+			}
+		}
+	})
+}
+
+// donePending records that an item no longer waits.
+func (in *Ingester) donePending(id int64) {
+	in.setStatus(func(s *Status) {
+		if i := slices.Index(s.Pending, id); i >= 0 {
+			s.Pending = slices.Delete(s.Pending, i, i+1)
+		}
+		if s.CurrentID == id {
+			s.CurrentID = 0
+		}
+	})
 }
 
 func (in *Ingester) setStatus(f func(*Status)) {
@@ -176,6 +207,7 @@ func (in *Ingester) Process(top []*store.Evidence) {
 // between submitting work and that work starting.
 func (in *Ingester) ProcessAsync(top []*store.Evidence) {
 	in.begin()
+	in.addPending(top) // marked now: the run may wait for another to finish first
 	go func() {
 		defer in.end()
 		in.process(top)
@@ -234,11 +266,18 @@ func (in *Ingester) process(top []*store.Evidence) {
 		return in.priority(leaves[i]) < in.priority(leaves[j])
 	})
 	in.setStatus(func(s *Status) { s.Queued = len(leaves); s.Done = 0 })
+	in.addPending(leaves)
+	for _, e := range top {
+		if !slices.ContainsFunc(leaves, func(l *store.Evidence) bool { return l.ID == e.ID }) {
+			in.donePending(e.ID) // a container, now unpacked, or a duplicate
+		}
+	}
 	for _, e := range leaves {
-		in.setStatus(func(s *Status) { s.Current = e.Name })
+		in.setStatus(func(s *Status) { s.Current, s.CurrentID = e.Name, e.ID })
 		if err := in.Parse(e); err != nil {
 			in.S.Audit("parse.error", fmt.Sprintf("evidence:%d", e.ID), map[string]any{"error": err.Error()})
 		}
+		in.donePending(e.ID)
 		in.setStatus(func(s *Status) { s.Done++ })
 	}
 	in.completeImages(leaves)
@@ -585,6 +624,15 @@ func (in *Ingester) localContext(e *store.Evidence) (timeutil.LocalContext, stri
 				"host-registry: " + zones[0]
 		}
 	}
+	// The zone the examiner stated for the host the submission is assigned to.
+	if a, _ := in.S.BatchAssignment(e.BatchID); a != nil && a.HostID != nil {
+		if z := in.S.HostTimeZone(a.HostName); z != "" {
+			if loc, err := time.LoadLocation(z); err == nil {
+				return timeutil.LocalContext{Loc: loc, ZoneFrom: timeutil.ZoneExaminer, ZoneName: z},
+					"examiner-stated for host " + a.HostName + ": " + z
+			}
+		}
+	}
 	if in.ExaminerZone != nil {
 		note := "examiner-set: " + in.ExaminerZoneName
 		if len(zones) > 1 {
@@ -630,18 +678,32 @@ func (in *Ingester) runParser(e *store.Evidence, p parsers.Parser) (string, int6
 
 func (in *Ingester) runParserWith(e *store.Evidence, p parsers.Parser, okStatus string, carried []string) (status string, count int64, notes []string, err error) {
 	lc, zoneNote := in.localContext(e)
-	host := ""
-	if hosts, _ := in.S.BatchFacts(e.BatchID, "host.name"); len(hosts) == 1 {
-		host = hosts[0]
+	// The host is the one the submission is assigned to; failing that, the one
+	// a SYSTEM hive in the submission names. When the two disagree, say so.
+	host, conflict := "", ""
+	named, _ := in.S.BatchFacts(e.BatchID, "host.name")
+	if a, _ := in.S.BatchAssignment(e.BatchID); a != nil && a.HostID != nil {
+		host = a.HostName
+		for _, n := range named {
+			if !sameHost(n, host) {
+				conflict = fmt.Sprintf("this submission was assigned to host %q, but a SYSTEM hive in it names the computer %q", host, n)
+			}
+		}
+	} else if len(named) == 1 {
+		host = named[0]
 	}
 	run, err := in.S.BeginRun(e.ID, p.Name(), p.Version(), zoneNote)
 	if err != nil {
 		return "", 0, nil, err
 	}
 	var warns, infos []string
+	if conflict != "" {
+		infos = append(infos, conflict) // a disagreement to look at, not a fault in the reading
+	}
 	received := time.Unix(0, e.ReceivedUTC).UTC()
 	j := job{
-		Path: in.V.Path(e.SHA256), Size: e.Size, Name: e.Name, Kind: e.Kind, Host: host,
+		Origin: e.Origin,
+		Path:   in.V.Path(e.SHA256), Size: e.Size, Name: e.Name, Kind: e.Kind, Host: host,
 		ZoneFrom: lc.ZoneFrom, ZoneName: lc.ZoneName,
 		ReceivedYear: received.Year(), ReceivedMonth: int(received.Month()),
 		Generic: okStatus == "generic", Segments: in.segments(e), OutDir: in.V.WorkDir(),
@@ -794,3 +856,6 @@ func firstWord(s string) string {
 	}
 	return s
 }
+
+// sameHost says whether two names are one computer (parsers.SameHost).
+func sameHost(a, b string) bool { return parsers.SameHost(a, b) }

@@ -232,3 +232,112 @@ func TestNTFSSampleStream(t *testing.T) {
 		t.Error("the file with a stream was not found")
 	}
 }
+
+// A file with two names (a hard link) has a $FILE_NAME for each, with its
+// own times. The library reports only the first; the second's must still
+// reach the timeline, naming the link. Names whose times are those of the
+// first (a DOS short name beside its Win32 name) add nothing.
+func TestMFTEveryFileNamesTimes(t *testing.T) {
+	ft := uint64(133500000000000000)
+	sec := uint64(10000000)
+	si := make([]byte, 72)
+	for i := 0; i < 4; i++ {
+		binary.LittleEndian.PutUint64(si[i*8:], ft+uint64(i)*sec)
+	}
+	fn := func(name string, space byte, parent uint64, at uint64) []byte {
+		b := make([]byte, 66)
+		binary.LittleEndian.PutUint64(b[0:], parent|1<<48)
+		for i := 0; i < 4; i++ {
+			binary.LittleEndian.PutUint64(b[8+i*8:], at)
+		}
+		b[64], b[65] = byte(len(name)), space
+		return append(b, u16(name)...)
+	}
+	link := ft + 500*sec
+	var mft []byte
+	mft = append(mft, fileRecord(0, 1, attr(0x10, "", si, -1), attr(0x30, "", fn("report.txt", 1, 5, ft), -1),
+		attr(0x30, "", fn("copy.txt", 0, 5, link), -1), attr(0x80, "", []byte("x"), -1))...)
+	mft = append(mft, fileRecord(1, 1, attr(0x10, "", si, -1), attr(0x30, "", fn("LONGNA~1.TXT", 2, 5, ft), -1),
+		attr(0x30, "", fn("long name.txt", 1, 5, ft), -1), attr(0x80, "", []byte("y"), -1))...)
+	r := run(t, write(t, "$MFT", mft), nil)
+	if r.err != nil {
+		t.Fatalf("err=%v", r.err)
+	}
+	var linked []Event
+	for _, e := range r.events {
+		if e.Fields["file_name"] != nil {
+			linked = append(linked, e)
+		}
+	}
+	if len(linked) != 1 {
+		t.Fatalf("want one event for the second name's times, got %d: %+v", len(linked), linked)
+	}
+	e := linked[0]
+	want := int64(link-116444736000000000) * 100
+	if e.Stamp.UTC.UnixNano() != want || e.MACB != "MACB" || e.Type != "$FN MACB" || e.Fields["entry"] != int64(0) ||
+		e.Fields["file_name"] != "copy.txt" || e.Fields["file_name_namespace"] != "POSIX" || e.Fields["file_name_parent_entry"] != uint64(5) ||
+		!strings.Contains(e.Message, `"copy.txt"`) {
+		t.Errorf("event: %s %s %d %q %+v", e.Type, e.MACB, e.Stamp.UTC.UnixNano(), e.Message, e.Fields)
+	}
+	if !strings.Contains(strings.Join(r.notes, "\n"), "1 files have more than one name whose $FILE_NAME times differ") {
+		t.Errorf("notes: %q", r.notes)
+	}
+}
+
+// A name can sit in an extension record that a bare $MFT gives no attribute
+// list for. Such a name's times must still reach the timeline; and a file
+// whose every name is in an extension record, which the library leaves
+// out, must appear too.
+func TestMFTNamesInExtensionRecords(t *testing.T) {
+	ft := uint64(133500000000000000)
+	sec := uint64(10000000)
+	si := make([]byte, 72)
+	for i := 0; i < 4; i++ {
+		binary.LittleEndian.PutUint64(si[i*8:], ft+uint64(i)*sec)
+	}
+	fn := func(name string, space byte, at uint64) []byte {
+		b := make([]byte, 66)
+		binary.LittleEndian.PutUint64(b[0:], 5|1<<48)
+		for i := 0; i < 4; i++ {
+			binary.LittleEndian.PutUint64(b[8+i*8:], at)
+		}
+		b[64], b[65] = byte(len(name)), space
+		return append(b, u16(name)...)
+	}
+	ext := func(entry, base uint32, attrs ...[]byte) []byte {
+		r := fileRecord(entry, 1, attrs...)
+		binary.LittleEndian.PutUint64(r[0x20:], uint64(base)|1<<48)
+		return r
+	}
+	var mft []byte
+	mft = append(mft, fileRecord(0, 1, attr(0x10, "", si, -1), attr(0x30, "", fn("first.txt", 1, ft), -1), attr(0x80, "", []byte("a"), -1))...)
+	mft = append(mft, fileRecord(1, 1, attr(0x10, "", si, -1), attr(0x30, "", fn("linked.txt", 1, ft), -1), attr(0x80, "", []byte("b"), -1))...)
+	mft = append(mft, ext(2, 1, attr(0x30, "", fn("other.txt", 0, ft+500*sec), -1))...)
+	mft = append(mft, fileRecord(3, 1, attr(0x10, "", si, -1), attr(0x80, "", []byte("cc"), -1))...)
+	mft = append(mft, ext(4, 3, attr(0x30, "", fn("orphan.txt", 1, ft+900*sec), -1))...)
+	r := run(t, write(t, "$MFT", mft), nil)
+	if r.err != nil {
+		t.Fatalf("err=%v", r.err)
+	}
+	ns := func(x uint64) int64 { return int64(x-116444736000000000) * 100 }
+	var other, orphanSI, orphanFN bool
+	for _, e := range r.events {
+		switch {
+		case e.Fields["file_name"] == "other.txt":
+			other = e.Fields["entry"] == int64(1) && e.Type == "$FN MACB" && e.Stamp.UTC.UnixNano() == ns(ft+500*sec)
+		case e.Path == "/orphan.txt" && e.Type == "$SI ...B":
+			orphanSI = e.Fields["names_only_in_extension_records"] == true && e.Fields["entry"] == int64(3) && e.Stamp.UTC.UnixNano() == ns(ft)
+		case e.Path == "/orphan.txt" && e.Type == "$FN MACB":
+			orphanFN = e.Stamp.UTC.UnixNano() == ns(ft+900*sec)
+		}
+	}
+	if !other || !orphanSI || !orphanFN {
+		for _, e := range r.events {
+			t.Logf("%s %s %d %+v", e.Path, e.Type, e.Stamp.UTC.UnixNano(), e.Fields)
+		}
+		t.Fatalf("extension name %v, skipped file $SI %v $FN %v", other, orphanSI, orphanFN)
+	}
+	if !strings.Contains(strings.Join(r.notes, "\n"), "1 files hold all their names in extension records") {
+		t.Errorf("notes: %q", r.notes)
+	}
+}

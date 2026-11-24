@@ -25,10 +25,11 @@ func TestDetails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(d.Hosts) != 1 || d.Hosts[0].Name != "WS-042" {
+	ws := hostNamed(d, "WS-042")
+	if ws == nil {
 		t.Fatalf("hosts: %+v", d.Hosts)
 	}
-	v := d.Hosts[0].Values
+	v := ws.Values
 	if v["serial_number"].Value != "PF3ABCDF" || v["model"].Value != "T14" || v["clock_offset"].Value != "4 minutes fast" || v["serial_number"].Actor != "tester" {
 		t.Errorf("values: %+v", v)
 	}
@@ -73,10 +74,11 @@ func TestDetails(t *testing.T) {
 		t.Error("a host name with a line break was accepted")
 	}
 
-	// A host with everything withdrawn is no longer listed.
+	// A host with everything withdrawn is still one of the case's hosts,
+	// with nothing stated: hosts are records, never removed.
 	s.SetDetails("WS-042", map[string]string{"serial_number": "", "model": "", "clock_offset": ""})
-	if d, _ := s.Details(); len(d.Hosts) != 0 {
-		t.Errorf("empty host still listed: %+v", d.Hosts)
+	if d, _ := s.Details(); hostNamed(d, "WS-042") == nil || len(hostNamed(d, "WS-042").Values) != 0 {
+		t.Errorf("host after withdrawing every detail: %+v", d.Hosts)
 	}
 }
 
@@ -101,4 +103,13 @@ func TestDetailsShowWhatTheEvidenceSays(t *testing.T) {
 	if _, ok := d.Hosts[0].Values["time_zone"]; ok {
 		t.Error("a value read from evidence was stored as a stated detail")
 	}
+}
+
+func hostNamed(d *AllDetails, name string) *HostDetails {
+	for i := range d.Hosts {
+		if d.Hosts[i].Name == name {
+			return &d.Hosts[i]
+		}
+	}
+	return nil
 }

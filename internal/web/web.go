@@ -13,10 +13,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"mime"
 	"net"
 	"net/http"
-	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +32,7 @@ var uiFS embed.FS
 type server struct {
 	s  *store.Store
 	in *ingest.Ingester
+	up uploads
 }
 
 // NewToken returns a fresh session token: 256 random bits, hex encoded.
@@ -103,13 +102,18 @@ func isLoopback(host string) bool {
 // Handler is the whole interface: the embedded page and the JSON API. An
 // empty token disables authentication, which is only for tests.
 func Handler(s *store.Store, in *ingest.Ingester, token string) http.Handler {
-	sv := &server{s: s, in: in}
+	sv := &server{s: s, in: in, up: uploads{open: map[int64]*openBatch{}}}
 	mux := http.NewServeMux()
 	sub, _ := fs.Sub(uiFS, "ui")
 	mux.Handle("GET /", http.FileServer(http.FS(sub)))
 	mux.HandleFunc("GET /api/case", sv.caseInfo)
 	mux.HandleFunc("GET /api/status", sv.status)
 	mux.HandleFunc("POST /api/upload", sv.upload)
+	mux.HandleFunc("GET /api/upload/{batch}", sv.uploadReceived)
+	mux.HandleFunc("POST /api/upload/unreadable", sv.uploadUnreadable)
+	mux.HandleFunc("GET /api/hosts", sv.hosts)
+	mux.HandleFunc("POST /api/hosts", sv.hostAdd)
+	mux.HandleFunc("POST /api/submissions/{batch}/host", sv.assignSubmission)
 	mux.HandleFunc("GET /api/events", sv.events)
 	mux.HandleFunc("GET /api/summary", sv.summary)
 	mux.HandleFunc("GET /api/facets", sv.facetCounts)
@@ -117,6 +121,7 @@ func Handler(s *store.Store, in *ingest.Ingester, token string) http.Handler {
 	mux.HandleFunc("GET /api/evidence", sv.evidence)
 	mux.HandleFunc("POST /api/evidence/{id}/reparse", sv.reparse)
 	mux.HandleFunc("POST /api/evidence/reparse-stale", sv.reparseStale)
+	mux.HandleFunc("POST /api/evidence/{id}/exclude", sv.exclude)
 	mux.HandleFunc("GET /api/evidence/{id}/browse", sv.browse)
 	mux.HandleFunc("POST /api/evidence/{id}/extract", sv.extract)
 	mux.HandleFunc("GET /api/evidence/{id}/picture", sv.picture)
@@ -366,55 +371,6 @@ func (sv *server) extract(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"queued": e.ID})
 }
 
-func (sv *server) upload(w http.ResponseWriter, r *http.Request) {
-	mr, err := r.MultipartReader()
-	if err != nil {
-		fail(w, 400, err)
-		return
-	}
-	batch, err := sv.s.NextBatch()
-	if err != nil {
-		fail(w, 500, err)
-		return
-	}
-	var top []*store.Evidence
-	// If the upload breaks off, what has already been stored and registered
-	// is still parsed: evidence is never left received but unexamined.
-	abandon := func(code int, err error) {
-		if len(top) > 0 {
-			sv.in.ProcessAsync(top)
-			err = fmt.Errorf("%w (the %d files received before this are being processed)", err, len(top))
-		}
-		fail(w, code, err)
-	}
-	for {
-		part, err := mr.NextPart()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			abandon(400, err)
-			return
-		}
-		// part.FileName() keeps only the last path element. The full value is
-		// read here so a dropped folder keeps each file's place in it.
-		_, params, _ := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
-		rel := strings.TrimLeft(strings.ReplaceAll(params["filename"], "\\", "/"), "/")
-		if rel == "" {
-			continue
-		}
-		// Files are streamed straight into the vault while being hashed.
-		e, err := sv.in.Intake(batch, path.Base(rel), "upload:"+rel, part, nil, 0)
-		if err != nil {
-			abandon(500, err)
-			return
-		}
-		top = append(top, e)
-	}
-	sv.in.ProcessAsync(top)
-	writeJSON(w, map[string]any{"batch": batch, "received": top})
-}
-
 func (sv *server) events(w http.ResponseWriter, r *http.Request) {
 	rows, err := sv.s.Search(queryFrom(r))
 	if err != nil {
@@ -481,6 +437,9 @@ func (sv *server) reparseStale(w http.ResponseWriter, r *http.Request) {
 	}
 	var todo []*store.Evidence
 	for i := range list {
+		if list[i].Excluded {
+			continue // out of the case's view: not worth a run until included again
+		}
 		if why := ingest.Stale(&list[i]); why != "" {
 			sv.s.Audit("parse.requested", fmt.Sprintf("evidence:%d", list[i].ID), map[string]any{"reason": "examiner asked for items read by an earlier version to be parsed again: " + why})
 			todo = append(todo, &list[i])
@@ -505,6 +464,30 @@ func (sv *server) reparse(w http.ResponseWriter, r *http.Request) {
 	sv.s.Audit("parse.requested", fmt.Sprintf("evidence:%d", e.ID), map[string]any{"reason": "examiner requested a new parse run"})
 	sv.in.ProcessAsync([]*store.Evidence{e})
 	writeJSON(w, map[string]any{"queued": e.ID})
+}
+
+// exclude takes an item, and everything that came out of it, out of the
+// case's view, or brings it back. Nothing is deleted: the decision is
+// recorded with its reason, and audited, by the store.
+func (sv *server) exclude(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Exclude bool   `json:"exclude"`
+		Reason  string `json:"reason"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
+		fail(w, 400, err)
+		return
+	}
+	id := atoi(r.PathValue("id"))
+	if _, err := sv.s.GetEvidence(id); err != nil {
+		fail(w, 404, fmt.Errorf("no such evidence item"))
+		return
+	}
+	if err := sv.s.SetExcluded(id, body.Exclude, body.Reason); err != nil {
+		fail(w, 400, err)
+		return
+	}
+	writeJSON(w, map[string]any{"id": id, "excluded": body.Exclude})
 }
 
 func (sv *server) audit(w http.ResponseWriter, r *http.Request) {

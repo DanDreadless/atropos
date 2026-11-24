@@ -18,7 +18,7 @@ type evtxParser struct{}
 
 func (evtxParser) Name() string { return "evtx" }
 func (evtxParser) Version() string {
-	return "6 (velocidex/evtx v0.2.0; event time and record number from the event itself; more event descriptions)"
+	return "7 (velocidex/evtx v0.2.0; event time and record number from the event itself; more event descriptions; the host the log came from, the record's own computer kept)"
 }
 
 // Short descriptions for events analysts reach for most. The description is
@@ -354,7 +354,7 @@ func (evtxParser) Parse(ctx *Context) error {
 	if len(chunks) == 0 {
 		ctx.Warn("no valid chunks found")
 	}
-	fromSystem, renumbered := 0, 0
+	fromSystem, renumbered, otherComputer := 0, 0, 0
 	for ci, chunk := range chunks {
 		records, perr := parseChunk(chunk)
 		if perr != nil {
@@ -459,15 +459,30 @@ func (evtxParser) Parse(ctx *Context) error {
 					fields["record_written"] = ht.UTC.Format("2006-01-02T15:04:05.0000000Z")
 				}
 			}
+			// The host is the computer the log came from, when that is known
+			// (the submission's host, or the SYSTEM hive beside it); a record
+			// that names another computer (a forwarded event) keeps that name
+			// in "computer". Otherwise the record's own computer is the host.
+			host := str(dig(ev, "System", "Computer"))
+			if ctx.Host != "" {
+				if host != "" && !SameHost(host, ctx.Host) {
+					fields["computer"] = host
+					otherComputer++
+				}
+				host = ctx.Host
+			}
 			if err := ctx.Emit(Event{
 				Stamp: stamp, Type: "event-logged", Category: eventCategory(channel, provider, eid), Source: "evtx",
-				Host: str(dig(ev, "System", "Computer")), User: user, Path: path,
+				Host: host, User: user, Path: path,
 				Message: b.String(), Fields: fields,
 				Ref: fmt.Sprintf("record %d, chunk at offset %d", recordID, chunk.Offset),
 			}); err != nil {
 				return err
 			}
 		}
+	}
+	if otherComputer > 0 {
+		ctx.Note("%d records name a computer other than %s, the host this log came from: forwarded events, or a log copied from another machine. Each keeps the name it gives in its \"computer\" field", otherComputer, ctx.Host)
 	}
 	if fromSystem > 0 || renumbered > 0 {
 		ctx.Note("this log was saved from another one: %d records were renumbered when it was written and %d have a record time that differs from the event's own. The original record numbers and each event's own time (TimeCreated) are used; the rewritten ones are kept in the fields", renumbered, fromSystem)

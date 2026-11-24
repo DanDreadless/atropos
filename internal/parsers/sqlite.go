@@ -26,7 +26,7 @@ type sqliteParser struct{}
 
 func (sqliteParser) Name() string { return "sqlite" }
 func (sqliteParser) Version() string {
-	return "8 (native, write-ahead log applied when one in the case fits: windows search index; onedrive sync and SafeDelete databases; chromium history with referrers, search terms, sync origin and download detail; firefox places with downloads; cookies, form values, saved logins without passwords, address-bar shortcuts, page icons, bookmarks)"
+	return "9 (native, write-ahead log applied when one in the case fits: windows search index; onedrive sync and SafeDelete databases; chromium history with referrers, search terms, sync origin and download detail, synced visits as their own source, automatic loads apart, how each page was reached, domains, visit ids, the profile owner from the folder path; firefox places with downloads; cookies, form values, saved logins without passwords, address-bar shortcuts, page icons, bookmarks)"
 }
 
 // maxSideRows bounds the small tables read whole into memory (search terms,
@@ -199,6 +199,8 @@ func chromiumVisits(ctx *Context, db *sql.DB, tables map[string]bool) (int, erro
 	}
 	var joins []string
 	from, opener := "''", "''"
+	fromID := sel(vc, "from_visit", "COALESCE(v.from_visit,0)", "0")
+	openerID := sel(vc, "opener_visit", "COALESCE(v.opener_visit,0)", "0")
 	if vc["from_visit"] {
 		joins = append(joins, "LEFT JOIN visits fv ON fv.id = v.from_visit AND v.from_visit <> 0 LEFT JOIN urls fu ON fu.id = fv.url")
 		from = "COALESCE(fu.url,'')"
@@ -254,8 +256,9 @@ func chromiumVisits(ctx *Context, db *sql.DB, tables map[string]bool) (int, erro
 	}
 
 	q := fmt.Sprintf(`SELECT v.id, v.visit_time, u.id, COALESCE(u.url,''), COALESCE(u.title,''), COALESCE(v.transition,0), COALESCE(u.visit_count,0),
-		%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+		%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
 		FROM visits v JOIN urls u ON u.id = v.url %s ORDER BY v.id`,
+		fromID, openerID,
 		sel(uc, "typed_count", "COALESCE(u.typed_count,0)", "0"), sel(uc, "hidden", "COALESCE(u.hidden,0)", "0"),
 		from, opener,
 		sel(vc, "visit_duration", "COALESCE(v.visit_duration,0)", "0"),
@@ -270,9 +273,9 @@ func chromiumVisits(ctx *Context, db *sql.DB, tables map[string]bool) (int, erro
 	defer rows.Close()
 	n, synced := 0, 0
 	for rows.Next() {
-		var id, ts, urlID, transition, count, typed, hidden, duration, src, pwState, respCode, fgDur int64
+		var id, ts, urlID, transition, count, fromVisit, openerVisit, typed, hidden, duration, src, pwState, respCode, fgDur int64
 		var u, title, fromURL, openerURL, extRef, origin, appID, caTerm, language string
-		if err := rows.Scan(&id, &ts, &urlID, &u, &title, &transition, &count, &typed, &hidden, &fromURL, &openerURL,
+		if err := rows.Scan(&id, &ts, &urlID, &u, &title, &transition, &count, &fromVisit, &openerVisit, &typed, &hidden, &fromURL, &openerURL,
 			&duration, &extRef, &origin, &appID, &src, &caTerm, &language, &pwState, &respCode, &fgDur); err != nil {
 			return n, err
 		}
@@ -282,7 +285,16 @@ func chromiumVisits(ctx *Context, db *sql.DB, tables map[string]bool) (int, erro
 		}
 		u, title = clean(u), clean(title)
 		core := transition & 0xFF
-		fields := map[string]any{"browser": "chromium", "title": title, "url": u, "transition": core, "url_visit_count": count}
+		fields := map[string]any{"browser": "chromium", "title": title, "url": u, "transition": core, "url_visit_count": count, "visit_id": id}
+		if d := urlDomain(u); d != "" {
+			fields["domain"] = d
+		}
+		if fromVisit > 0 {
+			fields["from_visit_id"] = fromVisit
+		}
+		if openerVisit > 0 {
+			fields["opener_visit_id"] = openerVisit
+		}
 		if core >= 0 && int(core) < len(chromiumTransitions) {
 			fields["transition_name"] = chromiumTransitions[core]
 		}
@@ -342,7 +354,9 @@ func chromiumVisits(ctx *Context, db *sql.DB, tables map[string]bool) (int, erro
 		}
 		// A visit carried here by sync happened on another device signed in
 		// to the same account: it is not evidence of use of this machine.
+		source := "browser"
 		if src == 0 || origin != "" {
+			source = "browser-synced"
 			synced++
 			fields["synced_from_another_device"] = true
 			if origin != "" {
@@ -350,9 +364,18 @@ func chromiumVisits(ctx *Context, db *sql.DB, tables map[string]bool) (int, erro
 			}
 			suffix += "  [synced: recorded on another device]"
 		}
+		how, auto, why := chromiumNavigation(core, quals)
+		fields["navigation"] = "user"
+		cat, verb := CatBrowser, "Visited"
+		if auto {
+			fields["navigation"] = "automatic"
+			fields["navigation_reason"] = why
+			cat, verb = CatBrowserAuto, "Loaded by the browser ("+why+")"
+		}
 		if err := ctx.Emit(Event{
-			Stamp: stamp, Type: "url-visited", Category: CatBrowser, Source: "browser", Host: ctx.Host, Path: u,
-			Message: "Visited " + trunc(u, 400) + titleSuffix(title) + suffix,
+			Stamp: stamp, Type: "url-visited (" + how + ")", Category: cat, Source: source, Host: ctx.Host, Path: u,
+			User:    profileUser(ctx, fields),
+			Message: verb + " " + trunc(u, 400) + titleSuffix(title) + suffix,
 			Fields:  fields,
 			Ref:     fmt.Sprintf("visits.id %d", id),
 		}); err != nil {
@@ -555,8 +578,12 @@ func chromiumDownloads(ctx *Context, db *sql.DB, tables map[string]bool) (int, e
 			if !ok {
 				continue
 			}
+			if d := urlDomain(from); d != "" {
+				fields["domain"] = d
+			}
 			if err := ctx.Emit(Event{
 				Stamp: stamp, Type: t.kind, Category: CatBrowser, Source: "browser", Host: ctx.Host, Path: path,
+				User:    profileUser(ctx, fields),
 				Message: fmt.Sprintf("%s: %s (%d bytes) from %s%s", t.word, path, size, trunc(from, 300), suffix),
 				Fields:  fields, Ref: fmt.Sprintf("downloads.id %d", id),
 			}); err != nil {
@@ -586,9 +613,9 @@ func firefoxVisits(ctx *Context, db *sql.DB) (int, error) {
 		join = "LEFT JOIN moz_historyvisits fv ON fv.id = v.from_visit AND v.from_visit <> 0 LEFT JOIN moz_places fp ON fp.id = fv.place_id"
 		from = "COALESCE(fp.url,'')"
 	}
-	rows, err := db.Query(fmt.Sprintf(`SELECT v.id, v.visit_date, COALESCE(p.url,''), COALESCE(p.title,''), COALESCE(v.visit_type,0), %s, %s, %s, %s
+	rows, err := db.Query(fmt.Sprintf(`SELECT v.id, v.visit_date, COALESCE(p.url,''), COALESCE(p.title,''), COALESCE(v.visit_type,0), %s, %s, %s, %s, %s
 		FROM moz_historyvisits v JOIN moz_places p ON p.id = v.place_id %s ORDER BY v.id`,
-		from, sel(pc, "visit_count", "COALESCE(p.visit_count,0)", "0"), sel(pc, "typed", "COALESCE(p.typed,0)", "0"),
+		sel(vc, "from_visit", "COALESCE(v.from_visit,0)", "0"), from, sel(pc, "visit_count", "COALESCE(p.visit_count,0)", "0"), sel(pc, "typed", "COALESCE(p.typed,0)", "0"),
 		sel(pc, "hidden", "COALESCE(p.hidden,0)", "0"), join))
 	if err != nil {
 		return 0, err
@@ -596,9 +623,9 @@ func firefoxVisits(ctx *Context, db *sql.DB) (int, error) {
 	defer rows.Close()
 	n := 0
 	for rows.Next() {
-		var id, ts, vt, count, typed, hidden int64
+		var id, ts, vt, fromVisit, count, typed, hidden int64
 		var u, title, fromURL string
-		if err := rows.Scan(&id, &ts, &u, &title, &vt, &fromURL, &count, &typed, &hidden); err != nil {
+		if err := rows.Scan(&id, &ts, &u, &title, &vt, &fromVisit, &fromURL, &count, &typed, &hidden); err != nil {
 			return n, err
 		}
 		stamp, ok := timeutil.FromUnixMicro(ts, "unix-us")
@@ -606,9 +633,27 @@ func firefoxVisits(ctx *Context, db *sql.DB) (int, error) {
 			continue
 		}
 		u, title = clean(u), clean(title)
-		fields := map[string]any{"browser": "firefox", "title": title, "url": u, "visit_type": vt}
+		fields := map[string]any{"browser": "firefox", "title": title, "url": u, "visit_type": vt, "visit_id": id}
 		if name, ok := firefoxVisitTypes[vt]; ok {
 			fields["visit_type_name"] = name
+		}
+		if d := urlDomain(u); d != "" {
+			fields["domain"] = d
+		}
+		if fromVisit > 0 {
+			fields["from_visit_id"] = fromVisit
+		}
+		how := map[int64]string{1: "link", 2: "typed", 3: "bookmark", 4: "embedded", 5: "link, after a permanent redirect",
+			6: "link, after a temporary redirect", 7: "download", 8: "link in a frame", 9: "reload"}[vt]
+		if how == "" {
+			how = fmt.Sprintf("visit type %d", vt)
+		}
+		cat, verb := CatBrowser, "Visited"
+		fields["navigation"] = "user"
+		if vt == 4 {
+			// Content embedded in a page (an image, a frame), not a page opened.
+			fields["navigation"], fields["navigation_reason"] = "automatic", "embedded in a page"
+			cat, verb = CatBrowserAuto, "Loaded by the browser (embedded in a page)"
 		}
 		if fromURL != "" {
 			fields["from_url"] = clean(fromURL)
@@ -623,8 +668,9 @@ func firefoxVisits(ctx *Context, db *sql.DB) (int, error) {
 			fields["hidden"] = true
 		}
 		if err := ctx.Emit(Event{
-			Stamp: stamp, Type: "url-visited", Category: CatBrowser, Source: "browser", Host: ctx.Host, Path: u,
-			Message: "Visited " + trunc(u, 400) + titleSuffix(title),
+			Stamp: stamp, Type: "url-visited (" + how + ")", Category: cat, Source: "browser", Host: ctx.Host, Path: u,
+			User:    profileUser(ctx, fields),
+			Message: verb + " " + trunc(u, 400) + titleSuffix(title),
 			Fields:  fields,
 			Ref:     fmt.Sprintf("moz_historyvisits.id %d", id),
 		}); err != nil {
@@ -747,4 +793,60 @@ func columns(db *sql.DB, table string) (map[string]bool, error) {
 		out[strings.ToLower(n)] = true
 	}
 	return out, rows.Err()
+}
+
+// chromiumNavigation says how a visit came about, in words for the
+// timeline's Meaning column, and whether the browser rather than the person
+// made it: a hop in a redirect chain (any visit of a chain but its end), a
+// frame loaded inside a page, or a page opened at start-up.
+func chromiumNavigation(core int64, quals []string) (how string, automatic bool, why string) {
+	has := func(q string) bool {
+		for _, x := range quals {
+			if x == q {
+				return true
+			}
+		}
+		return false
+	}
+	words := map[int64]string{0: "link", 1: "typed", 2: "bookmark", 3: "frame", 4: "frame, clicked", 5: "address bar suggestion",
+		6: "start-up page", 7: "form submitted", 8: "reload", 9: "keyword search", 10: "keyword search, generated"}
+	how = words[core]
+	if how == "" {
+		how = fmt.Sprintf("transition %d", core)
+	}
+	inChain := has("chain_start") || has("server_redirect") || has("client_redirect")
+	switch {
+	case inChain && !has("chain_end"):
+		return "redirected through", true, "a hop in a redirect chain, not the page that was shown"
+	case core == 3:
+		return how, true, "a frame inside a page"
+	case core == 6:
+		return how, true, "a page opened at start-up"
+	}
+	if has("server_redirect") || has("client_redirect") {
+		how += ", after a redirect"
+	}
+	if has("forward_back") {
+		how += ", back or forward"
+	}
+	return how, false, ""
+}
+
+// urlDomain is the host name in an address, lower-cased; "" for one with none.
+func urlDomain(u string) string {
+	p, err := url.Parse(u)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(p.Hostname())
+}
+
+// profileUser is the account whose profile folder the database came from, if
+// its origin names one; it says so in the event's fields.
+func profileUser(ctx *Context, fields map[string]any) string {
+	u := ProfileUser(ctx.Origin)
+	if u != "" {
+		fields["user_from"] = "the profile folder the file was taken from (inferred from its path)"
+	}
+	return u
 }

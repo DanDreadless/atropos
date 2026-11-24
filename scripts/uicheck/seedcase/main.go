@@ -90,4 +90,37 @@ func main() {
 		store.Event{TSUTC: ns("2024-03-10 08:05:00"), TSType: "usn-change", Category: "file-system", Source: "usn", Path: "drop.dll",
 			Message: "USN: created drop.dll  FILE_CREATE", Fields: fields(map[string]any{"reasons": []string{"FILE_CREATE"}, "entry": 106, "sequence": 1})},
 	)
+	// The registry hive (evidence 2) names the host, as a SYSTEM hive does.
+	if err := s.AddFact(2, "host.name", "WKSTN-07", "seeded: ComputerName"); err != nil {
+		panic(err)
+	}
+	// A browser history, as the sqlite parser reads one: a typed search, the
+	// page reached from it, a hop in a redirect chain, a visit synced from
+	// another device, and a download (judged safe, so the Analysis counts
+	// above are unchanged).
+	visit := func(at, typ, cat, src, u, domain string, f map[string]any) store.Event {
+		f["url"], f["domain"], f["browser"] = u, domain, "chromium"
+		return store.Event{TSUTC: ns(at), TSType: typ, Category: cat, Source: src, Path: u, User: "dan", Message: "Visited " + u, Fields: fields(f),
+			RecordRef: fmt.Sprintf("visits.id %v", f["visit_id"])}
+	}
+	run("sqlite-database", "sqlite",
+		visit("2024-03-10 09:00:00", "url-visited (typed)", "browser", "browser", "https://search.test/?q=how+to", "search.test",
+			map[string]any{"visit_id": 1, "title": "how to - Search", "search_term": "how to", "transition_name": "typed", "navigation": "user",
+				"transition_qualifiers": []string{"from_address_bar", "chain_start", "chain_end"}, "visit_duration_seconds": 30.5, "response_code": 200,
+				"url_visit_count": 2, "url_typed_count": 1, "user_from": "the profile folder the file was taken from (inferred from its path)"}),
+		visit("2024-03-10 09:00:29", "url-visited (redirected through)", "browser-automatic", "browser", "https://go.search.test/r?u=files", "go.search.test",
+			map[string]any{"visit_id": 2, "from_visit_id": 1, "from_url": "https://search.test/?q=how+to", "navigation": "automatic",
+				"navigation_reason": "a hop in a redirect chain, not the page that was shown", "transition_qualifiers": []string{"chain_start"}}),
+		visit("2024-03-10 09:00:30", "url-visited (link, after a redirect)", "browser", "browser", "https://files.test/landing", "files.test",
+			map[string]any{"visit_id": 3, "from_visit_id": 1, "from_url": "https://search.test/?q=how+to", "title": "Landing", "navigation": "user",
+				"transition_qualifiers": []string{"server_redirect", "chain_end"}}),
+		visit("2024-03-10 07:00:00", "url-visited (link)", "browser", "browser-synced", "https://www.search.test/news", "www.search.test",
+			map[string]any{"visit_id": 4, "synced_from_another_device": true, "navigation": "user", "title": "News"}),
+		store.Event{TSUTC: ns("2024-03-10 09:01:00"), TSType: "download-finished", Category: "browser", Source: "browser", User: "dan",
+			Path: `C:\Users\dan\Downloads\report.pdf`, Message: `Download finished: C:\Users\dan\Downloads\report.pdf`, RecordRef: "downloads.id 5",
+			Fields: fields(map[string]any{"browser": "chromium", "target_path": `C:\Users\dan\Downloads\report.pdf`, "url": "https://cdn.files.test/report.pdf",
+				"domain": "cdn.files.test", "url_chain": []string{"https://files.test/get?id=1", "https://cdn.files.test/report.pdf"},
+				"tab_url": "https://files.test/landing", "state": "complete", "danger": "not dangerous", "danger_code": 0,
+				"received_bytes": 4096, "total_bytes": 4096, "mime_type": "application/pdf", "opened_from_browser": true})},
+	)
 }

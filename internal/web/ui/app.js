@@ -99,6 +99,9 @@ const ZONES = {
 const PAGE = 500, ROW = 26;
 const S = {
   view: 'timeline',
+  pending: new Set(), currentId: 0, // items waiting for or in a parse run (from /api/status)
+  excluding: null, // the item whose exclusion form is open
+  help: '', // the guide's topic on show
   q: '', from: null, to: null, desc: false, group: '',
   groups: [], checked: new Set(),
   rows: [], done: false, loading: false, gen: 0,
@@ -130,6 +133,7 @@ function writeHash() {
   if (S.from != null) p.set('from', String(S.from));
   if (S.to != null) p.set('to', String(S.to));
   if (S.desc) p.set('order', 'desc');
+  if (S.view === 'help' && S.help) p.set('topic', S.help);
   if (S.selected != null) p.set('e', String(S.selected));
   const str = p.toString();
   history.replaceState(null, '', str ? '#' + str : location.pathname);
@@ -141,6 +145,7 @@ function readHash() {
   S.group = p.get('group') || '';
   S.from = big('from'); S.to = big('to');
   S.desc = p.get('order') === 'desc';
+  S.help = p.get('topic') || '';
   S.view = ['timeline', 'evidence', 'files', 'analysis', 'details', 'audit', 'help'].includes(p.get('view')) ? p.get('view') : 'timeline';
   const e = Number(p.get('e'));
   return Number.isInteger(e) && e > 0 ? e : null;
@@ -215,9 +220,9 @@ function rowEl(e) {
     h('span', { class: 'time' }, fmtNs(e.ts_utc)),
     h('span', { title: e.tz_source + (e.tz_name ? ' (' + e.tz_name + ')' : '') }, h('i', { class: 'dot ' + e.tz_source })),
     macbEl(e.macb),
-    h('span', {}, h('i', { class: 'cat ' + e.category }, e.category)),
+    h('span', { title: e.category }, h('i', { class: 'cat ' + e.category }, e.category)),
     h('span', { class: 'dimc', title: e.ts_type }, e.ts_type),
-    h('span', { class: 'dimc' }, e.source),
+    h('span', { class: 'dimc', title: e.source }, e.source),
     h('span', { title: e.host }, e.host),
     h('span', { title: e.user }, e.user),
     h('span', { class: 'dimc', title: itemTitle(e.evidence_id) }, itemName(e.evidence_id)),
@@ -253,20 +258,52 @@ function familyTotals() {
   return { kids, totals };
 }
 
-const ORIGIN_KEYS = ['from', 'submission'];
+const ORIGIN_KEYS = ['from', 'submission', 'kind', 'item'];
+// The search's terms, split on spaces outside quotes, as the server splits
+// them: item:"my file.txt" is one term.
+function terms(s) {
+  const out = [];
+  let cur = '', inQ = false;
+  for (const ch of s) {
+    if (ch === '"') { inQ = !inQ; cur += ch; } else if (/\s/.test(ch) && !inQ) { if (cur) out.push(cur); cur = ''; } else cur += ch;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
 const isOriginToken = (t) => ORIGIN_KEYS.some((k) => t.toLowerCase().startsWith(k + ':'));
 
-// The "From" list on the timeline: every image and archive that things were
-// taken out of, and every submission. Choosing one narrows the timeline to it.
+// The "From" list on the timeline: every image, every archive that things
+// were taken out of, every item name in the Item column, and every
+// submission. Choosing one narrows the timeline to it.
 function renderOrigin() {
   const sel = $('origin');
   const { kids, totals } = familyTotals();
-  const current = S.q.split(/\s+/).find(isOriginToken) || '';
+  const current = terms(S.q).find(isOriginToken) || '';
   const opts = [h('option', { value: '' }, 'From: all evidence')];
-  const holders = S.evidence.filter((e) => kids.has(e.id) && totals.has(e.id) && !e.parent_id);
+  // Every image, whether or not anything has been taken out of it yet, and
+  // every top-level archive or folder that holds other items.
+  const holders = S.evidence.filter((e) => !e.duplicate_of && !e.excluded && (isImage(e) || (kids.has(e.id) && !e.parent_id)));
   if (holders.length) {
     opts.push(h('optgroup', { label: 'Images and archives, with everything taken out of them' },
-      holders.map((e) => h('option', { value: 'from:' + e.id }, `#${e.id} ${e.name}  ·  ${fmtInt(totals.get(e.id).events)} events in ${fmtInt(totals.get(e.id).items)} items`))));
+      holders.map((e) => {
+        const t = totals.get(e.id) || { events: e.event_count, items: 1 };
+        return h('option', { value: 'from:' + e.id }, `#${e.id} ${e.name}  ·  ${fmtInt(t.events)} events in ${fmtInt(t.items)} item${t.items === 1 ? '' : 's'}`);
+      })));
+  }
+  // Every name in the Item column, from the evidence parsed so far: items
+  // of the same name (one NTUSER.DAT per user) are one entry.
+  const names = new Map();
+  for (const e of S.evidence) {
+    if (e.duplicate_of || e.excluded || !e.event_count) continue;
+    const key = e.name.toLowerCase();
+    const n = names.get(key) || names.set(key, { name: e.name, items: 0, events: 0 }).get(key);
+    n.items++; n.events += e.event_count;
+  }
+  if (names.size) {
+    opts.push(h('optgroup', { label: 'Items (as in the Item column)' },
+      [...names.values()].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })).map((n) =>
+        h('option', { value: itemToken(n.name) },
+          `${n.name}  ·  ${n.items > 1 ? fmtInt(n.items) + ' items  ·  ' : ''}${fmtInt(n.events)} events`))));
   }
   const batches = new Map();
   for (const e of S.evidence) {
@@ -286,8 +323,14 @@ function renderOrigin() {
   sel.value = current;
   sel.classList.toggle('on', !!current);
 }
+// item:NAME, quoted when the name has a space; a quote in a name cannot be
+// written in the search, so it is left out (the name is then not found).
+function itemToken(name) {
+  const v = name.replace(/"/g, '');
+  return /\s/.test(v) ? `item:"${v}"` : 'item:' + v;
+}
 function setOrigin(token) {
-  const parts = S.q.split(/\s+/).filter((t) => t && !isOriginToken(t));
+  const parts = terms(S.q).filter((t) => t && !isOriginToken(t));
   if (token) parts.push(token);
   setQuery(parts.join(' '));
 }
@@ -331,11 +374,14 @@ function renderZoomButtons() {
   $('zoomreset').hidden = S.from == null && S.to == null;
 }
 
+// The number of bars the server drew the span in: at most the number asked
+// for, fewer when it widened them to whole hours.
+const nBars = () => (S.summary && Number(S.summary.buckets)) || S.buckets;
 function renderHisto() {
   const s = S.summary, bars = $('bars');
   if (!s || !s.bars.length) { bars.replaceChildren(); return; }
   const max = Math.max(...s.bars.map((b) => b.n));
-  const w = 100 / S.buckets;
+  const w = 100 / nBars();
   bars.replaceChildren(...s.bars.map((b) => {
     const d = document.createElement('div');
     d.style.left = b.i * w + '%';
@@ -348,7 +394,7 @@ function renderHisto() {
 
 function bucketAt(x) {
   const w = $('histo').clientWidth;
-  return Math.max(0, Math.min(S.buckets - 1, Math.floor(x / w * S.buckets)));
+  return Math.max(0, Math.min(nBars() - 1, Math.floor(x / w * nBars())));
 }
 function bucketRange(i0, i1) {
   const start = BigInt(S.summary.start_ts), size = BigInt(S.summary.bucket_ns);
@@ -385,7 +431,7 @@ function setupHisto() {
     down = null; sel.hidden = true;
     const i0 = bucketAt(Math.min(start, up)), i1 = bucketAt(Math.max(start, up));
     // A click on one bucket that already spans the whole view would zoom nowhere.
-    if (i0 === 0 && i1 === S.buckets - 1) return;
+    if (i0 === 0 && i1 === nBars() - 1) return;
     if (BigInt(S.summary.bucket_ns) <= 1n && i0 === i1) return;
     const [from, to] = bucketRange(i0, i1);
     S.zoom.push([S.from, S.to]);
@@ -400,7 +446,7 @@ function setupHisto() {
 // something inside one of them says so, rather than looking like no result.
 async function textHits(gen) {
   const box = $('texthits');
-  const free = S.q.split(/\s+/).some((t) => t && !t.startsWith('-') && !/^[a-z]+:/i.test(t));
+  const free = terms(S.q).some((t) => t && !t.startsWith('-') && !/^[a-z]+:/i.test(t));
   if (!free) { box.hidden = true; return; }
   try {
     const { hits } = await api('/api/textsearch?q=' + encodeURIComponent(S.q));
@@ -520,9 +566,9 @@ function archiveGroup(g) {
 }
 
 // ---- facets and query editing ----
-function hasToken(tok) { return S.q.split(/\s+/).includes(tok); }
+function hasToken(tok) { return terms(S.q).includes(tok); }
 function toggleToken(tok) {
-  const parts = S.q.split(/\s+/).filter(Boolean);
+  const parts = terms(S.q).filter(Boolean);
   const i = parts.indexOf(tok);
   if (i >= 0) parts.splice(i, 1); else parts.push(tok);
   setQuery(parts.join(' '));
@@ -550,14 +596,16 @@ async function loadCase() {
 // The chip counts follow the "From" choice and the group being viewed:
 // they say how many of the events being looked at are of each kind.
 let facetKey = null;
+// The chips' counts follow the whole search: each group is counted with its
+// own chips left out, so the others in that group stay to choose from.
 async function loadFacets() {
-  const origin = S.q.split(/\s+/).filter((t) => t && isOriginToken(t)).join(' ');
-  const key = origin + '|' + S.group;
+  const q = S.q.trim();
+  const key = q + '|' + S.group;
   if (key === facetKey) { renderFacets(); return; }
   facetKey = key;
-  if (!origin && !S.group) { S.facets = null; renderFacets(); return; }
+  if (!q && !S.group) { S.facets = null; renderFacets(); return; }
   try {
-    const r = await api('/api/facets?' + new URLSearchParams({ q: origin, group: S.group }).toString());
+    const r = await api('/api/facets?' + new URLSearchParams({ q, group: S.group }).toString());
     if (key === facetKey) { S.facets = r.facets; renderFacets(); }
   } catch (e) { fail(e); }
 }
@@ -565,12 +613,14 @@ async function loadFacets() {
 function renderFacets() {
   if (!caseData) return;
   const facets = S.facets || caseData.facets;
-  const out = [];
+  // One row per group: Evidence of, then Source, above the chart; the time
+  // zone chips sit under the chart.
   const group = (label, key, counts) => {
+    const out = [];
     // A chip that is switched on stays, even at zero, so it can be switched off.
-    const on = S.q.split(/\s+/).filter((t) => t.startsWith(key + ':')).map((t) => t.slice(key.length + 1));
+    const on = terms(S.q).filter((t) => t.startsWith(key + ':')).map((t) => t.slice(key.length + 1));
     const names = [...new Set([...Object.keys(counts), ...on])].sort();
-    if (!names.length) return;
+    if (!names.length) return null;
     out.push(h('span', { class: 'label' }, label));
     for (const n of names) {
       const tok = key + ':' + n;
@@ -580,11 +630,11 @@ function renderFacets() {
         onclick: () => toggleToken(tok),
       }, n, h('i', {}, fmtInt(counts[n] || 0))));
     }
+    return h('div', { class: 'facetrow' }, ...out);
   };
-  group('Evidence of', 'category', facets.category || {});
-  group('Source', 'source', facets.source || {});
-  group('Time zone from', 'tz', facets.tz_source || {});
-  $('facets').replaceChildren(...out);
+  const rows = (...r) => r.filter(Boolean);
+  $('facets').replaceChildren(...rows(group('Evidence of', 'category', facets.category || {}), group('Source', 'source', facets.source || {}), group('Host', 'host', facets.host || {})));
+  $('tzfacets').replaceChildren(...rows(group('Time zone from', 'tz', facets.tz_source || {})));
 }
 
 // ---- event detail ----
@@ -606,6 +656,59 @@ function kv(pairs) {
     [h('dt', {}, k), h('dd', { class: plain ? 'plain' : null }, v)]));
 }
 
+// A browser visit or download, read out: where it went, how it was reached,
+// where it came from (with a way to open that visit), and whether this
+// machine or another device recorded it. Addresses are shown as text and
+// never made into links: evidence does not get opened from the case.
+function browsingSection(e, ev, f) {
+  const isVisit = /^url-(last-)?visited/.test(e.ts_type), isDownload = e.ts_type.startsWith('download-');
+  if (!(e.source || '').startsWith('browser') || !(isVisit || isDownload)) return null;
+  const secs = (s) => s == null ? '' : s < 90 ? `${s} s` : s < 5400 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`;
+  const site = f.domain ? h('span', {}, f.domain, '  ', h('button', { class: 'link', onclick: () => setQuery('domain:' + f.domain) }, 'everything from this site')) : '';
+  const user = e.user ? e.user + (f.user_from ? '  (inferred from the folder the file came from)' : '') : '';
+  if (isVisit) {
+    const how = (e.ts_type.match(/\((.*)\)$/) || [])[1] || f.transition_name || f.visit_type_name || '';
+    const quals = (f.transition_qualifiers || []).filter((q) => !/^chain_/.test(q)).map((q) => q.replace(/_/g, ' '));
+    const jump = (label, id) => id ? h('div', {}, h('button', { class: 'link', onclick: () => openVisit(ev.id, id) }, label)) : null;
+    return [h('h3', {}, 'Browsing'), kv([
+      ['Page', f.url], ['Title', f.title], ['Site', site],
+      ['How it was reached', how + (quals.length ? `  (${quals.join(', ')})` : '') + (f.navigation === 'automatic' ? `. Loaded by the browser, not chosen: ${f.navigation_reason}` : '')],
+      ['Came from', f.from_url ? h('span', {}, f.from_url, jump('open the visit it came from', f.from_visit_id)) : ''],
+      ['Opened from', f.opener_url ? h('span', {}, f.opener_url, jump('open that visit', f.opener_visit_id)) : ''],
+      ['Referred from outside', f.external_referrer_url],
+      ['Searched for', f.search_term],
+      ['Time on the page', [secs(f.visit_duration_seconds), f.foreground_seconds != null ? `${secs(f.foreground_seconds)} in front` : ''].filter(Boolean).join(', ')],
+      ['Server answered', f.response_code != null ? String(f.response_code) : ''],
+      ['Visits to this address', f.url_visit_count != null ? String(f.url_visit_count) + (f.url_typed_count ? `, typed ${f.url_typed_count} time${f.url_typed_count === 1 ? '' : 's'}` : '') : ''],
+      ['Recorded on', f.synced_from_another_device ? 'another device signed in to the same account (synced). Not evidence that this machine was used' : (f.visit_records ? '' : 'this browser')],
+      ['Profile of', user],
+    ])];
+  }
+  const verdict = f.danger ? (f.danger_code > 0 ? h('b', { class: 'bad' }, f.danger) : f.danger) : '';
+  return [h('h3', {}, 'Download'), kv([
+    ['Saved to', f.target_path], ['Site', site], ['From', f.url],
+    ['Redirect chain', (f.url_chain || []).length > 1 ? h('ol', { class: 'chain' }, ...f.url_chain.map((u) => h('li', {}, u))) : ''],
+    ['Page it was started from', f.tab_url], ['That page came from', f.tab_referrer_url], ['Referrer', f.referrer],
+    ['State', f.state + (f.interrupt_reason ? `, interrupted: ${f.interrupt_reason}` : '')],
+    ['Browser\'s verdict', verdict],
+    ['Size', f.total_bytes != null ? `${fmtInt(f.received_bytes || 0)} of ${fmtInt(f.total_bytes)} bytes` : ''],
+    ['Type', f.mime_type + (f.original_mime_type && f.original_mime_type !== f.mime_type ? ` (server said ${f.original_mime_type})` : '')],
+    ['Opened from the browser', f.opened_from_browser == null ? '' : f.opened_from_browser ? 'yes' : 'no'],
+    ['Server\'s last-modified date', f.server_last_modified],
+    ['Profile of', user],
+  ])];
+}
+
+// Opens the visit with the browser's own number in the same history file.
+async function openVisit(evidenceId, visitId) {
+  try {
+    // Not params(): the visit may lie outside the current zoom or group.
+    const r = await api('/api/events?' + new URLSearchParams({ q: `evidence:${evidenceId} visit:${visitId}`, limit: '1' }));
+    if (r.events.length) select(r.events[0].id);
+    else toast('That visit is not in the history file any more: browsers delete old visit records');
+  } catch (err) { fail(err); }
+}
+
 function renderDetail({ event: e, evidence: ev, annotations, journal_folder: jf }) {
   const panel = $('detail');
   const fields = e.fields || {};
@@ -617,6 +720,9 @@ function renderDetail({ event: e, evidence: ev, annotations, journal_folder: jf 
   ];
   if (e.tz_source === 'assumed') kids.push(h('div', { class: 'note warn' }, ZONES.assumed));
   if (caveat) kids.push(h('div', { class: 'note warn' }, 'Time caveat: ' + caveat));
+  // For a browser visit or download, what it is comes first.
+  const browsing = browsingSection(e, ev, fields);
+  if (browsing) kids.push(...browsing);
 
   const letters = [...e.macb].filter((c) => c !== '.');
   kids.push(h('h3', {}, 'Time'), kv([
@@ -736,16 +842,20 @@ function renderEvidence() {
   $('evstale').textContent = `Bring ${fmtInt(stale)} item${stale === 1 ? '' : 's'} up to date`;
   const by = {};
   let events = 0;
-  for (const e of S.evidence) { by[e.status] = (by[e.status] || 0) + 1; events += e.event_count; }
+  for (const e of S.evidence) {
+    const st = e.excluded ? 'excluded' : e.status;
+    by[st] = (by[st] || 0) + 1;
+    if (!e.excluded) events += e.event_count;
+  }
   $('evsummary').replaceChildren(h('b', {}, fmtInt(S.evidence.length)), ' items  ·  ', h('b', {}, fmtInt(events)), ' events  ·  ',
     Object.keys(by).sort().map((k) => `${by[k]} ${k}`).join(', '));
   const out = [];
   for (const e of list) {
-    out.push(h('div', { class: 'erow' + (S.evOpen === e.id ? ' sel' : ''), id: 'ev-' + e.id, onclick: () => { S.evOpen = S.evOpen === e.id ? null : e.id; renderEvidence(); } },
+    out.push(h('div', { class: 'erow' + (S.evOpen === e.id ? ' sel' : '') + (e.excluded ? ' excluded' : ''), id: 'ev-' + e.id, onclick: () => { S.evOpen = S.evOpen === e.id ? null : e.id; renderEvidence(); } },
       h('span', { class: 'dimc' }, e.id),
       h('span', { class: 'name', title: e.origin }, flat ? '' : '  '.repeat(e.depth) + (e.depth ? '└ ' : ''), e.name),
       h('span', { title: e.detect_reason }, e.kind),
-      h('span', {}, h('i', { class: 'pill ' + e.status }, e.status), e.stale ? h('i', { class: 'pill stale', title: 'This version of Atropos would read it differently: ' + e.stale }, 'older') : null),
+      h('span', {}, statusPill(e), e.stale ? h('i', { class: 'pill stale', title: 'This version of Atropos would read it differently: ' + e.stale }, 'older') : null),
       h('span', { class: 'num' }, e.event_count ? fmtInt(e.event_count) : ''),
       h('span', { class: 'num' }, fmtSize(e.size)),
       h('span', { class: 'mono', title: e.sha256 }, e.sha256.slice(0, 12) + '…'),
@@ -758,19 +868,24 @@ function renderEvidence() {
         ['Size', `${fmtInt(e.size)} bytes`],
         ['Received', `${fmtNs(e.received_utc, 3)} UTC by ${e.received_by}`],
         ['Submission', `batch ${e.batch_id}` + (e.parent_id ? `, unpacked from #${e.parent_id}` : '')],
+        ['From', e.assigned ? (e.assigned.host ? `host ${e.assigned.host}` : `not from a host: ${e.assigned.source}`) : 'not assigned to a host', true],
         e.duplicate_of ? ['Duplicate of', `#${e.duplicate_of}: identical content, stored once and not parsed again`, true] : null,
         ['Parser', e.parser + (e.parser_version ? ', version ' + e.parser_version : '')],
         e.stale ? ['Out of date', `${e.stale}. "Parse again" reads it with this version; the earlier run is kept.`, true] : null,
         ['Zone context', e.zone_context],
         ['Notes', e.notes, true],
-      ]), h('div', { class: 'actions' },
+        e.excluded ? ['Excluded', (e.excluded_by === e.id ? '' : `with #${e.excluded_by}, which it came out of. `) + `Reason: ${e.exclude_reason}. Its events are off the timeline, the counts, exports, the report's timeline and the checks; it stays stored and verifiable.`, true] : null,
+      ]), S.excluding === e.id ? excludeForm(e) : null, h('div', { class: 'actions' },
         e.event_count ? h('button', { onclick: (c) => { c.stopPropagation(); setView('timeline'); setQuery('evidence:' + e.id); } }, `Show its ${fmtInt(e.event_count)} event${e.event_count === 1 ? '' : 's'}`) : null,
         kids.has(e.id) && totals.get(e.id) && totals.get(e.id).events > e.event_count
           ? h('button', { onclick: (c) => { c.stopPropagation(); setView('timeline'); setQuery('from:' + e.id); } },
             `Show all ${fmtInt(totals.get(e.id).events)} events from it and what came out of it`) : null,
         isImage(e) ? h('button', { class: 'primary', onclick: (c) => { c.stopPropagation(); S.img = e.id; S.imgPath = '/'; setView('files'); } }, 'Browse its contents') : null,
         e.event_count ? evidenceGroupSelect(e) : null,
-        e.duplicate_of ? null : h('button', { title: 'Runs the parser again as a new run. The earlier run and its events are kept, but tags, comments and group membership stay with the earlier events and will not appear on the new ones.', onclick: (c) => { c.stopPropagation(); reparse(e.id); } }, 'Parse again'))));
+        e.duplicate_of ? null : h('button', { title: 'Runs the parser again as a new run. The earlier run and its events are kept, but tags, comments and group membership stay with the earlier events and will not appear on the new ones.', onclick: (c) => { c.stopPropagation(); reparse(e.id); } }, 'Parse again'),
+        h('button', { title: 'Say which host this submission came from. Its items are parsed again, as new runs, so their events carry the host and its time zone.', onclick: (c) => { c.stopPropagation(); reassignDialog(e); } }, 'Change host…'),
+        !e.excluded && S.excluding !== e.id ? h('button', { title: 'Takes this item, and everything that came out of it, out of the timeline and everything built on it. Nothing is deleted, and it can be included again.', onclick: (c) => { c.stopPropagation(); S.excluding = e.id; renderEvidence(); } }, 'Exclude from case…') : null,
+        e.excluded && e.excluded_by === e.id ? h('button', { onclick: (c) => { c.stopPropagation(); setExcluded(e.id, false, ''); } }, 'Include again') : null)));
     }
   }
   if (!out.length) out.push(h('div', { class: 'evdetail hint' }, S.evidence.length ? 'Nothing matches this filter.' : 'No evidence yet. Drop files or folders anywhere on this page.'));
@@ -828,9 +943,72 @@ async function reparseStale() {
   } catch (e) { fail(e); }
 }
 
+// An item's stored status is that of its last finished run; while a new run
+// is waiting or under way the row says so instead.
+function statusPill(e) {
+  if (e.excluded) return h('i', { class: 'pill excluded', title: `Excluded from the case${e.excluded_by === e.id ? '' : ' with #' + e.excluded_by}: ${e.exclude_reason}. Last run: ${e.status}` }, 'excluded');
+  if (S.pending.has(e.id)) {
+    const now = S.currentId === e.id;
+    return h('i', { class: 'pill ' + (now ? 'processing' : 'queued'), title: `A new parse run is ${now ? 'under way' : 'waiting'}. The last finished run: ${e.status}` }, now ? 'processing' : 'queued');
+  }
+  return h('i', { class: 'pill ' + e.status }, e.status);
+}
+
+// Excluding needs a reason, which is kept in the case and the audit log.
+function excludeForm(e) {
+  const reason = h('input', { type: 'text', class: 'excludereason', placeholder: 'Why is it being excluded? (kept in the case and the audit log)', maxlength: '500', onclick: (c) => c.stopPropagation() });
+  const go = h('button', { class: 'primary', onclick: (c) => { c.stopPropagation(); setExcluded(e.id, true, reason.value); } }, 'Exclude');
+  reason.addEventListener('keydown', (k) => { if (k.key === 'Enter') go.click(); if (k.key === 'Escape') { S.excluding = null; renderEvidence(); } });
+  setTimeout(() => reason.focus(), 0);
+  return h('div', { class: 'excludeform', onclick: (c) => c.stopPropagation() },
+    h('p', { class: 'hint' }, `Take #${e.id} ${e.name}` + (S.evidence.some((x) => x.parent_id === e.id) ? ', and everything that came out of it,' : '') +
+      ' out of the timeline, its counts, exports, the report\'s timeline and the checks. Nothing is deleted: the file stays in the vault and its runs stay verifiable, and you can include it again.'),
+    reason, go,
+    h('button', { onclick: (c) => { c.stopPropagation(); S.excluding = null; renderEvidence(); } }, 'Cancel'));
+}
+
+async function setExcluded(id, exclude, reason) {
+  if (exclude && !reason.trim()) { toast('Say why it is being excluded: the reason is kept in the case'); return; }
+  try {
+    await api(`/api/evidence/${id}/exclude`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ exclude, reason }) });
+    S.excluding = null;
+    toast(exclude ? `Evidence #${id} excluded from the case` : `Evidence #${id} included again`);
+    refreshAll();
+  } catch (e) { fail(e); }
+}
+
+async function reassignDialog(e) {
+  let hosts = [];
+  try { hosts = (await api('/api/hosts')).hosts; } catch (err) { fail(err); return; }
+  const dlg = $('dlg');
+  const pick = h('select', { 'aria-label': 'Host' }, hosts.map((x) => h('option', { value: 'h' + x.id }, x.name)), h('option', { value: 'none' }, 'Not from a host…'));
+  const where = h('textarea', { rows: 3, placeholder: 'Where it came from', 'aria-label': 'Where the evidence came from', maxlength: '4000' });
+  const whereRow = h('label', { class: 'dlgrow' }, h('span', {}, 'Where it came from'), where);
+  if (e.assigned && e.assigned.host_id) pick.value = 'h' + e.assigned.host_id; else if (e.assigned) { pick.value = 'none'; where.value = e.assigned.source || ''; } else if (!hosts.length) pick.value = 'none';
+  const sync = () => { whereRow.hidden = pick.value !== 'none'; };
+  pick.addEventListener('change', sync); sync();
+  const save = async () => {
+    const body = pick.value === 'none' ? { not_from_host: where.value.trim() } : { host_id: Number(pick.value.slice(1)) };
+    if (pick.value === 'none' && !body.not_from_host) { toast('Say where the evidence came from', true); return; }
+    try {
+      const r = await api(`/api/submissions/${e.batch_id}/host`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      dlg.close();
+      toast(`Submission ${e.batch_id} reassigned; ${fmtInt(r.reparsing)} item${r.reparsing === 1 ? '' : 's'} being parsed again`);
+      pollSoon();
+    } catch (err) { fail(err); }
+  };
+  dlg.replaceChildren(h('h2', {}, `Which host is submission ${e.batch_id} from?`),
+    h('p', { class: 'hint' }, 'Everything added together with this item moves with it. Its items are parsed again as new runs (earlier runs are kept), so their events carry the host and its time zone. Tags and comments stay with the earlier events.'),
+    h('label', { class: 'dlgrow' }, h('span', {}, 'From'), pick), whereRow,
+    h('div', { class: 'actions' }, h('button', { onclick: () => dlg.close() }, 'Cancel'), h('button', { class: 'primary', onclick: save }, 'Save')));
+  dlg.showModal();
+}
+
 async function reparse(id) {
   try {
     await api(`/api/evidence/${id}/reparse`, { method: 'POST' });
+    S.pending.add(id);
+    renderEvidence();
     toast(`Evidence #${id} queued for a new parse run`);
     pollSoon();
   } catch (e) { fail(e); }
@@ -1068,14 +1246,24 @@ async function loadAnalysis() {
 // ---- case and host details ----
 // newHosts are hosts added in this session that have nothing saved yet.
 const newHosts = [];
+// host === null is a host no one has named yet: the form then starts with
+// the computer's name, which is how the host is known in the case and report.
 function detailForm(title, host, fields, values, found, opened) {
   const inputs = {};
   const groups = [];
   let group = null;
+  let nameInput = null;
+  if (host === null) {
+    nameInput = h('input', { type: 'text', spellcheck: 'false', autocomplete: 'off', 'aria-label': 'Computer name', placeholder: 'e.g. DESKTOP-4F2K1' });
+    group = { name: fields.length ? fields[0].group : 'Identification', rows: [h('label', { class: 'dtrow' },
+      h('span', { class: 'dtlabel' }, 'Computer name'),
+      h('span', { class: 'dtfield' }, nameInput, h('span', { class: 'hint' }, 'Required. The name the host is known by in the case and the report; usually the Windows computer name'))) ] };
+    groups.push(group);
+  }
   for (const f of fields) {
     if (!group || group.name !== f.group) { group = { name: f.group, rows: [] }; groups.push(group); }
     const cur = values[f.key];
-    const input = f.long ? h('textarea', { rows: 3, spellcheck: 'false' }) : h('input', { type: 'text', spellcheck: 'false', autocomplete: 'off' });
+    const input = f.long ? h('textarea', { rows: 3, spellcheck: 'false' }) : h('input', { type: 'text', spellcheck: 'false', autocomplete: 'off', list: f.key === 'time_zone' ? 'tzlist' : null });
     input.value = cur ? cur.value : '';
     input.setAttribute('aria-label', (host ? host + ': ' : '') + f.label);
     inputs[f.key] = input;
@@ -1096,13 +1284,16 @@ function detailForm(title, host, fields, values, found, opened) {
   save.onclick = async () => {
     const out = {};
     for (const [k, el] of Object.entries(inputs)) out[k] = el.value;
+    const name = nameInput ? nameInput.value.trim() : host;
+    if (nameInput && !name) { toast("Give the computer's name: it is how this host is known in the case and the report", true); nameInput.focus(); return; }
+    if (nameInput && !Object.values(out).some((v) => v.trim())) { addDetailHost(name); return; }
     save.disabled = true;
     try {
-      const r = await api('/api/details', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ host, values: out }) });
+      const r = await api('/api/details', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ host: name, values: out }) });
       toast(r.changed ? `${r.changed} ${r.changed === 1 ? 'detail' : 'details'} saved` : 'Nothing had changed');
-      const i = newHosts.indexOf(host);
+      const i = newHosts.indexOf(name);
       if (i >= 0 && r.changed) newHosts.splice(i, 1);
-      await loadDetails(host);
+      await loadDetails(name);
     } catch (e) { fail(e); save.disabled = false; }
   };
   return form;
@@ -1117,19 +1308,26 @@ async function loadDetails(openHost) {
     const out = [detailForm('Case', '', d.case_fields, d.case, null, openHost === '' || (!d.hosts.length && !pending.length))];
     for (const x of d.hosts) out.push(detailForm('Host ' + x.name, x.name, d.host_fields, x.values, x.found, openHost === x.name));
     for (const n of pending) out.push(detailForm('Host ' + n + ' (nothing saved yet)', n, d.host_fields, {}, null, true));
-    if (d.known_hosts.length) {
-      out.push(h('p', { class: 'hint' }, 'The evidence names ', d.known_hosts.length === 1 ? 'a host' : 'hosts', ' with no details yet: ',
-        ...d.known_hosts.map((n) => h('button', { class: 'link dtknownhost', onclick: () => addDetailHost(n) }, n))));
+    // Hosts the evidence names but no one has described yet: their forms, ready.
+    for (const n of d.known_hosts.filter((n) => !pending.some((p) => p.toLowerCase() === n.toLowerCase()))) {
+      out.push(detailForm('Host ' + n + ' (named by the evidence)', n, d.host_fields, {}, null, false));
+    }
+    if (!d.hosts.length && !pending.length && !d.known_hosts.length) {
+      out.push(h('p', { class: 'hint dtnohost' }, "The evidence names no host: Atropos reads a computer's name and time zone from its SYSTEM registry hive, and there is none in this case. Describe the host here, giving its name, or add the SYSTEM hive."));
+      out.push(detailForm('Host', null, d.host_fields, {}, null, true));
     }
     $('dtbody').replaceChildren(...out);
   } catch (e) { fail(e); }
 }
-function addDetailHost(name) {
+async function addDetailHost(name) {
   name = (name || '').trim();
   if (!name) { toast('Give the host a name first', true); return; }
-  if (!newHosts.some((n) => n.toLowerCase() === name.toLowerCase())) newHosts.push(name);
-  $('dthost').value = '';
-  loadDetails(name);
+  try {
+    const hst = await api('/api/hosts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+    $('dthost').value = '';
+    toast(`Host ${hst.name} added`);
+    loadDetails(hst.name);
+  } catch (e) { fail(e); }
 }
 
 // ---- audit ----
@@ -1179,17 +1377,48 @@ async function verify() {
 }
 
 // ---- adding evidence ----
-function addDialog() {
+// Where evidence comes from is stated before it is sent: a host described in
+// the case, or no host and a description of where it came from. The last
+// choice is offered again. A drop opens the same dialog with its files.
+let lastSource = null; // { host: id } or { notFromHost: text }
+async function addDialog(dropped) {
+  let hosts = [];
+  try { hosts = (await api('/api/hosts')).hosts; } catch (e) { fail(e); return; }
   const dlg = $('dlg');
+  const pick = h('select', { 'aria-label': 'Where the evidence comes from' },
+    hosts.map((x) => h('option', { value: 'h' + x.id }, x.name)),
+    h('option', { value: 'none' }, 'Not from a host…'));
+  const where = h('textarea', { rows: 3, placeholder: 'Where it came from, e.g. firewall logs exported from the perimeter firewall by IT on 23 Nov', 'aria-label': 'Where the evidence came from', maxlength: '4000' });
+  const whereRow = h('label', { class: 'dlgrow' }, h('span', {}, 'Where it came from'), where);
+  if (lastSource && lastSource.host && hosts.some((x) => x.id === lastSource.host)) pick.value = 'h' + lastSource.host;
+  else if (!hosts.length || (lastSource && lastSource.notFromHost != null)) pick.value = 'none';
+  if (lastSource && lastSource.notFromHost) where.value = lastSource.notFromHost;
+  const sync = () => { whereRow.hidden = pick.value !== 'none'; };
+  pick.addEventListener('change', sync);
+  sync();
+  // The choice, checked: null when something is missing (and the reason shown).
+  const chosen = () => {
+    if (pick.value === 'none') {
+      if (!where.value.trim()) { toast('Say where the evidence came from: it is kept with it and shown in the report', true); where.focus(); return null; }
+      return { notFromHost: where.value.trim() };
+    }
+    return { host: Number(pick.value.slice(1)) };
+  };
+  const go = (fn) => () => { const c = chosen(); if (!c) return; lastSource = c; dlg.close(); fn(c); };
+  const size = dropped ? dropped.reduce((n, x) => n + x.file.size, 0) : 0;
   dlg.replaceChildren(
-    h('h2', {}, 'Add evidence'),
-    h('p', {}, 'Any file is accepted. Each one is hashed, copied into the case vault and identified by its content. Originals are opened read-only and never modified.'),
-    h('p', { class: 'hint' }, 'Files added together form one submission. A SYSTEM registry hive in a submission supplies the host name and time zone for the other files in it, so add a host\'s artefacts together.'),
-    h('p', { class: 'hint' }, 'You can also drop files or folders anywhere on the page.'),
+    h('h2', {}, dropped ? `Add ${fmtInt(dropped.length)} file${dropped.length === 1 ? '' : 's'} (${fmtSize(size)})` : 'Add evidence'),
+    hosts.length ? null : h('p', { class: 'note warn' }, 'No host is described in this case yet. Describe the computer the evidence comes from on the ',
+      h('button', { class: 'link', onclick: () => { dlg.close(); setView('details'); } }, 'Details tab'), ' first, or add it as not from a host.'),
+    h('label', { class: 'dlgrow' }, h('span', {}, 'From'), pick),
+    whereRow,
+    h('p', { class: 'hint' }, 'Each file is hashed, copied into the case vault and identified by its content; originals are opened read-only. Its events carry the host, and a time zone stated for the host on the Details tab is used for times the files record in local time. Add a host\'s artefacts together.'),
+    dropped ? null : h('p', { class: 'hint' }, 'You can also drop files or folders anywhere on the page.'),
     h('div', { class: 'actions' },
       h('button', { onclick: () => dlg.close() }, 'Cancel'),
-      h('button', { onclick: () => { dlg.close(); $('pickdir').click(); } }, 'Choose a folder'),
-      h('button', { class: 'primary', onclick: () => { dlg.close(); $('pickfiles').click(); } }, 'Choose files')));
+      dropped ? null : h('button', { onclick: go((c) => { S.pendingSource = c; $('pickdir').click(); }) }, 'Choose a folder'),
+      dropped ? h('button', { class: 'primary', onclick: go((c) => upload(dropped, c)) }, 'Add')
+        : h('button', { class: 'primary', onclick: go((c) => { S.pendingSource = c; $('pickfiles').click(); }) }, 'Choose files')));
   dlg.showModal();
 }
 
@@ -1199,10 +1428,12 @@ async function filesFromDrop(dt) {
   const entries = [...dt.items].map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null));
   const loose = [...dt.files];
   const out = [];
+  let shown = 0;
   const walk = async (entry, prefix) => {
     if (entry.isFile) {
       const file = await new Promise((ok, no) => entry.file(ok, no));
       out.push({ file, path: prefix + entry.name });
+      if (out.length - shown >= 200) { shown = out.length; showIngest(`Reading the folder…  ${fmtInt(out.length)} files found`); }
     } else if (entry.isDirectory) {
       const reader = entry.createReader();
       for (;;) { // readEntries returns results in batches until it returns none
@@ -1213,33 +1444,127 @@ async function filesFromDrop(dt) {
     }
   };
   if (entries.some(Boolean)) {
-    for (const e of entries) if (e) await walk(e, '');
+    showIngest('Reading the folder…');
+    try {
+      for (const e of entries) if (e) await walk(e, '');
+    } finally { showIngest(null); }
     return out;
   }
   return loose.map((file) => ({ file, path: file.name }));
 }
 
-function upload(list) {
-  if (!list.length) { toast('Nothing to add: no files were found'); return; }
-  const fd = new FormData();
-  let total = 0;
-  for (const { file, path } of list) { fd.append('file', file, path); total += file.size; }
-  const xhr = new XMLHttpRequest();
-  const label = `Receiving ${fmtInt(list.length)} file${list.length === 1 ? '' : 's'} (${fmtSize(total)})`;
-  S.uploading = true;
-  showIngest(label, 0, 1);
-  xhr.upload.onprogress = (p) => { if (p.lengthComputable) showIngest(label, p.loaded, p.total); };
-  xhr.onerror = () => { S.uploading = false; showIngest(null); toast('The upload failed: the connection was lost', true); };
-  xhr.onload = () => {
-    S.uploading = false;
-    let body = {};
-    try { body = JSON.parse(xhr.responseText); } catch { /* handled below */ }
-    if (xhr.status !== 200) { showIngest(null); toast(body.error || `Upload failed (${xhr.status})`, true); return; }
-    toast(`${fmtInt(body.received.length)} file${body.received.length === 1 ? '' : 's'} hashed and stored as submission ${body.batch}. Parsing…`);
-    pollSoon();
+// Files go to the server in chunks, all into one submission, so that a file
+// the browser cannot read (locked, or changing while a program has it open)
+// costs that file and not the whole upload. After a chunk breaks off the page
+// asks what arrived and sends the rest one by one; a file that still cannot be
+// sent is listed for the examiner and recorded in the audit log. The server
+// parses the submission when the last request closes it.
+const CHUNK_FILES = 100, CHUNK_BYTES = 200 * 1024 * 1024;
+const normPath = (p) => p.replace(/\\/g, '/').replace(/^\/+/, '');
+
+function postFiles(files, batch, final, onProgress, source) {
+  return new Promise((resolve) => {
+    const fd = new FormData();
+    for (const { file, path } of files) fd.append('file', file, path);
+    const xhr = new XMLHttpRequest();
+    xhr.upload.onprogress = (p) => { if (p.lengthComputable && onProgress) onProgress(p.loaded); };
+    xhr.onerror = () => resolve({ status: 0, body: null });
+    xhr.onload = () => {
+      let body = null;
+      try { body = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
+      resolve({ status: xhr.status, body });
+    };
+    const q = batch ? { batch, final: final ? '1' : '0' } : { final: final ? '1' : '0' };
+    if (!batch && source) { if (source.host) q.host = String(source.host); else q.not_from_host = source.notFromHost; }
+    xhr.open('POST', '/api/upload?' + new URLSearchParams(q));
+    xhr.send(fd);
+  });
+}
+
+// "Uploading 120 of 2,000 files · 310 MB of 1.2 GB (26%) · 40 MB/s · about 25 s left"
+function uploadProgress(total, count) {
+  const started = Date.now();
+  return (files, bytes) => {
+    const secs = (Date.now() - started) / 1000;
+    const pct = total ? Math.floor(bytes / total * 100) : 0;
+    let tail = '';
+    if (secs >= 2 && bytes > 0) {
+      const rate = bytes / secs;
+      const left = (total - bytes) / rate;
+      tail = `  ·  ${fmtSize(Math.round(rate))}/s` + (left >= 1 ? `  ·  about ${left < 90 ? Math.ceil(left) + ' s' : Math.ceil(left / 60) + ' min'} left` : '');
+    }
+    showIngest(`Uploading ${fmtInt(files)} of ${fmtInt(count)} file${count === 1 ? '' : 's'}  ·  ${fmtSize(bytes)} of ${fmtSize(total)} (${pct}%)${tail}`, bytes, total || 1);
   };
-  xhr.open('POST', '/api/upload');
-  xhr.send(fd);
+}
+
+// Leaving the page mid-upload would cut it short; ask first.
+window.addEventListener('beforeunload', (ev) => { if (S.uploading) { ev.preventDefault(); ev.returnValue = ''; } });
+
+async function upload(list, source) {
+  if (!list.length) { toast('Nothing to add: no files were found'); return; }
+  const total = list.reduce((n, x) => n + x.file.size, 0);
+  const progress = uploadProgress(total, list.length);
+  S.uploading = true;
+  progress(0, 0);
+  const finish = (msg, bad) => { S.uploading = false; showIngest(null); if (msg) toast(msg, bad); };
+
+  // Open the submission.
+  const opened = await postFiles([], null, false, null, source);
+  if (opened.status !== 200) { finish(opened.body && opened.body.error ? opened.body.error : 'The upload failed: Atropos could not be reached', true); return; }
+  const batch = opened.body.batch;
+
+  const chunks = [];
+  let cur = [], size = 0;
+  for (const x of list) {
+    if (cur.length && (cur.length >= CHUNK_FILES || size + x.file.size > CHUNK_BYTES)) { chunks.push(cur); cur = []; size = 0; }
+    cur.push(x); size += x.file.size;
+  }
+  if (cur.length) chunks.push(cur);
+
+  let sentBytes = 0, sentFiles = 0;
+  const unreadable = [];
+  for (const chunk of chunks) {
+    const bytes = chunk.reduce((n, x) => n + x.file.size, 0);
+    const r = await postFiles(chunk, batch, false, (loaded) => progress(sentFiles + Math.floor(chunk.length * loaded / Math.max(1, bytes)), sentBytes + Math.min(loaded, bytes)));
+    if (r.status !== 200) {
+      // Find out what of this chunk arrived, and send the rest one by one.
+      let have = new Set();
+      try { have = new Set((await api(`/api/upload/${batch}`)).paths); } catch { /* the submission is gone */ }
+      for (const x of chunk) {
+        if (have.has(normPath(x.path))) continue;
+        showIngest(`Retrying files one by one after a file could not be read  ·  ${x.path}`, sentBytes, total || 1);
+        const one = await postFiles([x], batch, false);
+        if (one.status !== 200) unreadable.push(x.path);
+      }
+    }
+    sentBytes += bytes; sentFiles += chunk.length;
+    progress(sentFiles, sentBytes);
+  }
+  showIngest('Finishing the upload…', total || 1, total || 1);
+  if (unreadable.length) {
+    try { await api('/api/upload/unreadable', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ batch, paths: unreadable, error: 'the browser could not read the file, or it changed while being sent' }) }); } catch { /* shown below all the same */ }
+  }
+  const closed = await postFiles([], batch, true);
+  if (closed.status !== 200) {
+    finish((closed.body && closed.body.error) || 'The upload could not be finished: Atropos could not be reached. What arrived is parsed within two minutes.', true);
+    return;
+  }
+  const stored = list.length - unreadable.length;
+  finish(`${fmtInt(stored)} file${stored === 1 ? '' : 's'} hashed and stored as submission ${batch}. Parsing…`);
+  if (unreadable.length) unreadableDialog(batch, unreadable);
+  pollSoon();
+}
+
+// Files the browser could not send: usually locked or in use by a running
+// program (a browser's own profile while it is open). They are not in the case.
+function unreadableDialog(batch, paths) {
+  const dlg = $('dlg');
+  dlg.replaceChildren(
+    h('h2', {}, `${fmtInt(paths.length)} file${paths.length === 1 ? '' : 's'} could not be added`),
+    h('p', {}, `Everything else is in submission ${batch}. The browser could not read ${paths.length === 1 ? 'this file' : 'these files'}, or ${paths.length === 1 ? 'it' : 'they'} changed while being sent: usually because a program has ${paths.length === 1 ? 'it' : 'them'} open, as a web browser does with its own profile. Close that program and add ${paths.length === 1 ? 'it' : 'them'} again. The list is recorded in the audit log.`),
+    h('pre', { class: 'unreadable' }, paths.slice(0, 200).join('\n') + (paths.length > 200 ? `\n… and ${fmtInt(paths.length - 200)} more` : '')),
+    h('div', { class: 'actions' }, h('button', { class: 'primary', onclick: () => dlg.close() }, 'OK')));
+  dlg.showModal();
 }
 
 function setupDrop() {
@@ -1252,11 +1577,11 @@ function setupDrop() {
     if (!isFiles(ev)) return;
     ev.preventDefault();
     depth = 0; $('drop').hidden = true;
-    filesFromDrop(ev.dataTransfer).then(upload, fail);
+    filesFromDrop(ev.dataTransfer).then((list) => list.length ? addDialog(list) : toast('Nothing to add: no files were found'), fail);
   });
   for (const id of ['pickfiles', 'pickdir']) {
     $(id).addEventListener('change', (ev) => {
-      upload([...ev.target.files].map((file) => ({ file, path: file.webkitRelativePath || file.name })));
+      upload([...ev.target.files].map((file) => ({ file, path: file.webkitRelativePath || file.name })), S.pendingSource);
       ev.target.value = '';
     });
   }
@@ -1276,19 +1601,24 @@ function setIngest(st) {
     S.lastExtract = st.last;
   } else if (st && !st.last && S.lastExtract === '') S.lastExtract = ' ';
   if (S.uploading) return;
+  S.pending = new Set(st && st.pending ? st.pending.map(Number) : []);
+  S.currentId = st && st.current_id ? Number(st.current_id) : 0;
   const was = S.busy;
   S.busy = !!(st && st.busy);
   if (S.busy) {
     showIngest(st.current ? `Processing ${st.current}` + (st.queued ? `  (${st.done} of ${st.queued})` : '') : 'Processing…', st.done, st.queued);
   } else showIngest(null);
-  if (was && !S.busy) { // a submission just finished: everything on screen may be stale
-    loadCase(); loadEvidence(); loadGroups();
-    if (S.view === 'timeline') reload();
-    if (S.view === 'audit') loadAudit();
-    analysisLoaded = false;
-    if (S.view === 'analysis') loadAnalysis();
-    if (S.view === 'files') renderImagePicker();
-  }
+  if (was && !S.busy) refreshAll(); // a submission just finished: everything on screen may be stale
+}
+// The timeline is reloaded now if it is in view, else when it next is.
+let timelineStale = false;
+function refreshAll() {
+  loadCase(); loadEvidence(); loadGroups();
+  if (S.view === 'timeline') reload(); else timelineStale = true;
+  if (S.view === 'audit') loadAudit();
+  analysisLoaded = false;
+  if (S.view === 'analysis') loadAnalysis();
+  if (S.view === 'files') renderImagePicker();
 }
 let pollTimer;
 async function poll() {
@@ -1305,6 +1635,73 @@ async function poll() {
 function pollSoon() { S.busy = true; clearTimeout(pollTimer); pollTimer = setTimeout(poll, 150); }
 
 // ---- views and wiring ----
+// ---- the user guide, one topic at a time ----
+// The guide is written in index.html as one article; here each h2 and what
+// follows it becomes a topic, shown alone, with the contents list beside it,
+// previous and next at the foot, and a search over all topics.
+let helpTopics = [];
+function setupHelp() {
+  const body = document.querySelector('.helpbody');
+  const kids = [...body.children];
+  let cur = null;
+  const intro = [];
+  for (const el of kids) {
+    if (el.tagName === 'H2') {
+      cur = h('section', { class: 'helptopic', 'data-id': el.id });
+      helpTopics.push(cur);
+      body.appendChild(cur);
+    }
+    if (cur) cur.appendChild(el); else intro.push(el);
+  }
+  // The title and introduction open the first topic.
+  if (helpTopics.length) helpTopics[0].prepend(...intro);
+  helpTopics.forEach((sec, i) => {
+    const prev = helpTopics[i - 1], next = helpTopics[i + 1];
+    const title = (s) => s.querySelector('h2').textContent;
+    sec.appendChild(h('div', { class: 'helpfoot' },
+      prev ? h('button', { onclick: () => showHelp(prev.dataset.id) }, '← ' + title(prev)) : h('span'),
+      next ? h('button', { class: 'primary', onclick: () => showHelp(next.dataset.id) }, title(next) + ' →') : h('span')));
+  });
+  $('helptoc').addEventListener('click', (ev) => {
+    const b = ev.target.closest('button');
+    if (b && b.dataset.to) showHelp(b.dataset.to);
+  });
+  $('helpq').addEventListener('input', () => searchHelp($('helpq').value));
+  $('helpq').addEventListener('keydown', (k) => {
+    if (k.key === 'Enter') { // the next topic that matches
+      const hits = [...$('helptoc').querySelectorAll('button[data-to]:not([hidden])')];
+      const i = hits.findIndex((b) => b.dataset.to === S.help);
+      if (hits.length) showHelp(hits[(i + 1) % hits.length].dataset.to);
+    }
+    if (k.key === 'Escape') { $('helpq').value = ''; searchHelp(''); }
+  });
+  showHelp(S.help || helpTopics[0].dataset.id, true);
+}
+function showHelp(id, quiet) {
+  if (!helpTopics.some((s) => s.dataset.id === id)) id = helpTopics[0].dataset.id;
+  S.help = id;
+  for (const s of helpTopics) s.hidden = s.dataset.id !== id;
+  for (const b of $('helptoc').querySelectorAll('button[data-to]')) b.classList.toggle('on', b.dataset.to === id);
+  document.querySelector('.helpbody').scrollTop = 0;
+  if (!quiet) writeHash();
+}
+// Shows only the topics whose text holds every word typed, and opens the first.
+function searchHelp(q) {
+  const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+  let n = 0, first = null;
+  for (const b of $('helptoc').querySelectorAll('button[data-to]')) {
+    const sec = helpTopics.find((s) => s.dataset.id === b.dataset.to);
+    const text = sec ? sec.textContent.toLowerCase() : '';
+    const hit = words.every((w) => text.includes(w));
+    b.hidden = !hit;
+    if (hit) { n++; first = first || b.dataset.to; }
+  }
+  for (const g of $('helptoc').querySelectorAll('.tocgroup')) g.hidden = words.length > 0;
+  $('helphits').hidden = !words.length;
+  $('helphits').textContent = n ? `${n} topic${n === 1 ? '' : 's'} mention ${words.length === 1 ? 'it' : 'them'}. Enter shows the next.` : 'No topic mentions that.';
+  if (first && words.length && !$('helptoc').querySelector(`button[data-to="${S.help}"]:not([hidden])`)) showHelp(first);
+}
+
 function setView(v) {
   S.view = v;
   writeHash();
@@ -1314,7 +1711,9 @@ function setView(v) {
   if (v === 'analysis' && !analysisLoaded) loadAnalysis();
   if (v === 'evidence' || v === 'files') loadEvidence();
   if (v === 'audit') loadAudit();
-  if (v === 'timeline') renderRows();
+  if (v === 'timeline') {
+    if (timelineStale) { timelineStale = false; reload(); } else renderRows();
+  }
 }
 
 function moveSelection(delta) {
@@ -1329,7 +1728,9 @@ function moveSelection(delta) {
 
 function init() {
   $('nav').addEventListener('click', (ev) => { const b = ev.target.closest('button'); if (b) setView(b.dataset.view); });
-  $('add').onclick = addDialog;
+  $('add').onclick = () => addDialog();
+  // Zone names for the Details tab's time zone field.
+  try { $('tzlist').replaceChildren(...Intl.supportedValuesOf('timeZone').map((z) => h('option', { value: z }))); } catch { /* an older browser: typed by hand */ }
   $('verify').onclick = verify;
   $('anrun').onclick = loadAnalysis;
   $('antag').onclick = tagAnomalies;
@@ -1385,13 +1786,7 @@ function init() {
   $('evstale').onclick = reparseStale;
   $('origin').addEventListener('change', (ev) => setOrigin(ev.target.value));
   $('imgshow').onclick = showImageEvents;
-  // The guide's contents list scrolls to a section. Links are not used,
-  // because the address bar already carries the view and the search.
-  $('helptoc').addEventListener('click', (ev) => {
-    const b = ev.target.closest('button');
-    const el = b && document.getElementById(b.dataset.to);
-    if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' });
-  });
+  setupHelp();
   $('imgpick').addEventListener('change', (ev) => { S.img = Number(ev.target.value); browse('/'); });
   $('imgall').addEventListener('change', (ev) => {
     S.imgChecked.clear();

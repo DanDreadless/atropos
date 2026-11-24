@@ -59,6 +59,7 @@
       <button id="zoomreset" hidden>Whole timeline</button>
     </div>
     <div id="histo" class="histo"><div id="bars"></div><div id="sel" hidden></div><div id="tip" hidden></div></div>
+    <div id="tzfacets" class="facets"></div>
     <div id="texthits" class="texthits" hidden></div>
     <div class="split">
       <div class="table">
@@ -154,17 +155,24 @@
     <div class="help">
       <nav id="helptoc" class="helptoc" aria-label="Contents of the guide">
         <b>User guide</b>
+        <input id="helpq" type="search" placeholder="Search the guide" aria-label="Search the guide" autocomplete="off" spellcheck="false">
+        <span id="helphits" class="helphits" hidden></span>
+        <span class="tocgroup">Start here</span>
         <button data-to="h-start">Getting started</button>
         <button data-to="h-add">Adding evidence</button>
         <button data-to="h-timeline">Reading the timeline</button>
+        <button data-to="h-evidenceof">What "Evidence of" means</button>
+        <span class="tocgroup">Finding things</span>
         <button data-to="h-search">Searching</button>
         <button data-to="h-from">Finding what came from where</button>
         <button data-to="h-images">Disk and disc images</button>
         <button data-to="h-evidence">The Evidence tab</button>
+        <span class="tocgroup">Working the case</span>
         <button data-to="h-notes">Tags, comments and groups</button>
         <button data-to="h-analysis">Analysis</button>
         <button data-to="h-details">Case and host details</button>
         <button data-to="h-out">Reports and exports</button>
+        <span class="tocgroup">Reference</span>
         <button data-to="h-integrity">Integrity and the audit log</button>
         <button data-to="h-zones">Time zones</button>
         <button data-to="h-keys">Keyboard</button>
@@ -179,16 +187,19 @@
         <h2 id="h-start">Getting started</h2>
         <p>A case is a folder. Start Atropos with <code>atropos serve --case</code> and the folder's path, and open the address it prints, including the part after <code>?token=</code>. The token changes each time the server starts, so an old bookmark will ask you to use the new address.</p>
         <ol>
-          <li><b>Add evidence.</b> Drag files or whole folders onto the page, or press <b>Add evidence</b>. Add everything from one computer together, and include its SYSTEM registry hive if you have it: that is where Atropos learns the computer's name and time zone.</li>
+          <li><b>Describe the hosts.</b> On the <b>Details</b> tab, add each computer the case is about: its name, and its time zone as a zone name such as <code>Europe/London</code>.</li>
+          <li><b>Add evidence.</b> Drag files or whole folders onto the page, or press <b>Add evidence</b>, and say which host they come from (or that they come from none, and where from). Add everything from one computer together, and include its SYSTEM registry hive if you have it: Atropos reads the computer's name and time zone from it and tells you if they disagree with what you stated.</li>
           <li><b>Watch it arrive.</b> Progress shows beside the tabs. The timeline fills as each file is read; you do not have to wait for the last one.</li>
           <li><b>Look.</b> The chart across the top of the timeline shows where the activity is. Drag across a busy stretch to zoom in on it.</li>
-          <li><b>Narrow it.</b> Type in the search box, or click the chips under it: <i>Evidence of</i> answers questions such as "what ran?", and <i>Source</i> picks one kind of artefact.</li>
+          <li><b>Narrow it.</b> Type in the search box, or click the chips under it: <i>Evidence of</i> answers questions such as "what ran?", and <i>Source</i>, on the row below, picks one kind of artefact. <i>Time zone from</i>, under the chart, picks events by how their time zone was established. The chips always count what the search finds: type a word and they show only the kinds of event and artefact that hold it. Within one row, the counts leave out that row's own choice, so after picking <i>execution</i> you can still see how many <i>account</i> events there are and add them: chips picked in the same row mean <i>either</i> (execution or account), while chips in different rows narrow each other (execution from the registry).</li>
+          <li><b>Browsing.</b> The <i>browser</i> source is what this machine's browser recorded; <i>browser-synced</i> is history that sync brought from another device signed in to the same account, which is not evidence that this machine was used. Under <i>Evidence of</i>, <i>browser</i> is pages someone opened and downloads; <i>browser-automatic</i> is what the browser loaded by itself (hops in a redirect chain, frames inside a page, start-up pages). The Meaning column says how each page was reached: <code>url-visited (typed)</code>, <code>(link)</code>, <code>(form submitted)</code>, <code>(reload)</code> and so on. Open a visit for a read-out: the page, how it was reached, the page it came from (with a button that opens that visit, to walk the chain back), the search, the time on the page, and whose profile it was (taken from the folder the history file came from, and marked as inferred). Addresses are shown as text and never opened.</li>
           <li><b>Keep what matters.</b> Click an event to open it, tag it, or tick several and put them in a group of their own.</li>
           <li><b>Write it up.</b> Fill in <b>Details</b>, run <b>Verify integrity</b>, and take a <b>Case report</b>.</li>
         </ol>
 
         <h2 id="h-add">Adding evidence</h2>
         <p>Anything can be added. Atropos works out what a file is from its contents, never from its name, so a renamed file is still recognised. What it has a reader for goes on the timeline. Everything else is still hashed, stored, and has its text indexed so that a search can find it.</p>
+        <p><b>Which host.</b> Every submission is assigned before it is sent: to a host described on the Details tab, or as <i>not from a host</i> with a description of where it came from (a packet capture, firewall or cloud logs, a phone export), which is kept with it and shown in the report. Its events carry the host's name, so the timeline can be read across several computers (the <i>Host</i> chips, <code>host:</code>), and the time zone stated for the host is used for times its files record in local time; a zone read from a SYSTEM hive in the same submission takes precedence, being evidence. When a SYSTEM hive names a different computer from the host chosen, the item's notes say so. An event log can hold records from other machines (forwarded events): those keep the computer they name in their <code>computer</code> field. To correct a choice, open any item of the submission on the Evidence tab and press <b>Change host…</b>: the change is recorded, and the submission's items are parsed again under the new host.</p>
         <p>For each file, in this order:</p>
         <ol>
           <li>It is copied into the case's vault while SHA-256, SHA-1 and MD5 are worked out. The original is only ever read.</li>
@@ -199,7 +210,9 @@
         <p><b>Archives</b> (zip, tar, gzip) are unpacked, and each file inside becomes evidence in its own right, listed under the archive. <b>Disk and disc images</b> are not unpacked: see <i>Disk and disc images</i> below. A file whose contents are already in the case is recorded as a <b>duplicate</b> and not read a second time.</p>
         <p><b>Submissions.</b> Files added in one go form a submission. The host name and time zone found in a SYSTEM hive apply to the rest of the same submission, which is why a computer's artefacts belong together and two computers' artefacts belong in two submissions.</p>
         <p><b>Registry hives and their logs.</b> A hive copied from a running computer is often missing its last changes, which Windows keeps for a while in the hive's transaction logs (<code>NTUSER.DAT.LOG1</code>, <code>.LOG2</code> and so on). Add the logs with the hive. Atropos matches them to their hive by what is inside them, applies them the way Windows would on loading the hive, and says in the hive's notes which logs and entries it used. If a hive needs its logs and they are not in the case, its status is <b>partial</b> and the notes say so; add the logs later and the hive is read again by itself.</p>
+        <p class="aside">Large folders (a browser profile, a user's AppData) are sent in parts, with a progress bar showing files, size, speed and time left; all of it is one submission and is parsed when the last part has arrived. A file the browser cannot read, usually because a program has it open (a web browser holds its own profile open while it runs), is skipped, and you are shown the list; it is also recorded in the audit log. Close the program and add those files again. Do not close the page while an upload is running.</p>
         <p class="aside">Files dropped onto the page arrive without their alternate data streams, because a browser cannot see them. To keep the <code>Zone.Identifier</code> of downloaded files (it records where each came from), add the folder with <code>atropos ingest</code> on the command line instead.</p>
+        <p class="aside">Files exported by a forensic tool, such as <code>$MFT</code>, <code>$LogFile</code> and <code>$J</code> from FTK Imager, often keep the Hidden and System attributes they had on the volume, and then Explorer and the file picker do not show them. Clear the attributes on your copies (<code>attrib -h -s "C:\exported\*"</code>; the content and its hash are unchanged), type the file's full name into the picker's File name box, or add the folder with <code>atropos ingest</code>, which reads hidden files.</p>
 
         <h2 id="h-timeline">Reading the timeline</h2>
         <p>Each row is one moment that an artefact recorded. The columns, left to right:</p>
@@ -207,7 +220,7 @@
           <tr><th>Time (UTC)</th><td>Always UTC, to the precision the artefact holds.</td></tr>
           <tr><th>TZ</th><td>A coloured dot for how the time zone was established. Hover over it. An orange row means the zone was <i>assumed</i>: treat that time with care (see <i>Time zones</i>).</td></tr>
           <tr><th>MACB</th><td>For file times only: <b>M</b>odified, <b>A</b>ccessed, <b>C</b>hanged (the file's record, not its content) and <b>B</b>orn. Dots mean the time is not a file time.</td></tr>
-          <tr><th>Evidence of</th><td>What the event tells you: a program ran, a file was opened, an account was used, something was set to start automatically, and so on.</td></tr>
+          <tr><th>Evidence of</th><td>What the event tells you: a program ran, a file was opened, an account was used, something was set to start automatically, and so on. Each kind is explained under <i>What "Evidence of" means</i>.</td></tr>
           <tr><th>Meaning</th><td>What this particular time is. "program-last-run (prefetch)" and "file-modified (shimcache)" are different claims even when they name the same file.</td></tr>
           <tr><th>Source</th><td>The kind of artefact: event log, registry, file table, browser and so on.</td></tr>
           <tr><th>Host, User</th><td>Where the artefact says them. Often empty.</td></tr>
@@ -219,6 +232,80 @@
         <p><b>Opening an event.</b> Click a row. The panel on the right shows the time to the nanosecond and as it was found in the source, how the zone was arrived at, every field the reader extracted, where in the file the record sits, and which evidence item and parse run it belongs to. From there you can jump to that item, show only its events, or show everything from the image it came out of. A change-journal record names its folder only by a number in the file table; when the file table from the same volume is in the case, the panel shows that folder's path too, as the file table records it now.</p>
         <p class="aside">The address bar always holds the current view, search, zoom and open event. Copy it into your notes and it will bring you back to exactly that place while the same server is running.</p>
 
+        <h2 id="h-evidenceof">What "Evidence of" means</h2>
+        <p>Every event is put in one group by what it is evidence of, following the "Evidence of…" grouping taught in Windows forensics. The group says what kind of claim the event makes; it does not make the claim stronger than its artefact. Two things hold for all of them:</p>
+        <ul>
+          <li><b>Read the Meaning column with it.</b> The group says <i>what</i> happened; the Meaning says <i>which time</i> this is. "program-last-run (userassist)" and "file-modified (shimcache)" are both <i>execution</i>, but the first is when a person last started the program and the second is the program file's own modified time, which says nothing about when it ran.</li>
+          <li><b>One artefact is a lead, two independent ones are a finding.</b> Most artefacts below can be explained away on their own (a scan by antivirus, a sync, a restore). Look for the same file or account in a second group or a second source.</li>
+        </ul>
+        <div class="evcards">
+          <div class="evcard">
+            <h3><i class="cat execution">execution</i></h3>
+            <p class="evshows">A program ran, or Windows recorded it as present to run.</p>
+            <dl><dt>Comes from</dt><dd>Prefetch run times; UserAssist and BAM (last run, per user); ShimCache and Amcache; SRUM application use; process creation and PowerShell in the event log (Security 4688, Sysmon 1, PowerShell 4103/4104, Task Scheduler 100/200/201, service start and stop 7035/7036); Defender's process telemetry; the Run dialog.</dd><dt>How to read it</dt><dd>Prefetch, UserAssist, BAM, 4688 and Sysmon 1 show a run. <b>ShimCache and Amcache do not prove a run</b> on their own on Windows 10 and 11: they record that Windows saw the file (ShimCache's time is the file's modified time; the "executed" flag is only a hint). UserAssist and BAM name a user; prefetch does not. Prefetch can be turned off on servers and SSD systems.</dd></dl>
+          </div>
+          <div class="evcard">
+            <h3><i class="cat file-opening">file-opening</i></h3>
+            <p class="evshows">A file or folder was opened, saved or browsed to by a person.</p>
+            <dl><dt>Comes from</dt><dd>Shortcut (.lnk) files and jump lists; the registry's recent documents, Open and Save dialog lists and typed paths; shellbags (folders browsed in Explorer); Explorer searches; Notepad and Notepad++ tabs; OneDrive opening an online-only file; Windows Search's record of opened items.</dd><dt>How to read it</dt><dd>Strong evidence of a person's activity, tied to the user whose profile holds it. A shellbag shows a folder was viewed, not that a file in it was opened. Most of these lists keep only the latest time per entry: an earlier opening is not shown. The file need not exist any more, which makes these good evidence of deleted or removable-media files.</dd></dl>
+          </div>
+          <div class="evcard">
+            <h3><i class="cat file-system">file-system</i></h3>
+            <p class="evshows">A file or folder's own times on the volume: created, modified, accessed, record changed.</p>
+            <dl><dt>Comes from</dt><dd>The NTFS file table ($MFT: $STANDARD_INFORMATION and $FILE_NAME times), the change journal ($J), the transaction log ($LogFile), old directory entries in index slack, FAT, exFAT and ext volumes, OneDrive's sync database, shadow copy creation, Sysmon file events.</dd><dt>How to read it</dt><dd>The bulk of most timelines. The $STANDARD_INFORMATION times can be changed by any program (timestomping); $FILE_NAME times and the change journal are much harder to alter, which is what <i>Analysis</i> compares. Accessed times are often not updated by Windows. A copied file keeps its modified time but gets a new created time, so "created after modified" usually means a copy. Antivirus scans and backups touch files too.</dd></dl>
+          </div>
+          <div class="evcard">
+            <h3><i class="cat browser">browser</i></h3>
+            <p class="evshows">A person browsed: pages opened, downloads, searches, form entries, saved logins, sessions, extensions.</p>
+            <dl><dt>Comes from</dt><dd>Chromium and Firefox history, downloads, cookies, autofill, logins (never the passwords), address-bar shortcuts, page icons, bookmarks, session files and extensions; Internet Explorer typed URLs; Windows Search's indexed web history.</dd><dt>How to read it</dt><dd>Check the Source: <i>browser</i> is what this machine recorded, <i>browser-synced</i> came from another device signed in to the same account and is <b>not</b> evidence that this machine was used then. The Meaning says how a page was reached; <i>typed</i> and <i>form submitted</i> show intent, <i>link</i> less so. A cookie shows a site was contacted, not that a person looked at it. History can be deleted by the user; cookies, page icons and Windows Search often outlive it.</dd></dl>
+          </div>
+          <div class="evcard">
+            <h3><i class="cat browser-automatic">browser-automatic</i></h3>
+            <p class="evshows">A page the browser loaded by itself: a hop in a redirect chain, a frame inside a page, a start-up page.</p>
+            <dl><dt>Comes from</dt><dd>Chromium and Firefox history, from how each visit was made.</dd><dt>How to read it</dt><dd>Shows the browser contacted that address, <b>not</b> that a person chose it. A redirect hop sits just before the page that was shown (open it and follow <i>Came from</i>). Useful for tracking and malicious redirects; leave it out when asking what someone looked at.</dd></dl>
+          </div>
+          <div class="evcard">
+            <h3><i class="cat account">account</i></h3>
+            <p class="evshows">An account was used or changed: logons and logoffs, failed logons, remote sessions, accounts created, enabled, changed or locked.</p>
+            <dl><dt>Comes from</dt><dd>Security log (4624 logon with its type, 4625 failed, 4634/4647 logoff, 4648 explicit credentials, 4672 admin rights, 4720-4738 account changes, 4740 lock-out, 4768/4769/4771/4776 Kerberos and NTLM, 4778/4779 reconnects); Remote Desktop and WinRM logs; SAM account times; the account keys' last writes.</dd><dt>How to read it</dt><dd>The logon type in a 4624's fields matters: 2 at the keyboard, 3 over the network, 10 Remote Desktop, 5 a service. Many logons are the system itself. A failed logon is an attempt, not access. The Security log rolls over quickly on busy machines, so absence proves little.</dd></dl>
+          </div>
+          <div class="evcard">
+            <h3><i class="cat network">network</i></h3>
+            <p class="evshows">Network activity: connections, shares, remote desktop out, downloads by BITS, firewall changes, networks joined, data used.</p>
+            <dl><dt>Comes from</dt><dd>Security 5140/5145 (share access) and 5156 (connections allowed); Remote Desktop client logs; BITS transfers; Sysmon network and DNS events; firewall rule changes; SRUM network connections and bytes per application; network history and mapped drives in the registry; web server logs.</dd><dt>How to read it</dt><dd>SRUM's figures are totals over an hour or so, not single connections, and are written when the period ends. The registry's network list shows a network was joined, with first and last connection. Most connections are not logged at all unless Sysmon or connection auditing was set up.</dd></dl>
+          </div>
+          <div class="evcard">
+            <h3><i class="cat persistence">persistence</i></h3>
+            <p class="evshows">Something was set up to run again by itself: services, scheduled tasks, Run keys, WMI subscriptions.</p>
+            <dl><dt>Comes from</dt><dd>Service installs (System 7045, Security 4697) and start-type changes; scheduled tasks (Security 4698-4702, Task Scheduler 106/140/141, the task files and TaskCache); autostart registry keys; Winlogon; WMI event subscriptions in the repository and their log events.</dd><dt>How to read it</dt><dd>A registry key's last-write time says the key changed then, not which value changed or that the entry was added then. Plenty of persistence is legitimate (updaters, drivers): look at the path and the program. A WMI subscription is rare outside management software and worth reading in full.</dd></dl>
+          </div>
+          <div class="evcard">
+            <h3><i class="cat device">device</i></h3>
+            <p class="evshows">External storage and devices: USB drives connected, volumes mounted, devices installed.</p>
+            <dl><dt>Comes from</dt><dd>Partition and device-driver logs (Partition 1006, DriverFrameworks 2003/2100/2102, Kernel-PnP 400/410), Security 6416; the USBSTOR and mount-point keys; MountPoints2 per user.</dd><dt>How to read it</dt><dd>The Partition 1006 event carries the drive's serial number and size; the registry keys give first and last connection where Windows keeps them. MountPoints2 ties a volume to a user. Match volume serial numbers with shortcut files (file-opening) to show files opened from the drive.</dd></dl>
+          </div>
+          <div class="evcard">
+            <h3><i class="cat registry">registry</i></h3>
+            <p class="evshows">A registry key was written, and nothing more specific is known about it.</p>
+            <dl><dt>Comes from</dt><dd>Every key's last-write time in the hives; deleted keys recovered from the hive; Sysmon registry events and Security 4657.</dd><dt>How to read it</dt><dd>The key's last write covers any change to its values, by anyone, including Windows itself. Use it to date a change you have another reason to look at, not as evidence of activity by itself. Keys Atropos understands appear in the more specific groups instead.</dd></dl>
+          </div>
+          <div class="evcard">
+            <h3><i class="cat security">security</i></h3>
+            <p class="evshows">Security events: malware detected and acted on, protection changed, logs cleared, the clock changed, shutdowns.</p>
+            <dl><dt>Comes from</dt><dd>Defender's operational log, detection history and support log (MPLog); Security 1102 and System 104 (logs cleared), 4616 (time changed), 4719 (audit policy changed); unexpected shutdowns (6008) and shutdowns (1074); Sysmon tampering.</dd><dt>How to read it</dt><dd>A log being cleared or protection being switched off is significant in itself: it is often the attacker's last step. A detection shows the file was there and named what Defender thought it was; check what action was taken and whether it succeeded.</dd></dl>
+          </div>
+          <div class="evcard">
+            <h3><i class="cat deletion">deletion</i></h3>
+            <p class="evshows">A file was deleted.</p>
+            <dl><dt>Comes from</dt><dd>The Recycle Bin's records ($I files); the change journal's delete records; freed ext inodes; OneDrive and its SafeDelete database; Security 4660 and Sysmon file deletes.</dd><dt>How to read it</dt><dd>The Recycle Bin shows a person deleted it through Explorer (and the original path); the change journal shows any deletion, by anything, including temporary files, which make up most of it. A deletion record does not mean the content is gone: check the file table and shadow copies.</dd></dl>
+          </div>
+          <div class="evcard">
+            <h3><i class="cat log">log</i></h3>
+            <p class="evshows">Any other dated entry: log lines and event-log records with no more specific meaning.</p>
+            <dl><dt>Comes from</dt><dd>Event-log records not listed above, text logs, OneDrive's logs, the E01 acquisition record, SRUM energy records, Defender's log lines.</dd><dt>How to read it</dt><dd>Context, not evidence of a kind of activity. Search them by words and read them around the times that matter.</dd></dl>
+          </div>
+        </div>
+
         <h2 id="h-search">Searching</h2>
         <p>Words are matched from their start and all of them must be present, so <code>powersh enc</code> finds events mentioning both "powershell" and "encodedcommand". Everything else is a filter of the form <code>name:value</code>. Put a minus sign in front of a word or a filter to exclude it.</p>
         <table>
@@ -227,7 +314,7 @@
           <tr><th><code>category:execution</code></th><td>One "Evidence of" group. The chips do the same.</td></tr>
           <tr><th><code>source:evtx</code></th><td>One kind of artefact.</td></tr>
           <tr><th><code>type:"program-last-run (bam)"</code></th><td>One exact meaning. Use quotes when it has spaces.</td></tr>
-          <tr><th><code>host:PC1</code> &nbsp; <code>user:alice</code></th><td>As the artefact recorded them.</td></tr>
+          <tr><th><code>host:PC1</code> &nbsp; <code>user:alice</code></th><td>The host the evidence came from (as assigned, or as its SYSTEM hive names it), and the user as the artefact recorded them. Several hosts mean either of them.</td></tr>
           <tr><th><code>macb:m</code> &nbsp; <code>macb:mb</code></th><td>File times that are a modification; or both modified and born.</td></tr>
           <tr><th><code>tz:assumed</code></th><td>Events whose zone had to be assumed.</td></tr>
           <tr><th><code>tag:anomaly</code> &nbsp; <code>group:Malware</code></th><td>Events you, or an analysis, have marked.</td></tr>
@@ -235,6 +322,10 @@
           <tr><th><code>from:12</code></th><td>Item 12 and everything that came out of it: all files taken from an image, all members of an archive.</td></tr>
           <tr><th><code>file:ntuser</code></th><td>Events from any item whose name or path contains the text. <code>file:"Users/alice"</code> works on paths inside an image.</td></tr>
           <tr><th><code>submission:2</code></th><td>Everything added together in the second submission.</td></tr>
+          <tr><th><code>domain:example.com</code></th><td>Browser visits and downloads for a site and its subdomains (www.example.com, mail.example.com), not other sites that merely contain the name.</td></tr>
+          <tr><th><code>evidence:25 visit:812</code></th><td>One visit by the browser's own number in that history file; the read-out of a visit uses it to open the visit it came from.</td></tr>
+          <tr><th><code>item:NTUSER.DAT</code></th><td>Every item of that name, as the Item column shows it, wherever it came from. Put a name with spaces in quotes: <code>item:"my notes.txt"</code>.</td></tr>
+          <tr><th><code>kind:windows-registry-hive</code></th><td>Every item of one kind, as the Evidence tab names it, wherever it came from: all registry hives, all event logs, all file tables.</td></tr>
           <tr><th><code>id:41,57</code></th><td>Those events exactly. Analysis findings use this to point at the timeline.</td></tr>
         </table>
         <p>Filters combine: <code>from:3 category:execution -source:registry powershell</code> is "programs run, according to anything but the registry, among what came out of image 3, mentioning PowerShell".</p>
@@ -243,12 +334,12 @@
         <h2 id="h-from">Finding what came from where</h2>
         <p>A case soon holds hundreds of items, many of them copied out of one image. Four things keep them apart:</p>
         <ul>
-          <li><b>The From list</b>, beside the search box. It lists every image and archive that things were taken out of, with the number of events each accounts for, and every submission. Pick one and the timeline shows only that, and the counts on the <i>Evidence of</i>, <i>Source</i> and <i>Time zone from</i> chips change to count only that too. Pick <i>all evidence</i> to go back. Viewing a group does the same to the counts.</li>
+          <li><b>The From list</b>, beside the search box. It lists every image, every archive that things were taken out of, each with the number of events it accounts for, every name in the timeline's Item column (all the <code>NTUSER.DAT</code> hives, the <code>$MFT</code>, each event log), built from what has been parsed, and every submission. Pick one and the timeline shows only that, and the counts on the <i>Evidence of</i>, <i>Source</i> and <i>Time zone from</i> chips change to count only that too. Pick <i>all evidence</i> to go back. Viewing a group does the same to the counts, as does anything typed in the search box.</li>
           <li><b>The Item column</b> names the file each event was read from.</li>
           <li><b>On the Evidence tab</b>, open an image or archive and press <b>Show all events from it and what came out of it</b>. Open any single item and press <b>Show its events</b>.</li>
           <li><b>On the Images tab</b>, <b>Show its events</b> does the same for the image you are browsing.</li>
         </ul>
-        <p>These all write a <code>from:</code>, <code>evidence:</code> or <code>submission:</code> filter into the search box, so you can add words and other filters after it.</p>
+        <p>These all write a <code>from:</code>, <code>evidence:</code>, <code>item:</code> or <code>submission:</code> filter into the search box, so you can add words and other filters after it.</p>
 
         <h2 id="h-images">Disk and disc images</h2>
         <p>An image can hold a million files, nearly all of them irrelevant, so it is not unpacked when it arrives. Open the <b>Images</b> tab, choose the image, and browse it like a folder.</p>
@@ -274,11 +365,12 @@
           <tr><th>generic</th><td>No reader for this kind, or the reader found nothing it recognised. The file's text is indexed, and a program's build time is taken, but nothing else.</td></tr>
           <tr><th>unpacked</th><td>An archive; look at the items under it.</td></tr>
           <tr><th>duplicate</th><td>The same contents as an earlier item. Stored once, read once.</td></tr>
-          <tr><th>queued, processing</th><td>Waiting its turn, or being read now.</td></tr>
+          <tr><th>queued, processing</th><td>Waiting its turn, or being read now, including after <b>Parse again</b>. Hover over the label for the status of the last finished run, which is what the row shows again when the new run ends.</td></tr>
           <tr><th>interrupted</th><td>Atropos was stopped while reading it. Press <b>Parse again</b>.</td></tr>
         </table>
         <p><b>Sorting and filtering.</b> The list starts in the order things were added, with each file under the image or archive it came out of. The box at the top filters by name, path, type, status or hash. The list beside it re-orders by number of events, name, type, status or size, and <b>With events only</b> hides everything that put nothing on the timeline.</p>
         <p><b>Parse again</b> reads an item afresh as a new run. The earlier run and its events are kept in the case and remain verifiable; the timeline shows the newest. Tags, comments and group membership belong to the earlier run's events and do not move across, so re-parse before you annotate, not after.</p>
+        <p><b>Exclude from case…</b> takes an item out of the case's view when it does not belong: the wrong machine's image, a file added by mistake. Give a reason; it is kept in the case and the audit log. The item, and everything that came out of it, leaves the timeline, the chips and counts, the From list, text search, exports, the report's timeline and the checks on the Analysis tab. Nothing is deleted: the file stays in the vault, its runs and events stay stored, <b>Verify integrity</b> still checks them, and the report lists the item as excluded with your reason. <b>Include again</b> brings it all back. Atropos never deletes evidence from a case; to hand over a case without something in it, make a new case without it.</p>
         <p><b>After an upgrade.</b> Readers improve between versions. An item read by an earlier version than the one now running is marked <b>older</b>, and a button appears at the top: <b>Bring N items up to date</b>. It parses all of them again in one step.</p>
 
         <h2 id="h-notes">Tags, comments and groups</h2>
@@ -298,6 +390,7 @@
 
         <h2 id="h-details">Case and host details</h2>
         <p>A report needs facts no artefact holds: the case reference, who asked for the examination, and for each computer its make, model, serial number, who collected it and how, and what its clock read against a reference when it was seized. Enter them on the <b>Details</b> tab. Where Atropos found a value in the evidence (the host name, the time zone, the Windows version) it is shown beside the field for comparison. Changes are kept as a history; an earlier value is never overwritten.</p>
+        <p><b>Hosts.</b> A form appears for each computer the evidence names: Atropos reads a computer's name and time zone from its SYSTEM registry hive (<code>Windows\System32\config\SYSTEM</code>), and has each name it finds ready with its own form. You can describe a host whether or not the evidence names it: with no SYSTEM hive in the case, a blank host form is shown that starts with the computer's name, and <b>Add host</b> adds more.</p>
 
         <h2 id="h-out">Reports and exports</h2>
         <p><b>Case report</b> (top right) first verifies the case, then writes one document: what was examined, with hashes; how each item was read and by which version; the details you entered; your groups and notes; and the result of the verification. HTML is for reading and printing, JSON for other tools.</p>
@@ -338,7 +431,7 @@
         <p>Everything the page does to a case can also be done without it. One Atropos process works on a case at a time.</p>
         <table>
           <tr><th><code>atropos serve --case DIR</code></th><td>This interface. It listens only on this computer.</td></tr>
-          <tr><th><code>atropos ingest --case DIR PATH…</code></th><td>Add files or folders. On Windows this keeps alternate data streams, which the page cannot.</td></tr>
+          <tr><th><code>atropos ingest --case DIR PATH…</code></th><td>Add files or folders. On Windows this keeps alternate data streams, which the page cannot. <code>--host NAME</code> says which computer they come from (added to the hosts if new); <code>--not-from-host TEXT</code> says they come from none, and where from.</td></tr>
           <tr><th><code>atropos verify --case DIR</code></th><td>The integrity check.</td></tr>
           <tr><th><code>atropos export --case DIR --format csv --query "…" -o FILE</code></th><td>Export a search. Formats: csv, jsonl, timesketch, bodyfile. <code>--group NAME</code> for one group.</td></tr>
           <tr><th><code>atropos report --case DIR --format html -o FILE</code></th><td>The case report.</td></tr>
@@ -369,6 +462,7 @@
 
 <div id="drop" class="drop" hidden><div>Drop files or folders to add them as evidence<small>Originals are not modified. Each file is hashed and copied into the case vault.</small></div></div>
 <dialog id="dlg"></dialog>
+<datalist id="tzlist"></datalist>
 <div id="toast" class="toast" hidden></div>
 <input id="pickfiles" type="file" multiple hidden>
 <input id="pickdir" type="file" webkitdirectory hidden>
