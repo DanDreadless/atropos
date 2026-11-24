@@ -15,6 +15,7 @@
     <button data-view="evidence">Evidence <span id="evcount" class="count"></span></button>
     <button data-view="files" title="Look inside disk and disc images and choose what goes on the timeline">Images <span id="imgcount" class="count"></span></button>
     <button data-view="analysis" title="Checks that compare artefacts with each other">Analysis</button>
+    <button data-view="connections" title="How the hosts of the case connected to each other, from both ends' evidence">Connections</button>
     <button data-view="details" title="What a report needs that no artefact can supply: case reference, each host's make, model, serial number, clock and how it was collected">Details</button>
     <button data-view="audit">Audit log</button>
     <button data-view="help" title="How everything here works (press ?)">Help</button>
@@ -127,6 +128,25 @@
     <div id="anrows" class="anrows"></div>
   </section>
 
+  <section id="view-connections" class="view" hidden>
+    <div class="bar">
+      <span id="cnmode" class="anmode">
+        <button data-mode="graph" class="on" title="Hosts and addresses, with an arrow for each way they connected">Graph</button>
+        <button data-mode="lanes" title="One lane per host, in time order: for following a path from host to host">Lanes</button>
+      </span>
+      <span id="cnsummary" class="summary"></span>
+      <span class="spacer"></span>
+      <button id="cnall" hidden>Show all</button>
+      <button id="cnrun">Run again</button>
+    </div>
+    <p class="hint anintro">Pairs the two ends of each Remote Desktop connection found in the hosts' own logs: the connecting computer's client and credentials records with the logon the other computer recorded. Ends are matched on the names and addresses stated for each host on the Details tab (and addresses learned from logon records), with each host's stated clock difference taken off. A connection seen at one end only is shown too. These are readings of the evidence, consistent with a connection; open the events to check them.</p>
+    <div class="cnwrap">
+      <div id="cncanvas" class="cncanvas" tabindex="0" aria-label="Connections drawing"></div>
+      <div id="cnlegend" class="cnlegend"></div>
+    </div>
+    <div id="cnrows" class="anrows"></div>
+  </section>
+
   <section id="view-details" class="view" hidden>
     <div class="bar">
       <b>Case and host details</b>
@@ -170,6 +190,7 @@
         <span class="tocgroup">Working the case</span>
         <button data-to="h-notes">Tags, comments and groups</button>
         <button data-to="h-analysis">Analysis</button>
+        <button data-to="h-connections">Connections between hosts</button>
         <button data-to="h-details">Case and host details</button>
         <button data-to="h-out">Reports and exports</button>
         <span class="tocgroup">Reference</span>
@@ -388,6 +409,14 @@
         <p><b>Contradictions about file times</b> compares what the file table says about a file with what other artefacts recorded independently (ShimCache, Amcache, the change journal, the transaction log, old directory entries). A file whose times were set backwards disagrees with at least one of them. This needs a file table in the case.</p>
         <p>A finding is a place to look, not a conclusion. <b>Tag these as anomalies</b> gives every event listed the tag <code>anomaly</code>, in your name, so that they stand out on the timeline and can be searched.</p>
 
+        <h2 id="h-connections">Connections between hosts</h2>
+        <p>The <b>Connections</b> tab shows how the hosts of the case connected to each other, by putting together what each one recorded of the same connection. So far it reads Remote Desktop; file shares, PsExec, remote management, USB devices and files by hash are to follow.</p>
+        <p><b>What it reads.</b> On the computer connecting: its Remote Desktop client log (<code>Microsoft-Windows-TerminalServices-RDPClient/Operational</code>, events 1024 and 1102, which name the computer as it was typed and its address) and Security 4648 to <code>TERMSRV/…</code> (credentials given for the connection). On the computer connected to: Security 4624 with logon type 10 or 12, and 4778; RemoteConnectionManager 1149; LocalSessionManager 21, 22 and 25; RdpCoreTS 131. Add the hosts' Security and Terminal Services logs under each host.</p>
+        <p><b>How the ends are paired.</b> Each host's events within two minutes of each other are one end of a connection. The two ends pair when each names the other (the client named one of the other host's names or addresses, and the logon came from one of the first host's) and they are within ten minutes of each other once each host's <b>clock difference</b> from the Details tab is taken off. They pair <b>strongly</b> when within a minute and with the same account at both ends; otherwise <b>possibly</b>, and the reasons say why (further apart, or different accounts: other credentials can be typed at the logon prompt). A connection seen at <b>one end only</b> is listed too, with what that may mean: the other computer is not in the case, its logs are missing, the connection failed, or another program was used.</p>
+        <p><b>Names and addresses.</b> Matching depends on what you state for each host on the Details tab: <i>Other names</i> (its full name in the domain, a former name) and <i>IP addresses</i>. When a logon record gives both a workstation's name and the address it came from, that address is taken as that host's, and the notes say so; an address seen for two hosts is not used. Clock differences are written as, for example, <code>3 minutes ahead</code>, <code>90 seconds behind</code> or <code>-1m30s</code>.</p>
+        <p><b>The views.</b> <i>Graph</i> draws each host as a large circle and each other computer or address as a small one, with an arrow for each direction they connected and how many times; drag a circle to move it, click one to list only its connections, click an arrow for those between two. <i>Lanes</i> gives each computer a lane, with time across, and draws each connection as an arrow from lane to lane: the view for following a path from host to host. A filled dot marks an end found in the evidence, a hollow one an end that was not. Each connection lists its reasons, opens each end's events (with the time as that host's clock had it), and opens all of them on the timeline. A connection 127.0.0.1 → host is a session from the computer itself, which is how a tunnel (a port forwarded over SSH, a proxy) shows.</p>
+        <p>Like the analysis checks, this adds nothing to the case and is recorded in the audit log when run. A pair is consistent with one connection; it does not prove it.</p>
+
         <h2 id="h-details">Case and host details</h2>
         <p>A report needs facts no artefact holds: the case reference, who asked for the examination, and for each computer its make, model, serial number, who collected it and how, and what its clock read against a reference when it was seized. Enter them on the <b>Details</b> tab. Where Atropos found a value in the evidence (the host name, the time zone, the Windows version) it is shown beside the field for comparison. Changes are kept as a history; an earlier value is never overwritten.</p>
         <p><b>Hosts.</b> A form appears for each computer the evidence names: Atropos reads a computer's name and time zone from its SYSTEM registry hive (<code>Windows\System32\config\SYSTEM</code>), and has each name it finds ready with its own form. You can describe a host whether or not the evidence names it: with no SYSTEM hive in the case, a blank host form is shown that starts with the computer's name, and <b>Add host</b> adds more.</p>
@@ -435,7 +464,7 @@
           <tr><th><code>atropos verify --case DIR</code></th><td>The integrity check.</td></tr>
           <tr><th><code>atropos export --case DIR --format csv --query "…" -o FILE</code></th><td>Export a search. Formats: csv, jsonl, timesketch, bodyfile. <code>--group NAME</code> for one group.</td></tr>
           <tr><th><code>atropos report --case DIR --format html -o FILE</code></th><td>The case report.</td></tr>
-          <tr><th><code>atropos analyse --case DIR</code></th><td>Both sets of checks. <code>--check anomalies</code> or <code>timestamps</code> for one; <code>--tag</code> to tag what the anomaly checks find.</td></tr>
+          <tr><th><code>atropos analyse --case DIR</code></th><td>The checks and the connections between hosts. <code>--check anomalies</code>, <code>timestamps</code> or <code>connections</code> for one; <code>--tag</code> to tag what the anomaly checks find.</td></tr>
         </table>
         <p>Useful with any of them: <code>--examiner NAME</code> (recorded in the audit log; your login name otherwise) and <code>--local-zone ZONE</code>. Run <code>atropos</code> with no arguments for the full list.</p>
 
@@ -466,6 +495,7 @@
 <div id="toast" class="toast" hidden></div>
 <input id="pickfiles" type="file" multiple hidden>
 <input id="pickdir" type="file" webkitdirectory hidden>
+<script src="connections.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

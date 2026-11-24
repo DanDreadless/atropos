@@ -70,13 +70,14 @@ var HostFields = []DetailField{
 	{"os_installed", "Operating system installed", "System", "Install date, with its time zone", false},
 	{"domain", "Domain or workgroup", "System", "", false},
 	{"time_zone", "Time zone", "System", "The zone the host was set to, as a zone name such as Europe/London: Atropos then uses it for times this host's evidence records in local time (a zone read from its SYSTEM hive takes precedence)", false},
-	{"ip_addresses", "IP addresses", "System", "", false},
+	{"other_names", "Other names", "System", "Other names the computer is known by: its full name in the domain (WS-042.corp.example), a former name. Separated by commas or one per line. Connections from other hosts are matched on these", true},
+	{"ip_addresses", "IP addresses", "System", "Its addresses in the period examined, separated by commas or spaces. Connections between hosts are matched on these", false},
 	{"mac_addresses", "MAC addresses", "System", "", false},
 	{"accounts", "User accounts of interest", "System", "", true},
 
 	{"clock_read", "System clock read", "Clock", "The date and time the device's clock showed (BIOS or firmware clock for a machine that was off)", false},
 	{"clock_reference", "True time at that moment", "Clock", "From a reliable source, with its time zone", false},
-	{"clock_offset", "Clock difference", "Clock", "How far the device was ahead of or behind true time. Every time on this host's timeline is out by this much", false},
+	{"clock_offset", "Clock difference", "Clock", "How far the device was ahead of or behind true time, such as 3 minutes ahead, 90 seconds behind or -1m30s. Every time on this host's timeline is out by this much; connections between hosts are paired after correcting for it", false},
 
 	{"storage", "Storage devices", "Storage", "For each drive: make, model, serial number, capacity, interface", true},
 	{"encryption", "Encryption", "Storage", "Whether the storage was encrypted, with what, and how it was unlocked", false},

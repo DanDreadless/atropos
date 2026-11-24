@@ -167,7 +167,7 @@ type eventsResp struct {
 
 func TestPageIsServedWithAStrictPolicy(t *testing.T) {
 	h := start(t)
-	for path, want := range map[string]string{"/": "<title>Atropos</title>", "/app.js": "'use strict'", "/app.css": "--accent"} {
+	for path, want := range map[string]string{"/": "<title>Atropos</title>", "/app.js": "'use strict'", "/connections.js": "'use strict'", "/app.css": "--accent"} {
 		code, hdr, body := h.do("GET", path, nil, nil)
 		if code != 200 || !strings.Contains(string(body), want) {
 			t.Errorf("GET %s: %d, missing %q", path, code, want)
@@ -187,14 +187,23 @@ func TestPageIsServedWithAStrictPolicy(t *testing.T) {
 			t.Errorf("index.html contains %q, which the content security policy blocks", banned)
 		}
 	}
-	if n := bytes.Count(page, []byte("<script")); n != 1 || !bytes.Contains(page, []byte(`<script src="app.js"></script>`)) {
-		t.Errorf("index.html has %d script tags; want only the external app.js", n)
+	scripts := []string{"connections.js", "app.js"}
+	if n := bytes.Count(page, []byte("<script")); n != len(scripts) {
+		t.Errorf("index.html has %d script tags; want only the external %v", n, scripts)
 	}
-	// Evidence is hostile input: the script must never build markup from it.
-	js, _ := uiFS.ReadFile("ui/app.js")
-	for _, banned := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("} {
-		if bytes.Contains(js, []byte(banned)) {
-			t.Errorf("app.js uses %s", banned)
+	for _, name := range scripts {
+		if !bytes.Contains(page, []byte(`<script src="`+name+`"></script>`)) {
+			t.Errorf("index.html does not load %s", name)
+		}
+		// Evidence is hostile input: the script must never build markup from it.
+		js, err := uiFS.ReadFile("ui/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, banned := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("} {
+			if bytes.Contains(js, []byte(banned)) {
+				t.Errorf("%s uses %s", name, banned)
+			}
 		}
 	}
 }

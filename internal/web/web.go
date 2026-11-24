@@ -134,6 +134,7 @@ func Handler(s *store.Store, in *ingest.Ingester, token string) http.Handler {
 	mux.HandleFunc("GET /api/report", sv.report)
 	mux.HandleFunc("GET /api/analysis/timestamps", sv.analyseTimestamps)
 	mux.HandleFunc("GET /api/analysis/anomalies", sv.analyseAnomalies)
+	mux.HandleFunc("GET /api/analysis/connections", sv.analyseConnections)
 	mux.HandleFunc("POST /api/analysis/anomalies/tag", sv.tagAnomalies)
 	mux.HandleFunc("GET /api/details", sv.details)
 	mux.HandleFunc("POST /api/details", sv.detailsSet)
@@ -525,6 +526,18 @@ func (sv *server) analyseAnomalies(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sv.s.Audit("analysis.anomalies", "case", map[string]any{"findings": rep.Counts, "scanned": rep.Scanned})
+	writeJSON(w, rep)
+}
+
+// analyseConnections pairs the two ends of connections between the case's
+// hosts (Remote Desktop so far). It reads only, and is audited.
+func (sv *server) analyseConnections(w http.ResponseWriter, r *http.Request) {
+	rep, err := analysis.Connections(sv.s)
+	if err != nil {
+		fail(w, 500, err)
+		return
+	}
+	sv.s.Audit("analysis.connections", "case", map[string]any{"connections": len(rep.Connections), "events": rep.Events})
 	writeJSON(w, rep)
 }
 

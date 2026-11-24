@@ -139,6 +139,9 @@ func (s *Store) BuildDerived(ctx context.Context) error {
 			return fmt.Errorf("summarising run %d: %w", id, err)
 		}
 	}
+	if err := s.buildObservables(ctx); err != nil {
+		return err
+	}
 	if len(todo) > 0 || changed {
 		// Let the query planner learn the new indexes' selectivity.
 		if _, err := s.w.ExecContext(ctx, `ANALYZE`); err != nil {

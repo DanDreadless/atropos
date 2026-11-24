@@ -165,7 +165,7 @@ CREATE TABLE IF NOT EXISTS current_runs (
 var appendOnlyTables = []string{
 	"case_meta", "evidence", "runs", "run_results", "events", "evidence_text",
 	"facts", "annotations", "groups", "details", "audit", "exclusions",
-	"run_stats", "run_stats_done", "hosts", "batch_hosts",
+	"run_stats", "run_stats_done", "hosts", "batch_hosts", "observables", "observables_done",
 }
 
 // SchemaVersion is recorded in a new case and checked when one is opened.

@@ -31,7 +31,7 @@ const usage = `atropos %s
   atropos verify  --case DIR
   atropos export  --case DIR [--format csv|jsonl|timesketch|bodyfile] [--query TEXT] [--group NAME] [-o FILE]
   atropos report  --case DIR [--format html|json] [-o FILE]
-  atropos analyse --case DIR [--check all|anomalies|timestamps] [--tag] [--format text|json] [-o FILE]
+  atropos analyse --case DIR [--check all|anomalies|timestamps|connections] [--tag] [--format text|json] [-o FILE]
   atropos version
 
 A case is a directory holding the write-once evidence vault and the case
@@ -94,7 +94,7 @@ func main() {
 	listen := fl.String("listen", "127.0.0.1:8484", "address to serve on (loopback only)")
 	examiner := fl.String("examiner", defaultExaminer(), "examiner name recorded in the audit log")
 	zone := fl.String("local-zone", "", "IANA zone for local timestamps the evidence does not place")
-	check := fl.String("check", "all", "analyse: all, anomalies or timestamps")
+	check := fl.String("check", "all", "analyse: all, anomalies, timestamps or connections")
 	tag := fl.Bool("tag", false, "analyse: tag every event the anomaly checks list, so tag:anomaly finds them")
 	format := fl.String("format", "", "export: csv, jsonl, timesketch or bodyfile; report: html or json; analyse: text or json")
 	query := fl.String("query", "", "export only events matching this search")
@@ -311,21 +311,27 @@ func main() {
 		if *format != "text" && *format != "json" {
 			fatal("analyse --format must be text or json")
 		}
-		if *check != "all" && *check != "anomalies" && *check != "timestamps" {
-			fatal("analyse --check must be all, anomalies or timestamps")
+		if *check != "all" && *check != "anomalies" && *check != "timestamps" && *check != "connections" {
+			fatal("analyse --check must be all, anomalies, timestamps or connections")
 		}
-		if *tag && *check == "timestamps" {
+		if *tag && (*check == "timestamps" || *check == "connections") {
 			fatal("analyse --tag tags what the anomaly checks find; use --check all or anomalies")
 		}
 		var anom *analysis.AnomalyReport
 		var times *analysis.Report
+		var conns *analysis.ConnectionsReport
 		var err error
-		if *check != "timestamps" {
+		if *check == "all" || *check == "connections" {
+			if conns, err = analysis.Connections(s); err != nil {
+				fatal(err)
+			}
+		}
+		if *check == "all" || *check == "anomalies" {
 			if anom, err = analysis.Anomalies(s); err != nil {
 				fatal(err)
 			}
 		}
-		if *check != "anomalies" {
+		if *check == "all" || *check == "timestamps" {
 			if times, err = analysis.Timestomp(s); err != nil {
 				fatal(err)
 			}
@@ -339,8 +345,10 @@ func main() {
 				err = enc.Encode(anom)
 			case "timestamps":
 				err = enc.Encode(times)
+			case "connections":
+				err = enc.Encode(conns)
 			default:
-				err = enc.Encode(map[string]any{"anomalies": anom, "timestamps": times})
+				err = enc.Encode(map[string]any{"anomalies": anom, "timestamps": times, "connections": conns})
 			}
 		} else {
 			if anom != nil {
@@ -351,6 +359,12 @@ func main() {
 			}
 			if times != nil && err == nil {
 				err = analysis.WriteText(w, times)
+			}
+			if conns != nil && err == nil {
+				if anom != nil || times != nil {
+					fmt.Fprintln(w)
+				}
+				err = analysis.WriteConnectionsText(w, conns)
 			}
 		}
 		done()
@@ -370,6 +384,9 @@ func main() {
 		}
 		if times != nil {
 			s.Audit("analysis.timestamps", "case", map[string]any{"findings": times.Counts, "compared": times.Compared, "output": *out})
+		}
+		if conns != nil {
+			s.Audit("analysis.connections", "case", map[string]any{"connections": len(conns.Connections), "events": conns.Events, "output": *out})
 		}
 	case "report":
 		if *format == "" {

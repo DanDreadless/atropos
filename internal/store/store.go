@@ -59,7 +59,7 @@ func Open(path, actor string) (*Store, error) {
 	}
 	// Added on 23 November 2026 without a new storage format: a case made
 	// earlier gains the tables when opened, and holds no rows in them.
-	if _, err := w.Exec(exclusionsSchema + statsSchema + hostsSchema); err != nil {
+	if _, err := w.Exec(exclusionsSchema + statsSchema + hostsSchema + observablesSchema); err != nil {
 		w.Close()
 		return nil, fmt.Errorf("schema: %w", err)
 	}
@@ -443,8 +443,12 @@ func (r *Run) Finish(status, notes string) (digest string, err error) {
 	if err != nil {
 		return digest, err
 	}
-	// The run is sealed: count it once for the chips, totals and chart.
-	return digest, r.s.computeStats(r.ID)
+	// The run is sealed: count it once for the chips, totals and chart, and
+	// take out what its events involve, for the links between hosts.
+	if err := r.s.computeStats(r.ID); err != nil {
+		return digest, err
+	}
+	return digest, r.s.computeObservables(r.ID)
 }
 
 // VerifyRuns recomputes each sealed run's event digest from the stored rows.

@@ -146,7 +146,7 @@ function readHash() {
   S.from = big('from'); S.to = big('to');
   S.desc = p.get('order') === 'desc';
   S.help = p.get('topic') || '';
-  S.view = ['timeline', 'evidence', 'files', 'analysis', 'details', 'audit', 'help'].includes(p.get('view')) ? p.get('view') : 'timeline';
+  S.view = ['timeline', 'evidence', 'files', 'analysis', 'connections', 'details', 'audit', 'help'].includes(p.get('view')) ? p.get('view') : 'timeline';
   const e = Number(p.get('e'));
   return Number.isInteger(e) && e > 0 ? e : null;
 }
@@ -1618,6 +1618,8 @@ function refreshAll() {
   if (S.view === 'audit') loadAudit();
   analysisLoaded = false;
   if (S.view === 'analysis') loadAnalysis();
+  connectionsLoaded = false;
+  if (S.view === 'connections') loadConnections();
   if (S.view === 'files') renderImagePicker();
 }
 let pollTimer;
@@ -1706,7 +1708,8 @@ function setView(v) {
   S.view = v;
   writeHash();
   for (const b of $('nav').children) b.classList.toggle('on', b.dataset.view === v);
-  for (const name of ['timeline', 'evidence', 'files', 'analysis', 'details', 'audit', 'help']) $('view-' + name).hidden = name !== v;
+  for (const name of ['timeline', 'evidence', 'files', 'analysis', 'connections', 'details', 'audit', 'help']) $('view-' + name).hidden = name !== v;
+  if (v === 'connections' && !connectionsLoaded) loadConnections();
   if (v === 'details') loadDetails();
   if (v === 'analysis' && !analysisLoaded) loadAnalysis();
   if (v === 'evidence' || v === 'files') loadEvidence();
@@ -1733,6 +1736,7 @@ function init() {
   try { $('tzlist').replaceChildren(...Intl.supportedValuesOf('timeZone').map((z) => h('option', { value: z }))); } catch { /* an older browser: typed by hand */ }
   $('verify').onclick = verify;
   $('anrun').onclick = loadAnalysis;
+  setupConnections();
   $('antag').onclick = tagAnomalies;
   $('dtadd').onclick = () => addDetailHost($('dthost').value);
   $('dthost').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') addDetailHost($('dthost').value); });

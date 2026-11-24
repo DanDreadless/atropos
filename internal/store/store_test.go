@@ -84,9 +84,14 @@ func seed(t *testing.T, s *Store) (eventID, annotationID int64) {
 func TestAppendOnlyTablesRejectUpdateAndDelete(t *testing.T) {
 	s := open(t)
 	seed(t, s)
+	// Derived rows the seed's events do not give.
+	if _, err := s.w.Exec(`INSERT INTO observables(event_id,run_id,evidence_id,ts_utc,host,act,what,kind,value,role,version)
+		SELECT id, run_id, evidence_id, ts_utc, host, 'rdp-in', 'seed', 'ip', '10.0.0.5', 'source', 1 FROM events LIMIT 1`); err != nil {
+		t.Fatal(err)
+	}
 	col := map[string]string{
 		"details": "value", "case_meta": "value", "evidence": "name", "runs": "parser", "run_results": "status", "events": "message",
-		"evidence_text": "body", "facts": "value", "annotations": "body", "groups": "name", "audit": "details", "exclusions": "reason", "run_stats": "source", "run_stats_done": "version", "hosts": "name", "batch_hosts": "source",
+		"evidence_text": "body", "facts": "value", "annotations": "body", "groups": "name", "audit": "details", "exclusions": "reason", "run_stats": "source", "run_stats_done": "version", "hosts": "name", "batch_hosts": "source", "observables": "value", "observables_done": "version",
 	}
 	for _, table := range appendOnlyTables {
 		var n int

@@ -207,3 +207,173 @@ func (s *Store) HostTimeZone(host string) string {
 	}
 	return ""
 }
+
+// HostIdentity is how a host may be named in another host's evidence: its
+// name and other stated names, its stated addresses, and how far its clock
+// was from true time.
+type HostIdentity struct {
+	Name  string   `json:"name"`
+	Names []string `json:"names"` // upper case, the name first
+	IPs   []string `json:"ips"`   // canonical form
+	// Clock is how far the host's clock was ahead of true time (behind
+	// when negative); ClockStated says whether a usable value was given,
+	// and ClockText is what was written.
+	Clock       time.Duration `json:"clock_ns,string"`
+	ClockStated bool          `json:"clock_stated"`
+	ClockText   string        `json:"clock_text,omitempty"`
+	// Unread lists stated values that could not be used, for a note.
+	Unread []string `json:"unread,omitempty"`
+}
+
+// HostIdentities lists every host of the case with what is stated about how
+// it may be named and its clock.
+func (s *Store) HostIdentities() ([]HostIdentity, error) {
+	hs, err := s.Hosts()
+	if err != nil {
+		return nil, err
+	}
+	d, err := s.currentDetails()
+	if err != nil {
+		return nil, err
+	}
+	var out []HostIdentity
+	for _, h := range hs {
+		id := HostIdentity{Name: h.Name, Names: []string{strings.ToUpper(h.Name)}}
+		var fields map[string]Detail
+		for name, f := range d {
+			if name != "" && strings.EqualFold(name, h.Name) {
+				fields = f
+			}
+		}
+		split := func(v string) []string {
+			return strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ';' || r == '\n' || r == '\r' || r == ' ' || r == '\t' })
+		}
+		for _, n := range split(fields["other_names"].Value) {
+			n = strings.ToUpper(strings.Trim(n, `\ `))
+			if n != "" && !contains(id.Names, n) {
+				id.Names = append(id.Names, n)
+			}
+		}
+		for _, v := range split(fields["ip_addresses"].Value) {
+			v = strings.TrimSuffix(strings.TrimSpace(v), ".")
+			if i := strings.IndexByte(v, '/'); i > 0 {
+				v = v[:i] // an address written with its prefix length
+			}
+			if ip, ok := normIP(v); ok {
+				if !contains(id.IPs, ip) {
+					id.IPs = append(id.IPs, ip)
+				}
+			} else if v != "" {
+				id.Unread = append(id.Unread, fmt.Sprintf("%q in its IP addresses is not an address", v))
+			}
+		}
+		if t := strings.TrimSpace(fields["clock_offset"].Value); t != "" {
+			id.ClockText = t
+			if c, ok := ParseClockOffset(t); ok {
+				id.Clock, id.ClockStated = c, true
+			} else {
+				id.Unread = append(id.Unread, fmt.Sprintf("its clock difference %q was not understood; write it as, for example, 3 minutes ahead or -90s", t))
+			}
+		}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+func contains(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+// ParseClockOffset reads a stated clock difference: how far a clock was
+// ahead of true time, negative when behind. It accepts "3 minutes ahead",
+// "90 seconds behind", "1 min 30 s slow", "+3m", "-1m30s", "-00:01:30",
+// "1h2m fast", and "0", "none", "correct" or "accurate" for none. A number
+// with no unit, or a value with no sign or direction other than zero, is
+// refused: which way the clock was out cannot be guessed.
+func ParseClockOffset(s string) (time.Duration, bool) {
+	t := strings.ToLower(strings.TrimSpace(s))
+	switch t {
+	case "0", "none", "correct", "accurate", "nil", "no difference", "0s":
+		return 0, true
+	}
+	sign := 0
+	for _, w := range []string{"ahead", "fast"} {
+		if strings.Contains(t, w) {
+			sign = 1
+			t = strings.ReplaceAll(t, w, " ")
+		}
+	}
+	for _, w := range []string{"behind", "slow"} {
+		if strings.Contains(t, w) {
+			if sign != 0 {
+				return 0, false
+			}
+			sign = -1
+			t = strings.ReplaceAll(t, w, " ")
+		}
+	}
+	t = strings.TrimSpace(t)
+	switch {
+	case strings.HasPrefix(t, "+"):
+		if sign == -1 {
+			return 0, false
+		}
+		sign, t = 1, strings.TrimSpace(t[1:])
+	case strings.HasPrefix(t, "-"):
+		if sign == 1 {
+			return 0, false
+		}
+		sign, t = -1, strings.TrimSpace(t[1:])
+	}
+	var d time.Duration
+	if parts := strings.Split(t, ":"); len(parts) == 3 {
+		var h, m, sec int
+		if _, err := fmt.Sscanf(t, "%d:%d:%d", &h, &m, &sec); err != nil || m > 59 || sec > 59 || h < 0 || m < 0 || sec < 0 {
+			return 0, false
+		}
+		d = time.Duration(h)*time.Hour + time.Duration(m)*time.Minute + time.Duration(sec)*time.Second
+	} else {
+		r := strings.NewReplacer(" and ", " ", ",", " ")
+		t = r.Replace(t)
+		units := []struct {
+			words []string
+			u     string
+		}{
+			{[]string{"hours", "hour", "hrs", "hr"}, "h"},
+			{[]string{"minutes", "minute", "mins", "min"}, "m"},
+			{[]string{"seconds", "second", "secs", "sec"}, "s"},
+			{[]string{"milliseconds", "millisecond"}, "ms"},
+		}
+		fs := strings.Fields(t)
+		var b strings.Builder
+		for _, f := range fs {
+			unit := f
+			for _, u := range units {
+				for _, w := range u.words {
+					if strings.HasSuffix(f, w) {
+						unit = strings.TrimSuffix(f, w) + u.u
+						goto done
+					}
+				}
+			}
+		done:
+			b.WriteString(unit)
+		}
+		var err error
+		if d, err = time.ParseDuration(b.String()); err != nil {
+			return 0, false
+		}
+	}
+	if d == 0 {
+		return 0, true
+	}
+	if sign == 0 {
+		return 0, false
+	}
+	return time.Duration(sign) * d, true
+}
