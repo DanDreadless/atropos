@@ -145,3 +145,45 @@ func TestParseClockOffset(t *testing.T) {
 		}
 	}
 }
+
+// The registry's lists name computers connected to without timing the
+// connection; a jump list entry on a share is a file opened there.
+func TestObserveArtefacts(t *testing.T) {
+	cases := []struct {
+		name, typ, path, fields, act string
+		items                        []Observable
+	}{
+		{"server list", "rdp-client-server-key-last-write", "SRV-FILE01", `{"values":{"UsernameHint":{"type":"REG_SZ","data":"CORP\\alice"}}}`, "rdp-named",
+			[]Observable{{"host", "SRV-FILE01", "target"}, {"account", `CORP\alice`, "target"}}},
+		{"server list with a port", "rdp-client-server-key-last-write", "10.0.0.9:3390", `{}`, "rdp-named",
+			[]Observable{{"ip", "10.0.0.9", "target"}}},
+		{"server list loopback", "rdp-client-server-key-last-write", "127.0.0.2", `{}`, "", nil},
+		{"recent list", "rdp-client-recent-key-last-write", `\Software\Microsoft\Terminal Server Client\Default`,
+			`{"values":{"MRU0":{"data":"dc01.corp.example"},"MRU1":{"data":"[fe80::1]:3389"},"MRU2":{"data":"localhost"}}}`, "rdp-named",
+			[]Observable{{"host", "DC01.CORP.EXAMPLE", "target"}, {"ip", "fe80::1", "target"}, {"via", "recent-list", "object"}}},
+		{"recent list empty", "rdp-client-recent-key-last-write", `\x`, `{"values":{}}`, "", nil},
+		{"MountPoints2 share", "network-share-key-last-write", `\\SRV-FILE01\Finance`, `{}`, "smb-named",
+			[]Observable{{"host", "SRV-FILE01", "target"}, {"share", `\\SRV-FILE01\Finance`, "object"}}},
+		{"MountPoints2 by address", "network-share-key-last-write", `\\10.0.0.9\c$`, `{}`, "smb-named",
+			[]Observable{{"ip", "10.0.0.9", "target"}, {"share", `\\10.0.0.9\c$`, "object"}}},
+		{"MountPoints2 WebDAV", "network-share-key-last-write", `\\live.sysinternals.com@SSL\DavWWWRoot`, `{}`, "smb-named",
+			[]Observable{{"host", "LIVE.SYSINTERNALS.COM", "target"}, {"share", `\\live.sysinternals.com@SSL\DavWWWRoot`, "object"}}},
+		{"MountPoints2 no share", "network-share-key-last-write", `\\SRV-FILE01`, `{}`, "", nil},
+		{"jump list on a share", "jumplist-entry-last-used", `\\SRV-FILE01\Finance\Q3.xlsx`, `{"application":"Microsoft Office Excel 2010 x64"}`, "smb-out",
+			[]Observable{{"host", "SRV-FILE01", "target"}, {"share", `\\SRV-FILE01\Finance`, "object"}, {"file", `\\SRV-FILE01\Finance\Q3.xlsx`, "object"}}},
+		{"jump list local", "jumplist-entry-last-used", `C:\Users\alice\notes.txt`, `{}`, "", nil},
+		{"jump list device path", "jumplist-entry-last-used", `\\?\Volume{1}\x`, `{}`, "", nil},
+		{"jump list loopback", "jumplist-entry-last-used", `\\127.0.0.1\c$\x`, `{}`, "", nil},
+	}
+	for _, c := range cases {
+		var oe ObservedEvent
+		ok := observeArtefact(&oe, c.typ, c.path, c.fields)
+		if ok != (c.act != "") || oe.Act != c.act {
+			t.Errorf("%s: ok %v act %q, want %q", c.name, ok, oe.Act, c.act)
+			continue
+		}
+		if ok && !reflect.DeepEqual(oe.Items, c.items) {
+			t.Errorf("%s: items %v, want %v", c.name, oe.Items, c.items)
+		}
+	}
+}

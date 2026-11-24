@@ -65,12 +65,13 @@ function drawSummary() {
   const r = CN.rep;
   const conns = kindConns();
   const both = conns.filter((c) => c.seen_on === 'both').length;
+  const undated = conns.filter((c) => c.undated).length;
   const hosts = r.nodes.filter((n) => n.in_case).length;
   const others = r.nodes.length - hosts;
   const byKind = Object.keys(KIND_WORDS).map((k) => [k, r.connections.filter((c) => c.kind === k).length]).filter(([, n]) => n);
   $('cnsummary').replaceChildren(h('b', {}, fmtInt(conns.length)), conns.length === 1 ? ' connection' : ' connections',
     CN.kind ? ` (${KIND_WORDS[CN.kind].toLowerCase()})` : '',
-    ` (${fmtInt(both)} seen at both ends) between ${fmtInt(hosts)} host${hosts === 1 ? '' : 's'} and ${fmtInt(others)} other computer${others === 1 ? '' : 's'} or address${others === 1 ? '' : 'es'}`,
+    ` (${fmtInt(both)} seen at both ends${undated ? `, ${fmtInt(undated)} with no time` : ''}) between ${fmtInt(hosts)} host${hosts === 1 ? '' : 's'} and ${fmtInt(others)} other computer${others === 1 ? '' : 's'} or address${others === 1 ? '' : 'es'}`,
     !CN.kind && byKind.length > 1 ? ': ' + byKind.map(([k, n]) => `${fmtInt(n)} ${KIND_WORDS[k].toLowerCase()}`).join(', ') : '',
     r.ready ? '' : ' (still reading some evidence)');
 }
@@ -108,6 +109,7 @@ function drawLegend() {
     h('span', { class: 'cnkey strong' }, 'strong: both ends, within a minute, the same account'),
     h('span', { class: 'cnkey possible' }, 'possible: both ends, further apart or different accounts'),
     h('span', { class: 'cnkey oneend' }, 'one end only'),
+    CN.rep && CN.rep.connections.some((c) => c.undated) ? h('span', { class: 'cnkey undated' }, 'no time: named only in the registry') : '',
     h('span', { class: 'cnkeytags' }, Object.keys(KIND_TAG).map((k) => `${KIND_TAG[k]}: ${KIND_WORDS[k].toLowerCase()}`).join(' · ')),
     h('span', { class: 'cnkey nodehost' }, 'host of the case'),
     h('span', { class: 'cnkey nodeext' }, 'outside the case'));
@@ -287,13 +289,21 @@ function drawLanes(box, r) {
   });
   if (!conns.length) { box.replaceChildren(svg); return; }
   // The time across is that of every kind, so it stays put when the kind
-  // shown changes.
-  let t0 = BigInt(r.connections[0].start_utc), t1 = t0;
-  for (const c of r.connections) { const t = BigInt(c.start_utc); if (t < t0) t0 = t; if (t > t1) t1 = t; }
+  // shown changes. Connections with no time (a registry key's last write
+  // alone) do not set it: one written weeks before would squash the rest;
+  // outside it they are drawn at its edge.
+  const timed = r.connections.filter((c) => !c.undated);
+  const basis = timed.length ? timed : r.connections;
+  let t0 = BigInt(basis[0].start_utc), t1 = t0;
+  for (const c of basis) { const t = BigInt(c.start_utc); if (t < t0) t0 = t; if (t > t1) t1 = t; }
   const pad = (t1 - t0) / 20n + 60000000000n;
   t0 -= pad; t1 += pad;
   const span = Number(t1 - t0);
-  const x = (ns) => left + (Number(BigInt(ns) - t0) / span) * (w - left - right);
+  const x = (ns) => {
+    let t = BigInt(ns);
+    if (t < t0) t = t0; else if (t > t1) t = t1;
+    return left + (Number(t - t0) / span) * (w - left - right);
+  };
   // Time marks, on whole minutes, hours or days.
   const steps = [60, 300, 600, 1800, 3600, 7200, 21600, 43200, 86400, 604800].map((s) => s * 1e9);
   const step = steps.find((s) => span / s <= 8) || steps[steps.length - 1];
@@ -311,8 +321,8 @@ function drawLanes(box, r) {
     const dir = y2 > y1 ? 1 : -1;
     const on = CN.selected === c;
     const dim = CN.pick && !pickedConns().includes(c);
-    const title = `${fmtNs(c.start_utc, 0)} UTC  ${KIND_WORDS[c.kind] || c.kind}  ${cnLabel(c.from)} → ${cnLabel(c.to)}${c.account ? '  ' + c.account : ''}: ${CONF_WORDS[c.confidence]}, seen at ${SEEN_WORDS[c.seen_on]}`;
-    const g = sv('g', { class: 'cnconn ' + kind + (on ? ' on' : '') + (dim ? ' dim' : ''), tabindex: 0, role: 'button', 'aria-label': title,
+    const title = `${c.undated ? 'No time (a registry key written ' + fmtNs(c.start_utc, 0) + ' UTC)' : fmtNs(c.start_utc, 0) + ' UTC'}  ${KIND_WORDS[c.kind] || c.kind}  ${cnLabel(c.from)} → ${cnLabel(c.to)}${c.account ? '  ' + c.account : ''}: ${CONF_WORDS[c.confidence]}, seen at ${SEEN_WORDS[c.seen_on]}`;
+    const g = sv('g', { class: 'cnconn ' + kind + (c.undated ? ' undated' : '') + (on ? ' on' : '') + (dim ? ' dim' : ''), tabindex: 0, role: 'button', 'aria-label': title,
       onclick: () => selectConn(c), onkeydown: (ev) => { if (ev.key === 'Enter') selectConn(c); } },
       sv('title', {}, title),
       sv('line', { x1: cx, x2: cx, y1: y1 + dir * 6, y2: y2 - dir * 8, class: 'cnconnline', 'marker-end': `url(#cnlarrow-${kind})` }),
@@ -356,6 +366,12 @@ function drawConnRows() {
         h('ul', { class: 'cnevents' }, ...e.events.map((ev) => h('li', {}, h('span', { class: 'mono' }, fmtNs(ev.ts_utc, 0)), ' ', ev.what, ' ',
           h('button', { class: 'link', onclick: () => showEvents([ev.id]) }, `#${ev.id}`))))));
     }
+    if (c.named && c.named.length) {
+      ends.push(h('div', { class: 'cnendrow' },
+        h('b', {}, `Also named in ${cnLabel(c.from)}'s registry: `), h('span', { class: 'dimc' }, 'the time is the key\'s last write, not a connection\'s'),
+        h('ul', { class: 'cnevents' }, ...c.named.map((ev) => h('li', {}, h('span', { class: 'mono' }, fmtNs(ev.ts_utc, 0)), ' ', ev.what, ' ',
+          h('button', { class: 'link', onclick: () => showEvents([ev.id]) }, `#${ev.id}`))))));
+    }
     out.push(h('div', { class: 'anrow cnrow' + (on ? ' on' : '') },
       h('div', { class: 'anpath' },
         h('span', { class: 'mono' }, fmtNs(c.start_utc, 0)),
@@ -363,6 +379,7 @@ function drawConnRows() {
         h('span', {}, cnLabel(c.from), ' → ', cnLabel(c.to)),
         c.account ? h('span', { class: 'dimc' }, c.account) : '',
         h('span', { class: 'chip static cnconf ' + (c.confidence === 'one-end' ? 'oneend' : c.confidence) }, CONF_WORDS[c.confidence]),
+        c.undated ? h('span', { class: 'chip static cnconf undated', title: 'Only the registry names this connection, and its time is when a key was last written, not when the connection was made' }, 'no time') : '',
         h('span', { class: 'dimc' }, 'seen at ' + SEEN_WORDS[c.seen_on])),
       h('ul', { class: 'annotes' }, ...c.reasons.map((x) => h('li', {}, x))),
       on ? h('div', { class: 'cnends' }, ...ends) : '',

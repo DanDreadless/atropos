@@ -24,12 +24,17 @@ import (
 // network logon, which only supports the others. Devices and hashes are to
 // follow (the plan, H.2).
 //
+// "rdp-named" and "smb-named" are the connecting computer's registry
+// naming a computer it connected to (the Remote Desktop server lists,
+// MountPoints2). Their time is the key's last write, not a connection's, so
+// they support a connection and are never paired by time.
+//
 // A record of remote execution at the target that names no source (a
 // service installed, a task created, a program WMI started) carries a "via"
 // item saying how it was started: service, task, wmi or winrm. The analysis
 // ties it to a network logon by time, and by account where it names one.
 
-const observablesVersion = 3
+const observablesVersion = 4
 
 const observablesSchema = `
 CREATE TABLE IF NOT EXISTS observables (
@@ -40,7 +45,7 @@ CREATE TABLE IF NOT EXISTS observables (
   host        TEXT NOT NULL,      -- the event's host
   act         TEXT NOT NULL,      -- what the event shows: rdp-out, rdp-in, smb-in, exec-out, logon-in...
   what        TEXT NOT NULL,      -- the event, briefly: "RDP client connecting (1024)"
-  kind        TEXT NOT NULL,      -- ip, host, account, share, service, task, program, via
+  kind        TEXT NOT NULL,      -- ip, host, account, share, file, service, task, program, via
   value       TEXT NOT NULL,
   role        TEXT NOT NULL,      -- source, target, subject, object
   version     INTEGER NOT NULL
@@ -107,6 +112,30 @@ func (s *Store) computeObservables(runID int64) error {
 			return err
 		}
 		if observeEvent(&oe, fields) {
+			found = append(found, oe)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// The connecting computer's own records outside its logs: the
+	// registry's Remote Desktop server lists and MountPoints2, and jump
+	// list entries on a share.
+	rows, err = s.r.Query(`SELECT id, evidence_id, ts_utc, host, ts_type, path, fields FROM events
+		WHERE run_id = ? AND source IN ('registry', 'jumplist') AND ts_type IN (?,?,?,?)`,
+		runID, "rdp-client-server-key-last-write", "rdp-client-recent-key-last-write", "network-share-key-last-write", "jumplist-entry-last-used")
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var oe ObservedEvent
+		var typ, path, fields string
+		if err := rows.Scan(&oe.EventID, &oe.EvidenceID, &oe.TSUTC, &oe.Host, &typ, &path, &fields); err != nil {
+			rows.Close()
+			return err
+		}
+		if observeArtefact(&oe, typ, path, fields) {
 			found = append(found, oe)
 		}
 	}
@@ -758,6 +787,121 @@ func normIP(s string) (string, bool) {
 		return "", false
 	}
 	return a.Unmap().String(), true
+}
+
+// observeArtefact reads what a registry key or jump list entry involves. A
+// jump list entry on \\computer\share is a file opened there, at the time
+// it gives ("smb-out"). The registry's Remote Desktop server list and recent
+// list and its MountPoints2 shares name computers this account connected to,
+// but their times are only when the key was last written ("rdp-named",
+// "smb-named"): they support a connection, never time one.
+func observeArtefact(oe *ObservedEvent, typ, path, fieldsJSON string) bool {
+	var f struct {
+		Application string `json:"application"`
+		Values      map[string]struct {
+			Data string `json:"data"`
+		} `json:"values"`
+	}
+	_ = json.Unmarshal([]byte(fieldsJSON), &f)
+	add := func(kind, value, role string) {
+		if value != "" {
+			oe.Items = append(oe.Items, Observable{kind, value, role})
+		}
+	}
+	server := func(v string) bool {
+		v = strings.TrimSpace(v)
+		if strings.HasPrefix(v, "[") {
+			if i := strings.IndexByte(v, ']'); i > 0 {
+				v = v[1:i]
+			}
+		} else if strings.Count(v, ":") == 1 {
+			v, _, _ = strings.Cut(v, ":") // a port
+		}
+		if ip, ok := normIP(v); ok {
+			if isLoopbackIP(ip) {
+				return false
+			}
+			add("ip", ip, "target")
+			return true
+		}
+		if h := normHostName(v); h != "" && !strings.ContainsAny(h, `\*%$`) {
+			add("host", h, "target")
+			return true
+		}
+		return false
+	}
+	// share is \\computer\share of a path, and the computer.
+	share := func(p string) (string, string) {
+		if !strings.HasPrefix(p, `\\`) {
+			return "", ""
+		}
+		hs := uncHosts(p)
+		if len(hs) == 0 {
+			return "", ""
+		}
+		parts := strings.SplitN(p[2:], `\`, 3)
+		if len(parts) < 2 || parts[1] == "" {
+			return "", ""
+		}
+		h := hs[0]
+		if i := strings.IndexByte(h, '@'); i > 0 {
+			h = h[:i] // WebDAV: name@SSL, name@port
+		}
+		return `\\` + parts[0] + `\` + parts[1], h
+	}
+	switch typ {
+	case "rdp-client-server-key-last-write":
+		if !server(path) {
+			return false
+		}
+		oe.Act, oe.What = "rdp-named", "Remote Desktop server in this account's list: "+path+" (registry, Terminal Server Client\\Servers)"
+		if hint := clean(f.Values["UsernameHint"].Data); hint != "" {
+			add("account", hint, "target")
+			oe.What += ", signing in as " + hint
+		}
+	case "rdp-client-recent-key-last-write":
+		var names []string
+		for i := 0; i < 10; i++ {
+			v := clean(f.Values[fmt.Sprintf("MRU%d", i)].Data)
+			if v != "" && server(v) {
+				names = append(names, v)
+			}
+		}
+		if len(names) == 0 {
+			return false
+		}
+		add("via", "recent-list", "object")
+		oe.Act, oe.What = "rdp-named", "Remote Desktop recent connections list: "+strings.Join(names, ", ")+" (registry, Terminal Server Client\\Default)"
+	case "network-share-key-last-write":
+		sh, h := share(path)
+		if sh == "" {
+			return false
+		}
+		add(map[bool]string{true: "ip", false: "host"}[isIPText(h)], h, "target")
+		add("share", sh, "object")
+		oe.Act, oe.What = "smb-named", "Network share in this account's MountPoints2: "+sh+" (registry)"
+	case "jumplist-entry-last-used":
+		sh, h := share(path)
+		if sh == "" {
+			return false
+		}
+		add(map[bool]string{true: "ip", false: "host"}[isIPText(h)], h, "target")
+		add("share", sh, "object")
+		add("file", path, "object")
+		app := f.Application
+		if app == "" {
+			app = "an application"
+		}
+		oe.Act, oe.What = "smb-out", "File on a share opened (jump list of "+app+"): "+path
+	default:
+		return false
+	}
+	return true
+}
+
+func isIPText(s string) bool {
+	_, err := netip.ParseAddr(s)
+	return err == nil
 }
 
 // normHostName is a computer name in upper case, without a leading "\\".

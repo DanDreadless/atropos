@@ -75,6 +75,12 @@ type Connection struct {
 	Target     *ConnEnd `json:"target,omitempty"`
 	Reasons    []string `json:"reasons"`
 	EventIDs   []int64  `json:"event_ids"`
+	// Named are the source's records naming the other computer without
+	// timing a connection (the registry's server lists, MountPoints2).
+	Named []ConnEvent `json:"named,omitempty"`
+	// Undated: the connection rests on such records alone, so its time is
+	// only when a registry key was last written.
+	Undated bool `json:"undated,omitempty"`
 }
 
 // ConnEdge sums the connections between two nodes.
@@ -141,7 +147,7 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	evs, ready, err := s.ObservedEvents("rdp-in", "rdp-out", "smb-in", "smb-out", "exec-in", "exec-out", "logon-in")
+	evs, ready, err := s.ObservedEvents("rdp-in", "rdp-out", "smb-in", "smb-out", "exec-in", "exec-out", "logon-in", "rdp-named", "smb-named")
 	if err != nil {
 		return nil, err
 	}
@@ -341,8 +347,13 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		id  *store.HostIdentity
 	}
 	var loose []sourceless
+	var named []store.ObservedEvent
 	open := map[string]*cluster{}
 	for _, e := range evs {
+		if strings.HasSuffix(e.Act, "-named") {
+			named = append(named, e)
+			continue
+		}
 		rec, hid := where(e)
 		kind, dir, _ := strings.Cut(e.Act, "-")
 		family := "smb"
@@ -498,6 +509,18 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		case "exec":
 			return fmt.Sprintf("%s ran a program against %s", label(cl.node), cl.why)
 		}
+		files := 0
+		for _, e := range cl.events {
+			if item(e, "file", "object") != "" {
+				files++
+			}
+		}
+		switch {
+		case files == len(cl.events):
+			return fmt.Sprintf("%s opened a file on a share on %s", label(cl.node), cl.why)
+		case files > 0:
+			return fmt.Sprintf("%s ran a command naming a share on %s and opened a file there", label(cl.node), cl.why)
+		}
 		return fmt.Sprintf("%s ran a command naming a share on %s", label(cl.node), cl.why)
 	}
 	inWords := func(cl *cluster) string {
@@ -533,7 +556,7 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 	// details names the shares, services and programs an end involved.
 	details := func(cl *cluster) []string {
 		var out []string
-		for _, k := range []struct{ kind, words string }{{"share", "shares"}, {"service", "services installed"}, {"task", "scheduled tasks"}, {"program", "programs"}} {
+		for _, k := range []struct{ kind, words string }{{"share", "shares"}, {"file", "files opened"}, {"service", "services installed"}, {"task", "scheduled tasks"}, {"program", "programs"}} {
 			seen := map[string]bool{}
 			var vs []string
 			for _, e := range cl.events {
@@ -659,6 +682,125 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		conn.Reasons = append(conn.Reasons, details(i)...)
 		rep.Connections = append(rep.Connections, conn)
 	}
+	// The registry's lists name computers connected to, without a time of
+	// connection. Each supports the connections from its host to the one
+	// it names; with none, it is shown alone, its time only the key's.
+	type namedGroup struct {
+		family, rec, other, why string
+		id                      *store.HostIdentity
+		events                  []store.ObservedEvent
+	}
+	groups := map[string]*namedGroup{}
+	var gorder []string
+	for _, e := range named {
+		rec, hid := where(e)
+		family := "smb"
+		if strings.HasPrefix(e.Act, "rdp-") {
+			family = "rdp"
+		}
+		for _, it := range e.Items {
+			if it.Role != "target" || (it.Kind != "host" && it.Kind != "ip") {
+				continue
+			}
+			other, why := resolve(store.ObservedEvent{Items: []store.Observable{it}}, "target", rec)
+			if other == "" || other == rec {
+				continue
+			}
+			k := family + "\x00" + rec + "\x00" + other
+			g := groups[k]
+			if g == nil {
+				g = &namedGroup{family: family, rec: rec, other: other, why: why, id: hid}
+				groups[k] = g
+				gorder = append(gorder, k)
+			}
+			if len(g.events) == 0 || g.events[len(g.events)-1].EventID != e.EventID {
+				g.events = append(g.events, e)
+			}
+		}
+	}
+	byID := map[int64]store.ObservedEvent{}
+	for _, e := range evs {
+		byID[e.EventID] = e
+	}
+	stamp := func(ts int64) string { return time.Unix(0, ts).UTC().Format("2006-01-02 15:04:05 UTC") }
+	for _, k := range gorder {
+		g := groups[k]
+		// The recent list names every server at once: used only for one no
+		// server-list key names.
+		own := g.events[:0:0]
+		for _, e := range g.events {
+			if item(e, "via", "object") != "recent-list" {
+				own = append(own, e)
+			}
+		}
+		if len(own) > 0 {
+			g.events = own
+		}
+		var evs []ConnEvent
+		var says []string
+		shares := map[string]bool{}
+		for _, e := range g.events {
+			evs = append(evs, ConnEvent{ID: e.EventID, TS: e.TSUTC, What: e.What})
+			says = append(says, fmt.Sprintf("%s (event %d, the key last written %s)", e.What, e.EventID, stamp(e.TSUTC)))
+			if sh := item(e, "share", "object"); sh != "" {
+				shares[strings.ToUpper(sh[strings.LastIndexByte(sh, '\\')+1:])] = true
+			}
+		}
+		// usesShare: a program started remotely is supported by a share
+		// only when its own records involve that share.
+		usesShare := func(cn *Connection) bool {
+			for _, end := range []*ConnEnd{cn.Source, cn.Target} {
+				if end == nil {
+					continue
+				}
+				for _, ce := range end.Events {
+					for _, it := range byID[ce.ID].Items {
+						if it.Kind == "share" && shares[strings.ToUpper(it.Value[strings.LastIndexByte(it.Value, '\\')+1:])] {
+							return true
+						}
+					}
+				}
+			}
+			return false
+		}
+		matched := false
+		for i := range rep.Connections {
+			cn := &rep.Connections[i]
+			if cn.From != g.rec || cn.To != g.other || (g.family == "rdp") != (cn.Kind == "rdp") {
+				continue
+			}
+			if cn.Kind == "exec" && !usesShare(cn) {
+				continue
+			}
+			matched = true
+			cn.Named = append(cn.Named, evs...)
+			cn.Reasons = append(cn.Reasons, fmt.Sprintf("%s's registry also names %s: %s", label(g.rec), label(g.other), strings.Join(says, "; ")))
+		}
+		if matched {
+			continue
+		}
+		last := g.events[len(g.events)-1]
+		acct := ""
+		if g.family == "rdp" {
+			acct = item(last, "account", "target")
+		}
+		conn := Connection{Kind: g.family, From: g.rec, To: g.other, Start: corrected(last.TSUTC, g.id), Account: acct, SeenOn: "source", Confidence: "one-end", Undated: true,
+			Source: &ConnEnd{Node: g.rec, Start: last.TSUTC, Corrected: corrected(last.TSUTC, g.id), Account: acct, Events: evs}}
+		if g.family == "rdp" {
+			conn.Reasons = append(conn.Reasons, fmt.Sprintf("%s's registry names %s as a computer this account connected to by Remote Desktop: %s", label(g.rec), g.why, strings.Join(says, "; ")))
+			conn.Reasons = append(conn.Reasons, "the time is only when the registry key was last written, which Windows does when a connection is made or its details saved; the connection may have been earlier, and there may have been several")
+		} else {
+			conn.Reasons = append(conn.Reasons, fmt.Sprintf("%s's registry names a share on %s that this account used: %s", label(g.rec), g.why, strings.Join(says, "; ")))
+			conn.Reasons = append(conn.Reasons, "the time is only when the registry key was last written, usually when the share was first used; it may have been used before or after")
+		}
+		if nodes[g.other].InCase {
+			conn.Reasons = append(conn.Reasons, fmt.Sprintf("no record of a connection between %s and %s was found in either host's logs", label(g.rec), label(g.other)))
+		} else {
+			conn.Reasons = append(conn.Reasons, fmt.Sprintf("%s is not a host of this case", label(g.other)))
+		}
+		rep.Connections = append(rep.Connections, conn)
+	}
+
 	sort.SliceStable(rep.Connections, func(a, b int) bool {
 		x, y := rep.Connections[a], rep.Connections[b]
 		if x.Start != y.Start {
@@ -678,6 +820,9 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 					cn.EventIDs = append(cn.EventIDs, ev.ID)
 				}
 			}
+		}
+		for _, ev := range cn.Named {
+			cn.EventIDs = append(cn.EventIDs, ev.ID)
 		}
 		sort.Slice(cn.EventIDs, func(a, b int) bool { return cn.EventIDs[a] < cn.EventIDs[b] })
 		used[cn.From], used[cn.To] = true, true
@@ -737,7 +882,7 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		rep.Notes = append(rep.Notes, "Some evidence is still being read for connections; open this again shortly for the full picture.")
 	}
 	rep.Notes = append(rep.Notes,
-		`Read so far: Remote Desktop (the client's log, RDPClient 1024 and 1102, and Security 4648 to TERMSRV on the computer connecting; Security 4624 type 10 or 12 and 4778, RemoteConnectionManager 1149, LocalSessionManager 21, 22 and 25, and RdpCoreTS 131 on the computer connected to); file shares (commands naming \\computer, from Security 4688 with command lines or Sysmon 1, and Security 4648 to cifs on the computer connecting; Security 5140 and 5145 on the computer connected to); and programs started remotely (on the computer connecting: PsExec, PAExec, RemCom, sc, at and schtasks against \\computer, wmic /node:, winrs -r:, schtasks /s, PowerShell remoting with -ComputerName, WinRM 6, and Security 4648 to RPCSS, WSMAN, or HTTP from PowerShell; on the computer connected to: the service and task managers' pipes, PsExec's pipes, programs written to ADMIN$, services installed (System 7045, Security 4697), scheduled tasks made or changed under a person's account (Security 4698, 4702), WinRM 91, the PowerShell remoting and winrs hosts and what they start, and programs WMI starts under a person's account). Network logons (Security 4624 type 3) support these but are not shown alone: a domain controller or file server has thousands. Records on the computer connected to that name no source are tied to a network logon or share access within two minutes, by the same account where they name one. Sysmon network connections (Sysmon 3) and DCOM are not read yet.`,
+		`Read so far: Remote Desktop (the client's log, RDPClient 1024 and 1102, and Security 4648 to TERMSRV on the computer connecting; Security 4624 type 10 or 12 and 4778, RemoteConnectionManager 1149, LocalSessionManager 21, 22 and 25, and RdpCoreTS 131 on the computer connected to); file shares (commands naming \\computer, from Security 4688 with command lines or Sysmon 1, and Security 4648 to cifs on the computer connecting; Security 5140 and 5145 on the computer connected to); and programs started remotely (on the computer connecting: PsExec, PAExec, RemCom, sc, at and schtasks against \\computer, wmic /node:, winrs -r:, schtasks /s, PowerShell remoting with -ComputerName, WinRM 6, and Security 4648 to RPCSS, WSMAN, or HTTP from PowerShell; on the computer connected to: the service and task managers' pipes, PsExec's pipes, programs written to ADMIN$, services installed (System 7045, Security 4697), scheduled tasks made or changed under a person's account (Security 4698, 4702), WinRM 91, the PowerShell remoting and winrs hosts and what they start, and programs WMI starts under a person's account). Network logons (Security 4624 type 3) support these but are not shown alone: a domain controller or file server has thousands. Records on the computer connected to that name no source are tied to a network logon or share access within two minutes, by the same account where they name one. Jump list entries on \\computer\share are files opened there, at the time they give. The account's registry names computers it connected to by Remote Desktop (Terminal Server Client) and shares it used (MountPoints2), but its times are only when a key was last written: these support the connections between the same two computers, and stand alone, marked as having no time, where there is none. Sysmon network connections (Sysmon 3), DCOM and shortcut files are not read yet.`,
 		fmt.Sprintf("Ends are paired when each names the other and they are within %s once stated clock differences are taken off; strongly when within %s and with the same account. A pair is consistent with one connection, not proof of it.", fmtDur(connWindow), fmtDur(connStrong)))
 	return rep, nil
 }
@@ -807,7 +952,11 @@ func WriteConnectionsText(w io.Writer, r *ConnectionsReport) error {
 	fmt.Fprintf(w, "Connections between hosts: %d (from %d events)\n", len(r.Connections), r.Events)
 	for _, c := range r.Connections {
 		seen := map[string]string{"both": "both ends", "source": "the connecting end only", "target": "the end connected to only"}[c.SeenOn]
-		fmt.Fprintf(w, "\n%s UTC  %s -> %s  %s", ts(c.Start), label[c.From], label[c.To], ConnKindWords[c.Kind])
+		when := ts(c.Start) + " UTC"
+		if c.Undated {
+			when = "no time (a registry key written " + when + ")"
+		}
+		fmt.Fprintf(w, "\n%s  %s -> %s  %s", when, label[c.From], label[c.To], ConnKindWords[c.Kind])
 		if c.Account != "" {
 			fmt.Fprintf(w, "  %s", c.Account)
 		}

@@ -39,7 +39,7 @@ func TestLateralMovementConnections(t *testing.T) {
 		if err := c.s.AssignBatch(batch, &hst.ID, ""); err != nil {
 			t.Fatal(err)
 		}
-		files, _ := filepath.Glob(filepath.Join(dir, h.Name, "*.evtx"))
+		files, _ := filepath.Glob(filepath.Join(dir, h.Name, "*"))
 		for _, f := range files {
 			e, err := c.in.IntakePath(batch, f)
 			if err != nil {
@@ -78,6 +78,7 @@ func TestLateralMovementConnections(t *testing.T) {
 	// WS-ALICE's clock difference not yet stated: its ends are three minutes
 	// out, so its pairs are only possible.
 	rep := check("clock not stated", []want{
+		{"14:03:00", "rdp", "host:WS-ALICE", "computer:JUMP-OLD", "source", "one-end", `CORP\alice`},
 		{"08:55:10", "rdp", "ip:203.0.113.45", "host:SRV-FILE01", "target", "one-end", `CORP\svc_backup`},
 		{"09:17:18", "rdp", "host:WS-ALICE", "host:SRV-FILE01", "both", "possible", `CORP\alice`},
 		{"09:25:30", "smb", "host:WS-ALICE", "host:SRV-FILE01", "both", "possible", `CORP\alice`},
@@ -85,12 +86,14 @@ func TestLateralMovementConnections(t *testing.T) {
 		{"09:48:10", "exec", "host:SRV-FILE01", "host:DC01", "both", "strong", `CORP\svc_backup`},
 		{"10:08:42", "rdp", "host:WS-ALICE", "ip:10.9.9.9", "source", "one-end", `CORP\alice`},
 		{"10:20:00", "exec", "host:WS-ALICE", "host:DC01", "target", "one-end", `CORP\alice`},
+		{"10:23:01", "smb", "host:WS-ALICE", "host:DC01", "source", "one-end", ""},
 		{"10:30:15", "rdp", "host:WS-ALICE", "host:DC01", "target", "one-end", `CORP\alice`},
 		{"10:53:05", "exec", "host:WS-ALICE", "host:SRV-FILE01", "both", "possible", `CORP\alice`},
 		{"11:20:30", "exec", "host:SRV-FILE01", "host:DC01", "both", "strong", `CORP\svc_backup`},
 		{"11:38:40", "exec", "host:WS-ALICE", "host:DC01", "both", "possible", `CORP\alice`},
+		{"11:53:20", "smb", "host:WS-ALICE", "host:SRV-FILE01", "both", "possible", `CORP\alice`},
 	})
-	if a := rep.Connections[1].Apart; a == nil || *a != int64(-178*time.Second) {
+	if a := rep.Connections[2].Apart; a == nil || *a != int64(-178*time.Second) {
 		t.Errorf("apart %v, want -2m58s", a)
 	}
 	notes := strings.Join(rep.Notes, " | ")
@@ -102,6 +105,7 @@ func TestLateralMovementConnections(t *testing.T) {
 		t.Fatal(err)
 	}
 	rep = check("clock stated", []want{
+		{"14:00:00", "rdp", "host:WS-ALICE", "computer:JUMP-OLD", "source", "one-end", `CORP\alice`},
 		{"08:55:10", "rdp", "ip:203.0.113.45", "host:SRV-FILE01", "target", "one-end", `CORP\svc_backup`},
 		{"09:14:18", "rdp", "host:WS-ALICE", "host:SRV-FILE01", "both", "strong", `CORP\alice`},
 		{"09:22:30", "smb", "host:WS-ALICE", "host:SRV-FILE01", "both", "strong", `CORP\alice`},
@@ -109,29 +113,66 @@ func TestLateralMovementConnections(t *testing.T) {
 		{"09:48:10", "exec", "host:SRV-FILE01", "host:DC01", "both", "strong", `CORP\svc_backup`},
 		{"10:05:42", "rdp", "host:WS-ALICE", "ip:10.9.9.9", "source", "one-end", `CORP\alice`},
 		{"10:20:00", "exec", "host:WS-ALICE", "host:DC01", "target", "one-end", `CORP\alice`},
+		{"10:20:01", "smb", "host:WS-ALICE", "host:DC01", "source", "one-end", ""},
 		{"10:30:15", "rdp", "host:WS-ALICE", "host:DC01", "target", "one-end", `CORP\alice`},
 		{"10:50:05", "exec", "host:WS-ALICE", "host:SRV-FILE01", "both", "strong", `CORP\alice`},
 		{"11:20:30", "exec", "host:SRV-FILE01", "host:DC01", "both", "strong", `CORP\svc_backup`},
 		{"11:35:40", "exec", "host:WS-ALICE", "host:DC01", "both", "strong", `CORP\alice`},
+		{"11:50:20", "smb", "host:WS-ALICE", "host:SRV-FILE01", "both", "strong", `CORP\alice`},
 	})
-	cn := rep.Connections[1]
+	cn := rep.Connections[2]
 	if *cn.Apart != int64(2*time.Second) || len(cn.Source.Events) != 3 || len(cn.Target.Events) != 5 {
 		t.Errorf("09:14: apart %v, %d source events, %d target events", *cn.Apart, len(cn.Source.Events), len(cn.Target.Events))
 	}
 	reasons := strings.Join(cn.Reasons, " | ")
-	for _, w := range []string{"connected to SRV-FILE01", "from 10.1.1.20, an address stated for WS-ALICE", "after correcting WS-ALICE's clock (stated as 3 minutes ahead)", "the same account at both ends"} {
+	for _, w := range []string{"connected to SRV-FILE01", "from 10.1.1.20, an address stated for WS-ALICE", "after correcting WS-ALICE's clock (stated as 3 minutes ahead)", "the same account at both ends",
+		`WS-ALICE's registry also names SRV-FILE01: Remote Desktop server in this account's list: SRV-FILE01 (registry, Terminal Server Client\Servers), signing in as CORP\alice`} {
 		if !strings.Contains(reasons, w) {
 			t.Errorf("09:14 reasons lack %q: %s", w, reasons)
 		}
 	}
-	if len(cn.EventIDs) != 8 {
-		t.Errorf("09:14 has %d event ids, want 8", len(cn.EventIDs))
+	// The recent list names every server: not repeated where a server key
+	// says it already.
+	if strings.Contains(reasons, "recent connections list") || len(cn.Named) != 1 {
+		t.Errorf("09:14 named %v; reasons %s", cn.Named, reasons)
+	}
+	if len(cn.EventIDs) != 9 {
+		t.Errorf("09:14 has %d event ids, want 9", len(cn.EventIDs))
+	}
+	// Records of the registry alone: shown with their time said to be the
+	// key's, never paired.
+	for _, i := range []int{0, 8} {
+		cn := rep.Connections[i]
+		if !cn.Undated || cn.Target != nil || !strings.Contains(strings.Join(cn.Reasons, " | "), "the time is only when the registry key was last written") {
+			t.Errorf("connection %d: undated %v, reasons %v", i, cn.Undated, cn.Reasons)
+		}
+	}
+	for i, ws := range map[int][]string{
+		0:  {"WS-ALICE's registry names JUMP-OLD as a computer this account connected to by Remote Desktop", "JUMP-OLD is not a host of this case"},
+		3:  {`Network share in this account's MountPoints2: \\SRV-FILE01\Finance`},
+		8:  {`WS-ALICE's registry names a share on DC01 that this account used: Network share in this account's MountPoints2: \\DC01\C$`, "no record of a connection between WS-ALICE and DC01"},
+		9:  {"WS-ALICE's registry also names DC01: Remote Desktop server in this account's list: DC01"},
+		13: {"WS-ALICE opened a file on a share on SRV-FILE01", `files opened on WS-ALICE: \\SRV-FILE01\Finance\Q3 results.xlsx`, "MountPoints2"},
+	} {
+		reasons := strings.Join(rep.Connections[i].Reasons, " | ")
+		for _, w := range ws {
+			if !strings.Contains(reasons, w) {
+				t.Errorf("connection %d reasons lack %q: %s", i, w, reasons)
+			}
+		}
+	}
+	// A share named in the registry supports a program started remotely
+	// only when that program's records involve the same share.
+	for _, i := range []int{7, 10, 12} {
+		if r := strings.Join(rep.Connections[i].Reasons, " | "); strings.Contains(r, "MountPoints2") {
+			t.Errorf("connection %d is supported by a share it did not use: %s", i, r)
+		}
 	}
 	// PsExec: the command on one, and on the other the network logon, the
 	// program written to ADMIN$, the service manager's and PsExec's pipes,
 	// and the service installed, tied by time; the ordinary srvsvc pipe and
 	// IPC$ itself are not read.
-	cn = rep.Connections[4]
+	cn = rep.Connections[5]
 	reasons = strings.Join(cn.Reasons, " | ")
 	for _, w := range []string{"SRV-FILE01 ran a program against DC01", "DC01 recorded a service or task started remotely from 10.1.1.50",
 		"shares on DC01: ADMIN$, IPC$", "services installed on DC01: PSEXESVC", "PSEXESVC (System 7045) (event", "by time alone"} {
@@ -142,16 +183,16 @@ func TestLateralMovementConnections(t *testing.T) {
 	if len(cn.Source.Events) != 1 || len(cn.Target.Events) != 7 {
 		t.Errorf("09:48: %d source events, %d target events, want 1 and 7: %+v", len(cn.Source.Events), len(cn.Target.Events), cn.Target.Events)
 	}
-	if !strings.Contains(strings.Join(rep.Connections[2].Reasons, " | "), "shares on SRV-FILE01: Finance") {
-		t.Errorf("09:22 reasons %v", rep.Connections[2].Reasons)
+	if !strings.Contains(strings.Join(rep.Connections[3].Reasons, " | "), "shares on SRV-FILE01: Finance") {
+		t.Errorf("09:22 reasons %v", rep.Connections[3].Reasons)
 	}
 	// PowerShell remoting, a remote task and WMI: each target record with no
 	// source is tied by time, and by account where it names one.
 	for i, ws := range map[int][]string{
-		8: {"SRV-FILE01 recorded a remote management (WinRM) session from 10.1.1.20", "Remote management shell created (WinRM 91)", "by time alone",
+		10: {"SRV-FILE01 recorded a remote management (WinRM) session from 10.1.1.20", "Remote management shell created (WinRM 91)", "by time alone",
 			"PowerShell remoting session started (wsmprovhost.exe)", `by time and by its account, CORP\alice`},
-		9:  {"DC01 recorded a scheduled task made remotely from 10.1.1.50", `scheduled tasks on DC01: \Cleanup`, `C:\Windows\Temp\cleanup.bat`},
-		10: {"DC01 recorded a program started remotely by WMI from 10.1.1.20", "Program started by WMI: cmd.exe (by WmiPrvSE.exe)"},
+		11: {"DC01 recorded a scheduled task made remotely from 10.1.1.50", `scheduled tasks on DC01: \Cleanup`, `C:\Windows\Temp\cleanup.bat`},
+		12: {"DC01 recorded a program started remotely by WMI from 10.1.1.20", "Program started by WMI: cmd.exe (by WmiPrvSE.exe)"},
 	} {
 		reasons := strings.Join(rep.Connections[i].Reasons, " | ")
 		for _, w := range ws {
@@ -167,10 +208,10 @@ func TestLateralMovementConnections(t *testing.T) {
 	for _, e := range rep.Edges {
 		edges = append(edges, e.Kind+":"+e.From+">"+e.To)
 	}
-	if got := strings.Join(edges, " "); got != "rdp:ip:203.0.113.45>host:SRV-FILE01 rdp:host:WS-ALICE>host:SRV-FILE01 smb:host:WS-ALICE>host:SRV-FILE01 rdp:host:SRV-FILE01>host:DC01 exec:host:SRV-FILE01>host:DC01 rdp:host:WS-ALICE>ip:10.9.9.9 exec:host:WS-ALICE>host:DC01 rdp:host:WS-ALICE>host:DC01 exec:host:WS-ALICE>host:SRV-FILE01" {
+	if got := strings.Join(edges, " "); got != "rdp:host:WS-ALICE>computer:JUMP-OLD rdp:ip:203.0.113.45>host:SRV-FILE01 rdp:host:WS-ALICE>host:SRV-FILE01 smb:host:WS-ALICE>host:SRV-FILE01 rdp:host:SRV-FILE01>host:DC01 exec:host:SRV-FILE01>host:DC01 rdp:host:WS-ALICE>ip:10.9.9.9 exec:host:WS-ALICE>host:DC01 smb:host:WS-ALICE>host:DC01 rdp:host:WS-ALICE>host:DC01 exec:host:WS-ALICE>host:SRV-FILE01" {
 		t.Errorf("edges %s", got)
 	}
-	if len(rep.Nodes) != 5 || !rep.Nodes[0].InCase || rep.Nodes[3].Kind != "address" {
+	if len(rep.Nodes) != 6 || !rep.Nodes[0].InCase || rep.Nodes[3].Kind != "address" || rep.Nodes[5].Kind != "computer" {
 		t.Errorf("nodes %+v", rep.Nodes)
 	}
 	var text strings.Builder
@@ -184,20 +225,29 @@ func TestLateralMovementConnections(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// WS-ALICE's registry still names DC01 as a Remote Desktop server: with
+	// DC01's logon gone, that is a connection of its own, undated.
 	rep = check("DC01 excluded", []want{
+		{"14:00:00", "rdp", "host:WS-ALICE", "computer:JUMP-OLD", "source", "one-end", `CORP\alice`},
 		{"08:55:10", "rdp", "ip:203.0.113.45", "host:SRV-FILE01", "target", "one-end", `CORP\svc_backup`},
 		{"09:14:18", "rdp", "host:WS-ALICE", "host:SRV-FILE01", "both", "strong", `CORP\alice`},
 		{"09:22:30", "smb", "host:WS-ALICE", "host:SRV-FILE01", "both", "strong", `CORP\alice`},
 		{"09:41:03", "rdp", "host:SRV-FILE01", "host:DC01", "source", "one-end", `CORP\svc_backup`},
 		{"09:48:10", "exec", "host:SRV-FILE01", "host:DC01", "source", "one-end", `CORP\svc_backup`},
 		{"10:05:42", "rdp", "host:WS-ALICE", "ip:10.9.9.9", "source", "one-end", `CORP\alice`},
+		{"10:20:01", "smb", "host:WS-ALICE", "host:DC01", "source", "one-end", ""},
+		{"10:30:20", "rdp", "host:WS-ALICE", "host:DC01", "source", "one-end", `CORP\alice`},
 		{"10:50:05", "exec", "host:WS-ALICE", "host:SRV-FILE01", "both", "strong", `CORP\alice`},
 		{"11:20:30", "exec", "host:SRV-FILE01", "host:DC01", "source", "one-end", `CORP\svc_backup`},
 		{"11:35:40", "exec", "host:WS-ALICE", "host:DC01", "source", "one-end", `CORP\alice`},
+		{"11:50:20", "smb", "host:WS-ALICE", "host:SRV-FILE01", "both", "strong", `CORP\alice`},
 	})
-	if !strings.Contains(strings.Join(rep.Connections[3].Reasons, " "), "DC01 has no matching logon") ||
-		!strings.Contains(strings.Join(rep.Connections[4].Reasons, " "), "DC01 has no matching record") {
-		t.Errorf("reasons %v %v", rep.Connections[3].Reasons, rep.Connections[4].Reasons)
+	if !strings.Contains(strings.Join(rep.Connections[4].Reasons, " "), "DC01 has no matching logon") ||
+		!strings.Contains(strings.Join(rep.Connections[5].Reasons, " "), "DC01 has no matching record") {
+		t.Errorf("reasons %v %v", rep.Connections[4].Reasons, rep.Connections[5].Reasons)
+	}
+	if !rep.Connections[8].Undated {
+		t.Error("the Remote Desktop server key alone is not marked undated")
 	}
 	os.RemoveAll(dir)
 }

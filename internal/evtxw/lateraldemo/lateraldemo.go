@@ -1,4 +1,5 @@
-// Package lateraldemo writes a made-up set of Windows event logs from three
+// Package lateraldemo writes a made-up set of Windows event logs (and one
+// user's NTUSER.DAT and jump list) from three
 // hosts that connect to each other by Remote Desktop, file shares,
 // PsExec, PowerShell remoting, a remote scheduled task and WMI: for trying
 // the Connections view (scripts/mklateral) and for the tests. No real machine, person or network is described: the domain is
@@ -18,7 +19,13 @@
 //	11:05  a service installed on SRV-FILE01 with nothing from the network near it
 //	11:20  SRV-FILE01 -> DC01          task    svc_backup  (both ends: schtasks /s)
 //	11:35  WS-ALICE -> DC01            WMI     alice       (both ends: wmic /node:)
+//	11:50  WS-ALICE -> SRV-FILE01      share   alice       (both ends: Excel's jump list, 5140)
 //	08:10  a task alice makes on her own workstation, taken as local
+//
+// alice's NTUSER.DAT names SRV-FILE01, DC01 and 10.9.9.9 as Remote Desktop
+// servers (supporting those connections), JUMP-OLD (a computer outside the
+// case, named nowhere else: a connection with no time), \\SRV-FILE01\Finance
+// and \\DC01\C$ (the second supports nothing, so it stands alone).
 //
 // WS-ALICE's clock is three minutes fast.
 package lateraldemo
@@ -31,6 +38,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/DanDreadless/atropos/internal/artw"
 	"github.com/DanDreadless/atropos/internal/evtxw"
 )
 
@@ -327,6 +335,12 @@ func Write(dir0 string) error {
 	// her near it, so it is taken as local and named in the notes.
 	task(alice, at("08:10:00"), "alice", `\Backup reminder`, `C:\Users\alice\remind.cmd`)
 
+	// 11:50 alice opens a spreadsheet on the file server's share in Excel:
+	// her jump list has it, the file server its share access.
+	logon(file, at("11:50:18"), 3, "alice", "WS-ALICE", "10.1.1.20", 51188, nextLogon())
+	share(file, at("11:50:18"), "alice", "10.1.1.20", 51188, "Finance", `\??\D:\Shares\Finance`, "", 0)
+	share(file, at("11:50:19"), "alice", "10.1.1.20", 51188, "Finance", `\??\D:\Shares\Finance`, `Q3 results.xlsx`, 0x120089)
+
 	// Ordinary network logons with nothing else: not connections.
 	logon(dc, at("08:40:00"), 3, "alice", "WS-ALICE", "10.1.1.20", 50001, nextLogon())
 	logon(dc, at("08:40:00"), 3, "SRV-FILE01$", "SRV-FILE01", "10.1.1.50", 50002, nextLogon())
@@ -359,15 +373,62 @@ func Write(dir0 string) error {
 			}
 		}
 	}
+	if err := userFiles(alice, filepath.Join(dir0, alice.name)); err != nil {
+		return err
+	}
 	if err := os.WriteFile(filepath.Join(dir0, "README.txt"), []byte(strings.TrimLeft(readme, "\n")), 0o644); err != nil {
 		return err
 	}
 	return nil
 }
 
+// userFiles writes alice's own records of where she connected: her
+// NTUSER.DAT (the Remote Desktop server lists and MountPoints2, whose times
+// are only the keys' last writes) and Excel's jump list. Times are as her
+// clock had them.
+func userFiles(h *host, dir string) error {
+	local := func(t time.Time) time.Time { return t.Add(h.clock) }
+	start := local(day.Add(-30 * 24 * time.Hour))
+	root := &artw.Key{Name: "ROOT", Written: start}
+	root.Path(`Environment`, start).Values = []artw.Value{artw.SZ("TEMP", `%USERPROFILE%\AppData\Local\Temp`)}
+	root.Path(`Control Panel\Desktop`, start)
+	tsc := `Software\Microsoft\Terminal Server Client`
+	for _, s := range []struct {
+		name string
+		at   time.Time
+	}{
+		{"SRV-FILE01", local(at("09:14:25"))},
+		{"10.9.9.9", local(at("10:05:50"))},
+		{"DC01", local(at("10:30:20"))},
+		// A server named nowhere else: an undated connection to a
+		// computer outside the case.
+		{"JUMP-OLD", local(day.Add(-18*24*time.Hour + 14*time.Hour))},
+	} {
+		root.Path(tsc+`\Servers\`+s.name, s.at).Values = []artw.Value{artw.SZ("UsernameHint", domain+`\alice`)}
+	}
+	root.Path(tsc+`\Default`, local(at("10:30:20"))).Values = []artw.Value{
+		artw.SZ("MRU0", "DC01"), artw.SZ("MRU1", "10.9.9.9"), artw.SZ("MRU2", "SRV-FILE01"), artw.SZ("MRU3", "JUMP-OLD")}
+	mp := `Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2\`
+	root.Path(mp+`##SRV-FILE01#Finance`, local(at("09:22:31"))).Values = []artw.Value{artw.DWORD("BaseClass", 0)}
+	root.Path(mp+`##DC01#C$`, local(at("10:20:01"))).Values = []artw.Value{artw.DWORD("BaseClass", 0)}
+	hive, err := artw.Hive(root, `\??\C:\Users\alice\ntuser.dat`, local(at("12:00:00")))
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "NTUSER.DAT"), hive, 0o644); err != nil {
+		return err
+	}
+	jl := artw.JumpList([]artw.JumpEntry{
+		{Path: `C:\Users\alice\Documents\expenses.xlsx`, LastUsed: local(at("08:31:12")), Count: 4, Machine: "WS-ALICE"},
+		{Path: `\\SRV-FILE01\Finance\Q3 results.xlsx`, LastUsed: local(at("11:50:20")), Count: 1, Machine: "SRV-FILE01"},
+	})
+	return os.WriteFile(filepath.Join(dir, "6e855c85de07bc6a.automaticDestinations-ms"), jl, 0o644)
+}
+
 const readme = `
 Made-up event logs from three hosts that connect to each other by Remote
-Desktop, a file share, PsExec, PowerShell remoting, a scheduled task and WMI
+Desktop, file shares, PsExec, PowerShell remoting, a scheduled task and WMI,
+with one user's NTUSER.DAT and Excel jump list
 (scripts/mklateral). Nothing here
 describes a real machine, person or network.
 
@@ -380,10 +441,13 @@ describes a real machine, person or network.
 
    Time zone: UTC for all three.
 
-2. Add each folder's logs, choosing its host in the add dialog.
+2. Add each folder's files, choosing its host in the add dialog. WS-ALICE's
+   folder also holds alice's NTUSER.DAT and Excel's jump list.
 
 3. Open the Connections tab. It should show, on 20 November 2026 (UTC):
 
+   no time WS-ALICE -> JUMP-OLD       Remote Desktop  alice       source only
+          (only alice's registry names it; its key was written on 2 November)
    08:55  203.0.113.45 -> SRV-FILE01  Remote Desktop  svc_backup  target only
                                       (an address outside the case)
    09:14  WS-ALICE -> SRV-FILE01      Remote Desktop  alice       both ends: strong
@@ -392,10 +456,18 @@ describes a real machine, person or network.
    09:48  SRV-FILE01 -> DC01          PsExec          svc_backup  both ends: strong
    10:05  WS-ALICE -> 10.9.9.9        Remote Desktop  alice       source only
    10:20  WS-ALICE -> DC01            Remote service  alice       target only
+   no time WS-ALICE -> DC01           File share      alice       source only
+          (\\DC01\C$ in alice's MountPoints2, its key written at 10:20)
    10:30  WS-ALICE -> DC01            Remote Desktop  alice       target only
    10:50  WS-ALICE -> SRV-FILE01      WinRM           alice       both ends: strong
    11:20  SRV-FILE01 -> DC01          Scheduled task  svc_backup  both ends: strong
    11:35  WS-ALICE -> DC01            WMI             alice       both ends: strong
+   11:50  WS-ALICE -> SRV-FILE01      File share      alice       both ends: strong
+          (Excel's jump list on one end, the share's access on the other)
+
+   alice's registry also names SRV-FILE01, 10.9.9.9 and DC01 as Remote
+   Desktop servers, and \\SRV-FILE01\Finance as a share: those are added to
+   the reasons of the connections above, not shown again.
 
    Without WS-ALICE's clock difference stated, its connections are three
    minutes apart and pair only as "possible"; with it, the times agree to
