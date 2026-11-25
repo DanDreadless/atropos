@@ -380,6 +380,12 @@ dialog p { margin: 6px 0; }
 .cnconn.on .cnconnline { stroke-width: 4.5; }
 .cnconn.dim { opacity: .25; }
 .cnsession { fill: var(--accent); opacity: .35; }
+.cnbrush { fill: var(--accent); opacity: .15; stroke: var(--accent); pointer-events: none; }
+.cnlanes { touch-action: pan-y; cursor: crosshair; }
+.cnlanes .cnconn { cursor: pointer; }
+.cnrange { display: inline-flex; align-items: center; gap: 4px; }
+.cntime { width: 15em; font-family: var(--mono); font-size: 12px; }
+.cntime.bad { border-color: var(--bad); color: var(--bad); }
 .cnsession.dim { opacity: .1; }
 .cnkey.session::before { border-top: 0; background: var(--accent); opacity: .35; height: 6px; border-radius: 2px; }
 .cnsess { color: var(--dim); }

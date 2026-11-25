@@ -6,7 +6,9 @@
 'use strict';
 
 let connectionsLoaded = false;
-const CN = { mode: 'graph', kind: '', rep: null, pick: null, pos: null, selected: null };
+// range: the period shown, { from, to } as BigInt nanoseconds (either may
+// be null for open); null for the whole time.
+const CN = { mode: 'graph', kind: '', rep: null, pick: null, pos: null, selected: null, range: null };
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 function sv(tag, attrs, ...kids) {
@@ -47,15 +49,96 @@ function setCnKind(k) {
   drawConnections();
 }
 
-// The connections and edges of the kind chosen.
-function kindConns() { return CN.rep ? CN.rep.connections.filter((c) => !CN.kind || c.kind === CN.kind) : []; }
-function kindEdges() { return CN.rep ? CN.rep.edges.filter((e) => !CN.kind || e.kind === CN.kind) : []; }
+// The connections and edges of the kind chosen, in the period chosen.
+function kindConns() { return CN.rep ? CN.rep.connections.filter((c) => (!CN.kind || c.kind === CN.kind) && inRange(c)) : []; }
+function kindEdges() {
+  if (!CN.rep) return [];
+  if (!CN.range) return CN.rep.edges.filter((e) => !CN.kind || e.kind === CN.kind);
+  // The edges again, from the connections in the period.
+  const m = new Map();
+  for (const c of kindConns()) {
+    const k = c.kind + '\0' + c.from + '\0' + c.to;
+    let e = m.get(k);
+    if (!e) m.set(k, e = { from: c.from, to: c.to, kind: c.kind, count: 0, strong: 0, possible: 0, one_end: 0, first_utc: c.start_utc, last_utc: c.start_utc });
+    e.count++;
+    if (c.confidence === 'strong') e.strong++; else if (c.confidence === 'possible') e.possible++; else e.one_end++;
+    if (BigInt(c.start_utc) < BigInt(e.first_utc)) e.first_utc = c.start_utc;
+    if (BigInt(c.start_utc) > BigInt(e.last_utc)) e.last_utc = c.start_utc;
+  }
+  return [...m.values()];
+}
+
+// ---- the period shown ----
+// A connection is in it when it, or its session, overlaps it. One with no
+// time (a registry key's last write) is not.
+function inRange(c) {
+  const r = CN.range;
+  if (!r) return true;
+  if (c.undated) return false;
+  const s = BigInt(c.start_utc), e = c.ended_utc ? BigInt(c.ended_utc) : s;
+  return (r.from == null || e >= r.from) && (r.to == null || s <= r.to);
+}
+
+// parseUTC reads "2026-11-20", "2026-11-20 09:00", "2026-11-20 09:00:30"
+// or, on the day of the first connection, "09:00": as BigInt nanoseconds,
+// the start of what it names, or with end its last nanosecond. null for
+// empty, undefined for what is not a time.
+function parseUTC(s, end) {
+  s = s.trim().replace(/\s*UTC$/i, '').replace(/Z$/, '');
+  if (!s) return null;
+  let m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/.exec(s);
+  if (!m) {
+    const t = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(s);
+    const first = CN.rep && CN.rep.connections.find((c) => !c.undated);
+    if (!t || !first) return undefined;
+    m = [s, ...fmtNs(first.start_utc, 0).slice(0, 10).split('-'), t[1], t[2], t[3]];
+  }
+  const [y, mo, d, hh, mi, ss] = m.slice(1).map((v) => (v == null ? null : Number(v)));
+  if (mo < 1 || mo > 12 || d < 1 || d > 31 || hh > 23 || mi > 59 || ss > 59) return undefined;
+  const ms = Date.UTC(y, mo - 1, d, hh || 0, mi || 0, ss || 0);
+  if (isNaN(ms) || new Date(ms).getUTCDate() !== d) return undefined;
+  let ns = BigInt(ms) * 1000000n;
+  if (end) ns += (ss != null ? 1000000000n : mi != null ? 60000000000n : 86400000000000n) - 1n;
+  return ns;
+}
+
+function setCnRange(from, to) {
+  CN.range = from == null && to == null ? null : { from, to };
+  CN.selected = null;
+  $('cnfrom').value = from == null ? '' : fmtNs(from, 0);
+  $('cnto').value = to == null ? '' : fmtNs(to, 0);
+  $('cnfrom').classList.remove('bad');
+  $('cnto').classList.remove('bad');
+  $('cnwhole').hidden = !CN.range;
+  if (CN.rep) drawConnections();
+}
+
+// From what is typed in the two boxes.
+function applyCnRange() {
+  const from = parseUTC($('cnfrom').value, false), to = parseUTC($('cnto').value, true);
+  $('cnfrom').classList.toggle('bad', from === undefined);
+  $('cnto').classList.toggle('bad', to === undefined);
+  if (from === undefined || to === undefined) { toast('A time is written 2026-11-20 09:00 (UTC), or 09:00 for the day of the first connection', true); return; }
+  if (from != null && to != null && to < from) { $('cnto').classList.add('bad'); toast('The end of the period is before its start', true); return; }
+  CN.range = from == null && to == null ? null : { from, to };
+  CN.selected = null;
+  $('cnwhole').hidden = !CN.range;
+  if (CN.rep) drawConnections();
+}
+
+function rangeWords() {
+  const r = CN.range;
+  // To the minute when the period is in whole minutes.
+  const f = (t, end) => ((end ? t + 1n : t) % 60000000000n === 0n ? fmtNs(t, 0).slice(0, 16) : fmtNs(t, 0));
+  return r.from != null && r.to != null ? `from ${f(r.from)} to ${f(r.to, true)} UTC` : r.from != null ? `from ${f(r.from)} UTC on` : `up to ${f(r.to, true)} UTC`;
+}
 
 // Opens the tab on the connections an event of the timeline is part of,
 // read again so that they include what was added since.
 async function showEventConnections(id, what) {
   CN.pick = { event: Number(id), what };
   CN.kind = '';
+  setCnRange(null, null);
   CN.selected = null;
   for (const b of $('cnkind').children) b.classList.toggle('on', b.dataset.kind === '');
   $('cnall').hidden = false;
@@ -81,9 +164,11 @@ function drawSummary() {
   const undated = conns.filter((c) => c.undated).length;
   const hosts = r.nodes.filter((n) => n.in_case).length;
   const others = r.nodes.length - hosts;
-  const byKind = Object.keys(KIND_WORDS).map((k) => [k, r.connections.filter((c) => c.kind === k).length]).filter(([, n]) => n);
+  const byKind = Object.keys(KIND_WORDS).map((k) => [k, r.connections.filter((c) => c.kind === k && inRange(c)).length]).filter(([, n]) => n);
+  const left = CN.range ? r.connections.filter((c) => (!CN.kind || c.kind === CN.kind) && c.undated).length : 0;
   $('cnsummary').replaceChildren(h('b', {}, fmtInt(conns.length)), conns.length === 1 ? ' connection' : ' connections',
     CN.kind ? ` (${KIND_WORDS[CN.kind].toLowerCase()})` : '',
+    CN.range ? ` ${rangeWords()}${left ? ` (${fmtInt(left)} with no time left out)` : ''}` : '',
     ` (${fmtInt(both)} seen at both ends${undated ? `, ${fmtInt(undated)} with no time` : ''}) between ${fmtInt(hosts)} host${hosts === 1 ? '' : 's'} and ${fmtInt(others)} other computer${others === 1 ? '' : 's'} or address${others === 1 ? '' : 'es'}`,
     !CN.kind && byKind.length > 1 ? ': ' + byKind.map(([k, n]) => `${fmtInt(n)} ${KIND_WORDS[k].toLowerCase()}`).join(', ') : '',
     r.ready ? '' : ' (still reading some evidence)');
@@ -125,6 +210,7 @@ function drawLegend() {
     h('span', { class: 'cnkey oneend' }, 'one end only'),
     CN.rep && CN.rep.connections.some((c) => c.undated) ? h('span', { class: 'cnkey undated' }, 'no time: named only in the registry') : '',
     CN.mode === 'lanes' && CN.rep && CN.rep.connections.some((c) => c.ended_utc) ? h('span', { class: 'cnkey session' }, 'bar: a Remote Desktop session, until logoff or disconnection') : '',
+    CN.mode === 'lanes' ? h('span', {}, 'drag across the lanes to look at a period') : '',
     h('span', { class: 'cnkeytags' }, Object.keys(KIND_TAG).map((k) => `${KIND_TAG[k]}: ${KIND_WORDS[k].toLowerCase()}`).join(' · ')),
     h('span', { class: 'cnkey nodehost' }, 'host of the case'),
     h('span', { class: 'cnkey nodeext' }, 'outside the case'));
@@ -309,6 +395,7 @@ function drawLanes(box, r) {
   // shown changes. Connections with no time (a registry key's last write
   // alone) do not set it: one written weeks before would squash the rest;
   // outside it they are drawn at its edge.
+  // A period chosen is the time across, edge to edge.
   const timed = r.connections.filter((c) => !c.undated);
   const basis = timed.length ? timed : r.connections;
   let t0 = BigInt(basis[0].start_utc), t1 = t0;
@@ -316,8 +403,14 @@ function drawLanes(box, r) {
     const t = BigInt(c.start_utc); if (t < t0) t0 = t; if (t > t1) t1 = t;
     if (c.ended_utc) { const e = BigInt(c.ended_utc); if (e > t1) t1 = e; }
   }
-  const pad = (t1 - t0) / 20n + 60000000000n;
-  t0 -= pad; t1 += pad;
+  const rg = CN.range;
+  if (rg && rg.from != null && rg.to != null) { t0 = rg.from; t1 = rg.to + 1n; } else {
+    const pad = (t1 - t0) / 20n + 60000000000n;
+    t0 -= pad; t1 += pad;
+    if (rg && rg.from != null) t0 = rg.from;
+    if (rg && rg.to != null) t1 = rg.to + 1n;
+    if (t1 <= t0) t1 = t0 + 60000000000n;
+  }
   const span = Number(t1 - t0);
   const x = (ns) => {
     let t = BigInt(ns);
@@ -325,14 +418,14 @@ function drawLanes(box, r) {
     return left + (Number(t - t0) / span) * (w - left - right);
   };
   // Time marks, on whole minutes, hours or days.
-  const steps = [60, 300, 600, 1800, 3600, 7200, 21600, 43200, 86400, 604800].map((s) => s * 1e9);
+  const steps = [1, 5, 10, 30, 60, 300, 600, 1800, 3600, 7200, 21600, 43200, 86400, 604800].map((s) => s * 1e9);
   const step = steps.find((s) => span / s <= 8) || steps[steps.length - 1];
   const stepN = BigInt(step);
   const sameDay = fmtNs(t0, 0).slice(0, 10) === fmtNs(t1, 0).slice(0, 10);
   for (let t = (t0 / stepN + 1n) * stepN; t < t1; t += stepN) {
     const s = fmtNs(t, 0);
     svg.append(sv('line', { x1: x(t), x2: x(t), y1: top - 4, y2: hgt - 6, class: 'cntick' }),
-      sv('text', { x: x(t), y: top - 9, class: 'cnticklabel' }, sameDay && step < 86400e9 ? s.slice(11, 16) : step < 86400e9 ? s.slice(5, 16) : s.slice(0, 10)));
+      sv('text', { x: x(t), y: top - 9, class: 'cnticklabel' }, step < 60e9 ? s.slice(11, 19) : sameDay && step < 86400e9 ? s.slice(11, 16) : step < 86400e9 ? s.slice(5, 16) : s.slice(0, 10)));
   }
   // A Remote Desktop session's length, as a bar along the lane of the
   // computer connected to, under the arrows.
@@ -341,10 +434,13 @@ function drawLanes(box, r) {
     const x1 = x(c.start_utc), x2 = Math.max(x1 + 2, x(c.ended_utc));
     const dim = CN.pick && !pickedConns().includes(c);
     svg.append(sv('rect', { x: x1, y: y[c.to] + 7, width: x2 - x1, height: 6, rx: 2, class: 'cnsession' + (dim ? ' dim' : '') },
-      sv('title', {}, `Session on ${cnLabel(c.to)} from ${fmtNs(c.start_utc, 0)} until ${c.end_how} at ${fmtNs(c.ended_utc, 0)} UTC (${sessionLength(c)})`)));
+      sv('title', {}, `Session on ${cnLabel(c.to)} from ${fmtNs(c.start_utc, 0)}${x1 <= left ? ' (before the period shown)' : ''} until ${c.end_how} at ${fmtNs(c.ended_utc, 0)} UTC (${sessionLength(c)})`)));
   }
+  // A connection made before the period shown is there for its session:
+  // its bar is drawn from the edge, not its arrow.
+  const before = (c) => CN.range && CN.range.from != null && BigInt(c.start_utc) < CN.range.from;
   for (const c of conns) {
-    if (y[c.from] == null || y[c.to] == null) continue;
+    if (y[c.from] == null || y[c.to] == null || before(c)) continue;
     const kind = c.confidence === 'strong' ? 'strong' : c.confidence === 'possible' ? 'possible' : 'oneend';
     const cx = x(c.start_utc), y1 = y[c.from], y2 = y[c.to];
     const dir = y2 > y1 ? 1 : -1;
@@ -362,7 +458,41 @@ function drawLanes(box, r) {
       sv('line', { x1: cx, x2: cx, y1, y2, class: 'cnhitline' }));
     svg.append(g);
   }
+  brushLanes(svg, { left, right, top, w, hgt, t0, span });
   box.replaceChildren(svg);
+}
+
+// Dragging across the lanes, away from a connection, chooses that period.
+function brushLanes(svg, a) {
+  let start = null, band = null;
+  const px = (ev) => {
+    const b = svg.getBoundingClientRect();
+    return Math.min(a.w - a.right, Math.max(a.left, (ev.clientX - b.left) * (a.w / (b.width || a.w))));
+  };
+  const at = (p) => a.t0 + BigInt(Math.round(((p - a.left) / (a.w - a.left - a.right)) * a.span));
+  svg.addEventListener('pointerdown', (ev) => {
+    if (ev.button !== 0 || ev.target.closest('.cnconn')) return;
+    start = px(ev);
+    band = sv('rect', { x: start, y: a.top - 4, width: 0, height: a.hgt - a.top, class: 'cnbrush' });
+    svg.append(band);
+    if (svg.setPointerCapture) try { svg.setPointerCapture(ev.pointerId); } catch (e) { /* a synthetic pointer */ }
+  });
+  svg.addEventListener('pointermove', (ev) => {
+    if (start == null) return;
+    const p = px(ev);
+    band.setAttribute('x', Math.min(start, p));
+    band.setAttribute('width', Math.abs(p - start));
+  });
+  const done = (ev) => {
+    if (start == null) return;
+    const p = px(ev), s = start;
+    start = null;
+    band.remove();
+    if (Math.abs(p - s) < 6) return;
+    setCnRange(at(Math.min(s, p)), at(Math.max(s, p)));
+  };
+  svg.addEventListener('pointerup', done);
+  svg.addEventListener('pointercancel', () => { if (band) band.remove(); start = null; });
 }
 
 // How long a session lasted, from the connection's start to its end.
@@ -439,6 +569,11 @@ function setupConnections() {
   $('cnkind').addEventListener('click', (ev) => { const b = ev.target.closest('button'); if (b) setCnKind(b.dataset.kind); });
   $('cnrun').onclick = loadConnections;
   $('cnall').onclick = () => pickConn(null);
+  for (const id of ['cnfrom', 'cnto']) {
+    $(id).addEventListener('change', applyCnRange);
+    $(id).addEventListener('keydown', (ev) => { if (ev.key === 'Enter') applyCnRange(); });
+  }
+  $('cnwhole').onclick = () => setCnRange(null, null);
   let rt;
   window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { if (S.view === 'connections' && CN.rep) { CN.pos = null; drawConnections(); } }, 200); });
 }

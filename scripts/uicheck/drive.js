@@ -53,6 +53,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const local = path.join(OUT, 'local.log');
   fs.writeFileSync(local, '2024-07-15 12:00:00 a local time with no zone\n');
   await page.click('#add');
+  // The dialog opens once the case's hosts are read.
+  await page.waitForFunction(() => document.getElementById('dlg').open, { timeout: 5000 }).catch(() => {});
   ok(await page.$eval('#dlg', (d) => d.open), '"Add evidence" opens a dialog');
   await page.keyboard.press('Escape');
   const input = await page.$('#pickfiles');
@@ -740,6 +742,36 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const xs = await page.$$eval('.cnlanes .cnconn .cnconnline', (ls) => ls.map((l) => Number(l.getAttribute('x1'))));
   ok(xs[1] - xs[0] < 100 && xs[xs.length - 1] - xs[1] > 300, 'a connection with no time far from the rest does not squash the lanes: ' + xs.slice(0, 3).join());
   await page.click('#cnall');
+  // A period: typed, then dragged across the lanes.
+  await page.type('#cnfrom', '2026-11-20 09:00');
+  await page.type('#cnto', '10:00');
+  await page.keyboard.press('Enter');
+  ok(/^5 connections from 2026-11-20 09:00 to 2026-11-20 10:00 UTC \(2 with no time left out\) .*: 3 remote desktop, 1 file share, 1 started remotely$/.test(await text('#cnsummary')) && await count('#cnrows .cnrow') === 5 &&
+    await count('.cnlanes .cnconn') === 4 && await count('.cnlanes .cnsession') === 3 && await visible('#cnwhole') && (await text('.cnlanes')).includes('09:30'),
+    'a period typed shows the connections in it, a session that runs into it among them (its bar drawn, not its arrow), and the lanes span it: ' + await text('#cnsummary'));
+  await page.click('#cnmode [data-mode=graph]');
+  ok(await count('.cngraph .cnedge') < 11 && (await page.$$eval('.cngraph .cncount', (t) => t.reduce((n, x) => n + Number(x.textContent.split(' ')[1]), 0))) === 5, 'the graph shows only the arrows of the period, counted in it');
+  await page.click('#cnmode [data-mode=lanes]');
+  await page.$eval('#cnfrom', (el) => { el.value = ''; });
+  await page.type('#cnfrom', 'yesterday');
+  await page.keyboard.press('Enter');
+  ok(await page.$eval('#cnfrom', (el) => el.classList.contains('bad')) && await count('#cnrows .cnrow') === 5, 'a time that cannot be read is marked, and the period stays');
+  await page.click('#cnwhole');
+  ok(await count('#cnrows .cnrow') === 15 && !(await visible('#cnwhole')) && (await page.$eval('#cnfrom', (el) => el.value)) === '', '"Whole time" shows every connection again');
+  await page.$eval('.cnlanes', (el) => el.scrollIntoView({ block: 'center' }));
+  const lb = await page.$eval('.cnlanes', (el) => { const b = el.getBoundingClientRect(); return { x: b.left, y: b.top, w: b.width }; });
+  const plot = (f) => lb.x + 150 + f * (lb.w - 180);
+  await page.mouse.move(plot(0.3), lb.y + 31);
+  await page.mouse.down();
+  await page.mouse.move(plot(0.45), lb.y + 31, { steps: 4 });
+  await page.mouse.move(plot(0.6), lb.y + 31, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForFunction(() => document.getElementById('cnfrom').value !== '', { timeout: 5000 }).catch(() => {});
+  const dragged = await count('#cnrows .cnrow');
+  ok(dragged >= 1 && dragged < 15 && await count('.cnlanes .cnconn') <= dragged && /^2026-11-20 \d\d:\d\d:\d\d$/.test(await page.$eval('#cnto', (el) => el.value)) &&
+    await count('.cnbrush') === 0, `dragging across the lanes chooses that period and zooms to it: ${dragged} connections, ${await page.$eval('#cnfrom', (el) => el.value)} to ${await page.$eval('#cnto', (el) => el.value)}`);
+  await shot('19b-connections-period');
+  await page.click('#cnwhole');
   await page.evaluate(() => [...document.querySelectorAll('#cnrows .cnrow')][2].querySelector('.cnactions button').click());
   ok((await text('#cnrows .cnrow.on')).includes('Remote Desktop client connecting (1024)') && (await text('#cnrows .cnrow.on')).includes('by its clock') &&
     (await text('#cnrows .cnrow.on')).includes("Also named in WS-ALICE's registry"),
