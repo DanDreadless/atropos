@@ -1,7 +1,7 @@
 // Package lateraldemo writes a made-up set of Windows event logs (and one
 // user's NTUSER.DAT and jump list) from three
 // hosts that connect to each other by Remote Desktop, file shares,
-// PsExec, PowerShell remoting, a remote scheduled task and WMI: for trying
+// PsExec, PowerShell remoting, a remote scheduled task, WMI and DCOM: for trying
 // the Connections view (scripts/mklateral) and for the tests. No real machine, person or network is described: the domain is
 // corp.example, and the addresses are private or documentation ranges.
 //
@@ -20,6 +20,7 @@
 //	11:20  SRV-FILE01 -> DC01          task    svc_backup  (both ends: schtasks /s)
 //	11:35  WS-ALICE -> DC01            WMI     alice       (both ends: wmic /node:)
 //	11:50  WS-ALICE -> SRV-FILE01      share   alice       (both ends: Excel's jump list, 5140)
+//	12:05  WS-ALICE -> SRV-FILE01      DCOM    alice       (both ends: MMC20.Application)
 //	08:10  a task alice makes on her own workstation, taken as local
 //
 // alice's NTUSER.DAT names SRV-FILE01, DC01 and 10.9.9.9 as Remote Desktop
@@ -341,6 +342,15 @@ func Write(dir0 string) error {
 	share(file, at("11:50:18"), "alice", "10.1.1.20", 51188, "Finance", `\??\D:\Shares\Finance`, "", 0)
 	share(file, at("11:50:19"), "alice", "10.1.1.20", 51188, "Finance", `\??\D:\Shares\Finance`, `Q3 results.xlsx`, 0x120089)
 
+	// 12:05 alice makes MMC20.Application on the file server over DCOM and
+	// runs a command through it: PowerShell on her side; a network logon,
+	// mmc.exe started by the DCOM launcher as her, and its child there.
+	process(alice, at("12:05:10"), "alice", `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
+		`powershell -c "$m=[activator]::CreateInstance([type]::GetTypeFromProgID('MMC20.Application','SRV-FILE01')); $m.Document.ActiveView.ExecuteShellCommand('cmd.exe',$null,'/c hostname','7')"`)
+	logon(file, at("12:05:11"), 3, "alice", "WS-ALICE", "10.1.1.20", 51240, nextLogon())
+	processAs(file, at("12:05:12"), "SRV-FILE01$", `C:\Windows\System32\mmc.exe`, `C:\Windows\system32\mmc.exe -Embedding`, `C:\Windows\System32\svchost.exe`, "alice")
+	processAs(file, at("12:05:13"), "SRV-FILE01$", `C:\Windows\System32\cmd.exe`, `"C:\Windows\System32\cmd.exe" /c hostname`, `C:\Windows\System32\mmc.exe`, "alice")
+
 	// Ordinary network logons with nothing else: not connections.
 	logon(dc, at("08:40:00"), 3, "alice", "WS-ALICE", "10.1.1.20", 50001, nextLogon())
 	logon(dc, at("08:40:00"), 3, "SRV-FILE01$", "SRV-FILE01", "10.1.1.50", 50002, nextLogon())
@@ -427,7 +437,7 @@ func userFiles(h *host, dir string) error {
 
 const readme = `
 Made-up event logs from three hosts that connect to each other by Remote
-Desktop, file shares, PsExec, PowerShell remoting, a scheduled task and WMI,
+Desktop, file shares, PsExec, PowerShell remoting, a scheduled task, WMI, DCOM,
 with one user's NTUSER.DAT and Excel jump list
 (scripts/mklateral). Nothing here
 describes a real machine, person or network.
@@ -464,6 +474,8 @@ describes a real machine, person or network.
    11:35  WS-ALICE -> DC01            WMI             alice       both ends: strong
    11:50  WS-ALICE -> SRV-FILE01      File share      alice       both ends: strong
           (Excel's jump list on one end, the share's access on the other)
+   12:05  WS-ALICE -> SRV-FILE01      DCOM            alice       both ends: strong
+          (MMC20.Application made from PowerShell; mmc.exe and cmd.exe)
 
    alice's registry also names SRV-FILE01, 10.9.9.9 and DC01 as Remote
    Desktop servers, and \\SRV-FILE01\Finance as a share: those are added to
@@ -475,5 +487,5 @@ describes a real machine, person or network.
    from the network near it is named in the notes, not shown as a
    connection, and so is a task alice made on her own workstation at 08:10.
    The Connections tab's "Started remotely" filter shows PsExec, the
-   service, PowerShell remoting, the task and WMI together.
+   service, PowerShell remoting, the task, WMI and DCOM together.
 `

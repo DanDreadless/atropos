@@ -92,6 +92,7 @@ func TestLateralMovementConnections(t *testing.T) {
 		{"11:20:30", "exec", "host:SRV-FILE01", "host:DC01", "both", "strong", `CORP\svc_backup`},
 		{"11:38:40", "exec", "host:WS-ALICE", "host:DC01", "both", "possible", `CORP\alice`},
 		{"11:53:20", "smb", "host:WS-ALICE", "host:SRV-FILE01", "both", "possible", `CORP\alice`},
+		{"12:08:10", "exec", "host:WS-ALICE", "host:SRV-FILE01", "both", "possible", `CORP\alice`},
 	})
 	if a := rep.Connections[2].Apart; a == nil || *a != int64(-178*time.Second) {
 		t.Errorf("apart %v, want -2m58s", a)
@@ -119,6 +120,7 @@ func TestLateralMovementConnections(t *testing.T) {
 		{"11:20:30", "exec", "host:SRV-FILE01", "host:DC01", "both", "strong", `CORP\svc_backup`},
 		{"11:35:40", "exec", "host:WS-ALICE", "host:DC01", "both", "strong", `CORP\alice`},
 		{"11:50:20", "smb", "host:WS-ALICE", "host:SRV-FILE01", "both", "strong", `CORP\alice`},
+		{"12:05:10", "exec", "host:WS-ALICE", "host:SRV-FILE01", "both", "strong", `CORP\alice`},
 	})
 	cn := rep.Connections[2]
 	if *cn.Apart != int64(2*time.Second) || len(cn.Source.Events) != 3 || len(cn.Target.Events) != 5 {
@@ -153,6 +155,10 @@ func TestLateralMovementConnections(t *testing.T) {
 		8:  {`WS-ALICE's registry names a share on DC01 that this account used: Network share in this account's MountPoints2: \\DC01\C$`, "no record of a connection between WS-ALICE and DC01"},
 		9:  {"WS-ALICE's registry also names DC01: Remote Desktop server in this account's list: DC01"},
 		13: {"WS-ALICE opened a file on a share on SRV-FILE01", `files opened on WS-ALICE: \\SRV-FILE01\Finance\Q3 results.xlsx`, "MountPoints2"},
+		// DCOM: PowerShell's GetTypeFromProgID on one end; on the other,
+		// mmc.exe started as a DCOM object and its child, tied by account.
+		14: {"WS-ALICE ran a program against SRV-FILE01", "SRV-FILE01 recorded a program started remotely by DCOM from 10.1.1.20",
+			`Started as a DCOM object: mmc.exe (event`, `Program started by a DCOM object: cmd.exe (by mmc.exe)`, `by time and by its account, CORP\alice`},
 	} {
 		reasons := strings.Join(rep.Connections[i].Reasons, " | ")
 		for _, w := range ws {
@@ -201,7 +207,7 @@ func TestLateralMovementConnections(t *testing.T) {
 			}
 		}
 	}
-	if notes := strings.Join(rep.Notes, " | "); !strings.Contains(notes, `1 scheduled task or program started by WMI under a person's account had no network logon by that account within 2 minutes, so it is taken as made on the host itself: Scheduled task created: \Backup reminder (Security 4698) on WS-ALICE`) {
+	if notes := strings.Join(rep.Notes, " | "); !strings.Contains(notes, `1 scheduled task or program started by WMI or DCOM under a person's account had no network logon by that account within 2 minutes, so it is taken as made on the host itself: Scheduled task created: \Backup reminder (Security 4698) on WS-ALICE`) {
 		t.Errorf("notes lack the local task: %s", notes)
 	}
 	var edges []string
@@ -241,6 +247,7 @@ func TestLateralMovementConnections(t *testing.T) {
 		{"11:20:30", "exec", "host:SRV-FILE01", "host:DC01", "source", "one-end", `CORP\svc_backup`},
 		{"11:35:40", "exec", "host:WS-ALICE", "host:DC01", "source", "one-end", `CORP\alice`},
 		{"11:50:20", "smb", "host:WS-ALICE", "host:SRV-FILE01", "both", "strong", `CORP\alice`},
+		{"12:05:10", "exec", "host:WS-ALICE", "host:SRV-FILE01", "both", "strong", `CORP\alice`},
 	})
 	if !strings.Contains(strings.Join(rep.Connections[4].Reasons, " "), "DC01 has no matching logon") ||
 		!strings.Contains(strings.Join(rep.Connections[5].Reasons, " "), "DC01 has no matching record") {
@@ -305,18 +312,22 @@ func TestRemoteDesktopPublicSamples(t *testing.T) {
 // sample shows; and the share mapped with net use, at the source's.
 func TestLateralMovementPublicSamples(t *testing.T) {
 	want := map[string]string{
-		"Lateral_Movement__LM_5145_Remote_FileCopy.evtx":                              "smb target",
-		"Lateral_Movement__LM_renamed_psexecsvc_5145.evtx":                            "exec target",
-		"Lateral_Movement__LM_REMCOM_5145_TargetHost.evtx":                            "exec target",
-		"Lateral_Movement__LM_Remote_Service01_5145_svcctl.evtx":                      "exec target",
-		"Lateral_Movement__LM_ScheduledTask_ATSVC_target_host.evtx":                   "exec target",
-		"AutomatedTestingTools__PanacheSysmon_vs_AtomicRedTeam01.evtx":                "smb source",
-		"Lateral_Movement__LM_WMIC_4648_rpcss.evtx":                                   "exec source",
-		"Lateral_Movement__remote_task_update_4624_4702_same_logonid.evtx":            "exec target",
-		"Lateral_Movement__LM_winrm_exec_sysmon_1_winrshost.evtx":                     "note:Remote shell host started (winrshost.exe)",
-		"Lateral_Movement__LM_PowershellRemoting_sysmon_1_wsmprovhost.evtx":           "note:hostname.exe (by wsmprovhost.exe)",
-		"Lateral_Movement__LM_winrm_target_wrmlogs_91_wsmanShellStarted_poorLog.evtx": "note:Remote management shell created (WinRM 91)",
-		"Lateral_Movement__LM_wmiexec_impacket_sysmon_whoami.evtx":                    "note:taken as made on the host itself: Program started by WMI: cmd.exe",
+		"Lateral_Movement__LM_5145_Remote_FileCopy.evtx":                                "smb target",
+		"Lateral_Movement__LM_renamed_psexecsvc_5145.evtx":                              "exec target",
+		"Lateral_Movement__LM_REMCOM_5145_TargetHost.evtx":                              "exec target",
+		"Lateral_Movement__LM_Remote_Service01_5145_svcctl.evtx":                        "exec target",
+		"Lateral_Movement__LM_ScheduledTask_ATSVC_target_host.evtx":                     "exec target",
+		"AutomatedTestingTools__PanacheSysmon_vs_AtomicRedTeam01.evtx":                  "smb source",
+		"Lateral_Movement__LM_WMIC_4648_rpcss.evtx":                                     "exec source",
+		"Lateral_Movement__remote_task_update_4624_4702_same_logonid.evtx":              "exec target",
+		"Lateral_Movement__LM_winrm_exec_sysmon_1_winrshost.evtx":                       "note:Remote shell host started (winrshost.exe)",
+		"Lateral_Movement__LM_PowershellRemoting_sysmon_1_wsmprovhost.evtx":             "note:hostname.exe (by wsmprovhost.exe)",
+		"Lateral_Movement__LM_winrm_target_wrmlogs_91_wsmanShellStarted_poorLog.evtx":   "note:Remote management shell created (WinRM 91)",
+		"Lateral_Movement__LM_wmiexec_impacket_sysmon_whoami.evtx":                      "note:taken as made on the host itself: Program started by WMI: cmd.exe",
+		"Lateral_Movement__LM_impacket_docmexec_mmc_sysmon_01.evtx":                     "exec target",
+		"Lateral_Movement__LM_sysmon_3_DCOM_ShellBrowserWindow_ShellWindows.evtx":       "exec target",
+		"Lateral_Movement__LM_DCOM_MSHTA_LethalHTA_Sysmon_3_1.evtx":                     "exec target",
+		"Lateral_Movement__LM_dcom_shwnd_shbrwnd_mmc20_failed_traces_system_10016.evtx": "exec target",
 	}
 	for f, w := range want {
 		p := filepath.Join("..", "..", "testdata", "evtx-attack", f)

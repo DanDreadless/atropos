@@ -147,7 +147,7 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	evs, ready, err := s.ObservedEvents("rdp-in", "rdp-out", "smb-in", "smb-out", "exec-in", "exec-out", "logon-in", "rdp-named", "smb-named")
+	evs, ready, err := s.ObservedEvents("rdp-in", "rdp-out", "smb-in", "smb-out", "exec-in", "exec-out", "logon-in", "net-in", "net-out", "rdp-named", "smb-named")
 	if err != nil {
 		return nil, err
 	}
@@ -445,7 +445,7 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 			// Tasks and programs WMI starts are made on the host itself
 			// all the time: one with no logon to tie it to is taken as
 			// local. Services and remote shells are named.
-			if v := item(l.e, "via", "object"); v == "task" || v == "wmi" {
+			if v := item(l.e, "via", "object"); v == "task" || v == "wmi" || v == "dcom" {
 				local = append(local, w)
 			} else {
 				untied = append(untied, w)
@@ -473,7 +473,7 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		if len(shown) > 10 {
 			shown, more = shown[:10], fmt.Sprintf("; and %d more", len(local)-10)
 		}
-		c.notes = append(c.notes, fmt.Sprintf("%d scheduled task%s or program%s started by WMI under a person's account had no network logon by that account within %s, so %s taken as made on the host itself: %s%s",
+		c.notes = append(c.notes, fmt.Sprintf("%d scheduled task%s or program%s started by WMI or DCOM under a person's account had no network logon by that account within %s, so %s taken as made on the host itself: %s%s",
 			len(local), plural(len(local), "", "s"), plural(len(local), "", "s"), fmtDur(connCluster), plural(len(local), "it is", "they are"), strings.Join(shown, "; "), more))
 	}
 	keep := ins[:0]
@@ -508,6 +508,8 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 			return fmt.Sprintf("%s's Remote Desktop client connected to %s", label(cl.node), cl.why)
 		case "exec":
 			return fmt.Sprintf("%s ran a program against %s", label(cl.node), cl.why)
+		case "":
+			return fmt.Sprintf("%s made a network connection to %s", label(cl.node), cl.why)
 		}
 		files := 0
 		for _, e := range cl.events {
@@ -545,6 +547,10 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 					words = "a program started remotely by WMI"
 				case vias["winrm"]:
 					words = "a remote management (WinRM) session"
+				case vias["dcom"]:
+					words = "a program started remotely by DCOM"
+				case vias["dcom-refused"]:
+					words = "a refused remote DCOM launch"
 				}
 			} else if len(vias) > 1 {
 				words = "programs started remotely"
@@ -556,7 +562,7 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 	// details names the shares, services and programs an end involved.
 	details := func(cl *cluster) []string {
 		var out []string
-		for _, k := range []struct{ kind, words string }{{"share", "shares"}, {"file", "files opened"}, {"service", "services installed"}, {"task", "scheduled tasks"}, {"program", "programs"}} {
+		for _, k := range []struct{ kind, words string }{{"share", "shares"}, {"file", "files opened"}, {"service", "services installed"}, {"task", "scheduled tasks"}, {"class", "DCOM objects refused"}, {"program", "programs"}} {
 			seen := map[string]bool{}
 			var vs []string
 			for _, e := range cl.events {
@@ -649,6 +655,9 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 			continue
 		}
 		k := kindOf(o)
+		if k == "" {
+			continue // network connections alone, like network logons, only support
+		}
 		conn := Connection{Kind: k, From: o.node, To: o.other, Start: o.corr, Account: o.account, SeenOn: "source", Confidence: "one-end", Source: end(o)}
 		conn.Reasons = append(conn.Reasons, outWords(o))
 		switch {
@@ -882,7 +891,7 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		rep.Notes = append(rep.Notes, "Some evidence is still being read for connections; open this again shortly for the full picture.")
 	}
 	rep.Notes = append(rep.Notes,
-		`Read so far: Remote Desktop (the client's log, RDPClient 1024 and 1102, and Security 4648 to TERMSRV on the computer connecting; Security 4624 type 10 or 12 and 4778, RemoteConnectionManager 1149, LocalSessionManager 21, 22 and 25, and RdpCoreTS 131 on the computer connected to); file shares (commands naming \\computer, from Security 4688 with command lines or Sysmon 1, and Security 4648 to cifs on the computer connecting; Security 5140 and 5145 on the computer connected to); and programs started remotely (on the computer connecting: PsExec, PAExec, RemCom, sc, at and schtasks against \\computer, wmic /node:, winrs -r:, schtasks /s, PowerShell remoting with -ComputerName, WinRM 6, and Security 4648 to RPCSS, WSMAN, or HTTP from PowerShell; on the computer connected to: the service and task managers' pipes, PsExec's pipes, programs written to ADMIN$, services installed (System 7045, Security 4697), scheduled tasks made or changed under a person's account (Security 4698, 4702), WinRM 91, the PowerShell remoting and winrs hosts and what they start, and programs WMI starts under a person's account). Network logons (Security 4624 type 3) support these but are not shown alone: a domain controller or file server has thousands. Records on the computer connected to that name no source are tied to a network logon or share access within two minutes, by the same account where they name one. Jump list entries on \\computer\share are files opened there, at the time they give. The account's registry names computers it connected to by Remote Desktop (Terminal Server Client) and shares it used (MountPoints2), but its times are only when a key was last written: these support the connections between the same two computers, and stand alone, marked as having no time, where there is none. Sysmon network connections (Sysmon 3), DCOM and shortcut files are not read yet.`,
+		`Read so far: Remote Desktop (the client's log, RDPClient 1024 and 1102, and Security 4648 to TERMSRV on the computer connecting; Security 4624 type 10 or 12 and 4778, RemoteConnectionManager 1149, LocalSessionManager 21, 22 and 25, and RdpCoreTS 131 on the computer connected to); file shares (commands naming \\computer, from Security 4688 with command lines or Sysmon 1, and Security 4648 to cifs on the computer connecting; Security 5140 and 5145 on the computer connected to); and programs started remotely (on the computer connecting: PsExec, PAExec, RemCom, sc, at and schtasks against \\computer, wmic /node:, winrs -r:, schtasks /s, PowerShell remoting with -ComputerName, WinRM 6, and Security 4648 to RPCSS, WSMAN, or HTTP from PowerShell; on the computer connected to: the service and task managers' pipes, PsExec's pipes, programs written to ADMIN$, services installed (System 7045, Security 4697), scheduled tasks made or changed under a person's account (Security 4698, 4702), WinRM 91, the PowerShell remoting and winrs hosts and what they start, and programs WMI starts under a person's account). DCOM: on the computer connecting, PowerShell's GetTypeFromProgID or GetTypeFromCLSID naming a computer, and Security 4648 to RPCSS; on the computer connected to, MMC, mshta or Office started as a DCOM object (-Embedding) under a person's account and what they start, network connections accepted by them or by explorer.exe (Sysmon 3: ShellWindows, ShellBrowserWindow), and a remote launch refused (System 10016). Sysmon network connections (Sysmon 3) also give Remote Desktop (port 3389) and WinRM (5985, 5986) at either end. Network logons (Security 4624 type 3) and Sysmon connections to file sharing (445, 139) and the RPC endpoint mapper (135) support these but are not shown alone: a domain controller or file server has thousands. Records on the computer connected to that name no source are tied to a network logon or share access within two minutes, by the same account where they name one. Jump list entries on \\computer\share are files opened there, at the time they give. The account's registry names computers it connected to by Remote Desktop (Terminal Server Client) and shares it used (MountPoints2), but its times are only when a key was last written: these support the connections between the same two computers, and stand alone, marked as having no time, where there is none. Shortcut files, ShellWindows and ShellBrowserWindow without Sysmon 3 (they run inside explorer.exe), and the WMI-Activity log are not read yet.`,
 		fmt.Sprintf("Ends are paired when each names the other and they are within %s once stated clock differences are taken off; strongly when within %s and with the same account. A pair is consistent with one connection, not proof of it.", fmtDur(connWindow), fmtDur(connStrong)))
 	return rep, nil
 }

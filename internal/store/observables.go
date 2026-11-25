@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -34,7 +35,7 @@ import (
 // item saying how it was started: service, task, wmi or winrm. The analysis
 // ties it to a network logon by time, and by account where it names one.
 
-const observablesVersion = 4
+const observablesVersion = 5
 
 const observablesSchema = `
 CREATE TABLE IF NOT EXISTS observables (
@@ -45,7 +46,7 @@ CREATE TABLE IF NOT EXISTS observables (
   host        TEXT NOT NULL,      -- the event's host
   act         TEXT NOT NULL,      -- what the event shows: rdp-out, rdp-in, smb-in, exec-out, logon-in...
   what        TEXT NOT NULL,      -- the event, briefly: "RDP client connecting (1024)"
-  kind        TEXT NOT NULL,      -- ip, host, account, share, file, service, task, program, via
+  kind        TEXT NOT NULL,      -- ip, host, account, share, file, service, task, class, program, via
   value       TEXT NOT NULL,
   role        TEXT NOT NULL,      -- source, target, subject, object
   version     INTEGER NOT NULL
@@ -96,9 +97,11 @@ func (s *Store) computeObservables(runID int64) error {
 		return err
 	}
 	// Only event-log records of the channels read; the category narrows
-	// them before any JSON is looked at.
+	// them before any JSON is looked at. DCOM's refusals (System 10016)
+	// are filed as general log records.
 	rows, err := s.r.Query(`SELECT id, evidence_id, ts_utc, host, fields FROM events
-		WHERE run_id = ? AND source = 'evtx' AND category IN ('account', 'network', 'execution', 'persistence')
+		WHERE run_id = ? AND source = 'evtx' AND (category IN ('account', 'network', 'execution', 'persistence')
+			OR (category = 'log' AND json_extract(fields, '$.event_id') = '10016'))
 		AND json_extract(fields, '$.channel') IN (?,?,?,?,?,?,?,?)`, runID, chSecurity, chRDPCli, chRCM, chLSM, chCoreTS, chSystem, chSysmon, chWinRM)
 	if err != nil {
 		return err
@@ -381,9 +384,9 @@ func observeEvent(oe *ObservedEvent, fieldsJSON string) bool {
 		oe.Act, oe.What = "exec-in", "Remote management shell created (WinRM 91)"
 		add("via", "winrm", "object")
 	case chSecurity + "/4688", chSysmon + "/1":
-		image, parent, user := get("NewProcessName"), get("ParentProcessName"), ""
+		image, parent, parentCmd, user := get("NewProcessName"), get("ParentProcessName"), "", ""
 		if f.EventID == "1" {
-			image, parent, user = get("Image"), get("ParentImage"), get("User")
+			image, parent, parentCmd, user = get("Image"), get("ParentImage"), get("ParentCommandLine"), get("User")
 		} else {
 			// The new process's own account (Windows 10 on) before the
 			// creator's, which for a program WMI starts is the computer.
@@ -397,13 +400,123 @@ func observeEvent(oe *ObservedEvent, fieldsJSON string) bool {
 				}
 			}
 		}
-		if !observeCommand(oe, image, parent, get("CommandLine"), user, add) {
+		if !observeCommand(oe, image, parent, get("CommandLine"), parentCmd, user, add) {
 			return false
 		}
+	case chSysmon + "/3":
+		if !observeNetConn(oe, get, add) {
+			return false
+		}
+	case chSystem + "/10016":
+		// DCOM refusing a caller permission to start or use an object. One
+		// from another computer names its address and account.
+		if !strings.EqualFold(get("param2"), "Remote") {
+			return false
+		}
+		from := get("param9")
+		if ip, ok := normIP(from); ok {
+			if isLoopbackIP(ip) {
+				return false
+			}
+			add("ip", ip, "source")
+		} else if h := normHostName(from); h != "" && !strings.ContainsAny(h, "()") {
+			add("host", h, "source")
+		} else {
+			return false
+		}
+		account(get("param6"), get("param7"), "target")
+		class := strings.ToUpper(strings.Trim(get("param4"), "{}"))
+		name := dcomClasses[class]
+		if name == "" {
+			name = "{" + class + "}"
+		}
+		oe.Act, oe.What = "exec-in", "Remote DCOM "+strings.ToLower(get("param3"))+" refused: "+name+" (System 10016)"
+		add("class", name, "object")
+		add("via", "dcom-refused", "object")
 	default:
 		return false
 	}
 	return len(oe.Items) > 0
+}
+
+// observeNetConn reads a Sysmon network connection (event 3). Which end is
+// this computer is not always the same field: older Sysmon put this
+// computer in Source for a connection it accepted, newer puts the other
+// computer there. It is decided by the host names Sysmon gives, then by
+// who initiated it, then by which end has the server's port.
+func observeNetConn(oe *ObservedEvent, get func(string) string, add func(string, string, string)) bool {
+	sIP, sok := normIP(get("SourceIp"))
+	dIP, dok := normIP(get("DestinationIp"))
+	if !sok || !dok {
+		return false
+	}
+	sPort, _ := strconv.Atoi(get("SourcePort"))
+	dPort, _ := strconv.Atoi(get("DestinationPort"))
+	initiated := strings.EqualFold(get("Initiated"), "true")
+	short := func(h string) string { return shortName(strings.ToUpper(strings.TrimSpace(h))) }
+	me, sh, dh := short(oe.Host), short(get("SourceHostname")), short(get("DestinationHostname"))
+	server := func(p int) bool { return p > 0 && (p < 1024 || p == 3389 || p == 5985 || p == 5986) }
+	var localIsSource bool
+	switch {
+	case me != "" && sh == me && dh != me:
+		localIsSource = true
+	case me != "" && dh == me && sh != me:
+		localIsSource = false
+	case initiated:
+		localIsSource = true
+	default:
+		localIsSource = server(sPort) && !server(dPort)
+	}
+	remote, rName, lPort, rPort := dIP, get("DestinationHostname"), sPort, dPort
+	if !localIsSource {
+		remote, rName, lPort, rPort = sIP, get("SourceHostname"), dPort, sPort
+	}
+	if isLoopbackIP(remote) || remote == sIP && remote == dIP {
+		return false
+	}
+	role, port := "target", rPort
+	if !initiated {
+		role, port = "source", lPort
+	}
+	add("ip", remote, role)
+	if n := normHostName(rName); n != "" && short(rName) != me && !strings.ContainsAny(n, "()") {
+		add("host", n, role)
+	}
+	base := baseName(get("Image"))
+	dir := "out"
+	if !initiated {
+		dir = "in"
+	}
+	switch {
+	case !initiated && (dcomServers[base] || base == "explorer.exe"):
+		oe.Act, oe.What = "exec-in", "Network connection accepted by "+base+", as a DCOM object does (Sysmon 3)"
+		add("via", "dcom", "object")
+		add("program", get("Image"), "object")
+	case port == 3389:
+		oe.Act, oe.What = "rdp-"+dir, "Network connection to Remote Desktop, port 3389 (Sysmon 3)"
+	case port == 5985 || port == 5986:
+		oe.Act, oe.What = "exec-"+dir, fmt.Sprintf("Network connection to remote management (WinRM), port %d (Sysmon 3)", port)
+		if !initiated {
+			add("via", "winrm", "object")
+		}
+	case port == 445 || port == 139:
+		oe.Act, oe.What = "net-"+dir, fmt.Sprintf("Network connection to file sharing, port %d (Sysmon 3)", port)
+	case port == 135:
+		oe.Act, oe.What = "net-"+dir, "Network connection to the RPC endpoint mapper, port 135 (Sysmon 3)"
+	default:
+		return false
+	}
+	if u := get("User"); personAccount(u) {
+		add("account", u, map[bool]string{true: "subject", false: "target"}[initiated])
+	}
+	return true
+}
+
+func shortName(n string) string {
+	if i := strings.IndexByte(n, '.'); i > 0 {
+		return n[:i]
+	}
+	return n
 }
 
 // observeShare reads Security 5140 (a share connected to) and 5145 (an
@@ -487,9 +600,27 @@ func writes(mask string) bool {
 // share) is the share. At the computer connected to: the PsExec service, the
 // PowerShell remoting and winrs hosts starting, and programs that WMI or
 // those hosts start, are remote execution with no source.
-func observeCommand(oe *ObservedEvent, image, parent, cmd, user string, add func(string, string, string)) bool {
+func observeCommand(oe *ObservedEvent, image, parent, cmd, parentCmd, user string, add func(string, string, string)) bool {
 	base, pbase := baseName(image), baseName(parent)
 	switch {
+	case dcomServers[base] && embedding(cmd):
+		// Started by the DCOM launcher for a caller: from another computer
+		// or this one, so only a person's, and the analysis wants a
+		// network logon by that account.
+		if !personAccount(user) {
+			return false
+		}
+		oe.Act, oe.What = "exec-in", "Started as a DCOM object: "+base
+		add("via", "dcom", "object")
+	case dcomServers[pbase] && (embedding(parentCmd) || (parentCmd == "" && pbase == "mmc.exe")):
+		// A program a DCOM object started. Security 4688 gives no parent
+		// command line, so there only MMC's children are read: MMC starts
+		// nothing of its own accord.
+		if !personAccount(user) {
+			return false
+		}
+		oe.Act, oe.What = "exec-in", "Program started by a DCOM object: "+base+" (by "+pbase+")"
+		add("via", "dcom", "object")
 	case base == "psexesvc.exe":
 		oe.Act, oe.What = "exec-in", "PsExec service started (PSEXESVC.exe)"
 		add("via", "service", "object")
@@ -559,6 +690,31 @@ func observeCommandOut(oe *ObservedEvent, image, base, cmd, user string, add fun
 	return true
 }
 
+var reDCOMType = regexp.MustCompile(`(?i)GetTypeFrom(?:ProgID|CLSID)\s*\(\s*["']?[^,"')]*["']?\s*,\s*["']([^"')]+)["']`)
+
+// dcomServers are programs other computers start as DCOM objects to run
+// commands: MMC20.Application, HTML applications (LethalHTA) and Office's
+// automation objects. ShellWindows and ShellBrowserWindow run inside
+// explorer.exe, which is told apart only by its network connections.
+var dcomServers = map[string]bool{"mmc.exe": true, "mshta.exe": true, "excel.exe": true, "winword.exe": true,
+	"powerpnt.exe": true, "outlook.exe": true, "visio.exe": true}
+
+// embedding: a command line of a program started as a COM server.
+func embedding(cmd string) bool {
+	lc := strings.ToLower(cmd)
+	return strings.Contains(lc, "-embedding") || strings.Contains(lc, "/embedding") || strings.Contains(lc, "/automation")
+}
+
+// dcomClasses names the classes used to run commands over DCOM, by CLSID.
+var dcomClasses = map[string]string{
+	"49B2791A-B1AE-4C90-9B8E-E860BA07F889": "MMC20.Application",
+	"9BA05972-F6A8-11CF-A442-00A0C90A8F39": "ShellWindows",
+	"C08AFD90-F2A1-11D1-8455-00A0C91F3880": "ShellBrowserWindow",
+	"00024500-0000-0000-C000-000000000046": "Excel.Application",
+	"0006F03A-0000-0000-C000-000000000046": "Outlook.Application",
+	"3050F4D8-98B5-11CF-BB82-00AA00BDCE0B": "an HTML application (mshta)",
+}
+
 // remoteArg is the computer a remote management command names other than as
 // \\name, and how it is named: wmic /node:name, winrs -r:name, schtasks
 // /s name, and PowerShell's remoting and WMI commands with -ComputerName
@@ -607,6 +763,13 @@ func remoteArg(base, cmd string) (target, how string) {
 			}
 		}
 	case "powershell.exe", "pwsh.exe", "powershell_ise.exe":
+		// A DCOM object made on another computer:
+		// [type]::GetTypeFromProgID("MMC20.Application", "host").
+		if m := reDCOMType.FindStringSubmatch(cmd); m != nil {
+			if t := pick(m[1]); t != "" {
+				return t, "DCOM object made on"
+			}
+		}
 		lc := strings.ToLower(cmd)
 		remote := false
 		for _, c := range []string{"invoke-command", "enter-pssession", "new-pssession", "invoke-wmimethod", "invoke-cimmethod", "new-cimsession"} {

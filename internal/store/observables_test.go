@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -120,6 +121,60 @@ func TestObserveRemoteDesktop(t *testing.T) {
 	}
 	for _, c := range cases {
 		var oe ObservedEvent
+		ok := observeEvent(&oe, c.fields)
+		if ok != (c.act != "") || oe.Act != c.act && ok || !reflect.DeepEqual(oe.Items, c.items) && ok {
+			t.Errorf("%s: %v %q %+v, want %q %+v", c.name, ok, oe.Act, oe.Items, c.act, c.items)
+		}
+	}
+}
+
+// DCOM and Sysmon's network connections. Which end of a Sysmon connection
+// is this computer differs between Sysmon versions; both are read.
+func TestObserveDCOMAndNetwork(t *testing.T) {
+	sm := func(eid, data string) string {
+		return `{"channel":"` + chSysmon + `","event_id":"` + eid + `","event":{"EventData":{` + data + `}}}`
+	}
+	conn := func(sIP, sHost string, sPort int, dIP, dHost string, dPort int, init bool, image, user string) string {
+		return sm("3", fmt.Sprintf(`"SourceIp":%q,"SourceHostname":%q,"SourcePort":%d,"DestinationIp":%q,"DestinationHostname":%q,"DestinationPort":%d,"Initiated":%v,"Image":%q,"User":%q`,
+			sIP, sHost, sPort, dIP, dHost, dPort, init, image, user))
+	}
+	cases := []struct {
+		name, host, fields, act string
+		items                   []Observable
+	}{
+		{"old Sysmon: into mmc.exe, this computer as source", "IEWIN7", conn("10.0.2.18", "IEWIN7", 49163, "10.0.2.19", "", 33474, false, `C:\Windows\System32\mmc.exe`, `IEWIN7\IEUser`), "exec-in",
+			[]Observable{{"ip", "10.0.2.19", "source"}, {"via", "dcom", "object"}, {"program", `C:\Windows\System32\mmc.exe`, "object"}, {"account", `IEWIN7\IEUser`, "target"}}},
+		{"new Sysmon: into explorer.exe, other computer as source", "SRV.corp.example", conn("10.0.0.7", "ws7.corp.example", 50123, "10.0.0.5", "srv.corp.example", 49702, false, `C:\Windows\explorer.exe`, `CORP\bob`), "exec-in",
+			[]Observable{{"ip", "10.0.0.7", "source"}, {"host", "WS7.CORP.EXAMPLE", "source"}, {"via", "dcom", "object"}, {"program", `C:\Windows\explorer.exe`, "object"}, {"account", `CORP\bob`, "target"}}},
+		{"inbound, no names: the server's port says which end", "SRV", conn("10.0.0.7", "", 50123, "10.0.0.5", "", 3389, false, `C:\Windows\System32\svchost.exe`, `NT AUTHORITY\NETWORK SERVICE`), "rdp-in",
+			[]Observable{{"ip", "10.0.0.7", "source"}}},
+		{"inbound to 445: only supports", "SRV", conn("10.0.2.18", "SRV", 445, "10.0.2.19", "", 45622, false, "System", `NT AUTHORITY\SYSTEM`), "net-in",
+			[]Observable{{"ip", "10.0.2.19", "source"}}},
+		{"inbound to WinRM", "SRV", conn("10.0.0.7", "", 50200, "10.0.0.5", "SRV", 5985, false, "System", `NT AUTHORITY\SYSTEM`), "exec-in",
+			[]Observable{{"ip", "10.0.0.7", "source"}, {"via", "winrm", "object"}}},
+		{"outbound Remote Desktop", "WS7", conn("10.0.0.7", "WS7", 50300, "10.0.0.5", "srv", 3389, true, `C:\Windows\System32\mstsc.exe`, `CORP\bob`), "rdp-out",
+			[]Observable{{"ip", "10.0.0.5", "target"}, {"host", "SRV", "target"}, {"account", `CORP\bob`, "subject"}}},
+		{"outbound to 135", "WS7", conn("10.0.0.7", "WS7", 50301, "10.0.0.5", "", 135, true, `C:\Windows\System32\svchost.exe`, `NT AUTHORITY\NETWORK SERVICE`), "net-out",
+			[]Observable{{"ip", "10.0.0.5", "target"}}},
+		{"outbound to a web server", "WS7", conn("10.0.0.7", "WS7", 50302, "93.184.216.34", "", 443, true, `C:\b.exe`, `CORP\bob`), "", nil},
+		{"loopback", "IEWIN7", conn("127.0.0.1", "IEWIN7", 49164, "127.0.0.1", "IEWIN7", 445, true, "System", `NT AUTHORITY\SYSTEM`), "", nil},
+		{"mmc started as a DCOM object", "IEWIN7", sm("1", `"Image":"C:\\Windows\\System32\\mmc.exe","CommandLine":"C:\\Windows\\system32\\mmc.exe -Embedding","ParentImage":"C:\\Windows\\System32\\svchost.exe","ParentCommandLine":"svchost.exe -k DcomLaunch","User":"IEWIN7\\IEUser"`), "exec-in",
+			[]Observable{{"via", "dcom", "object"}, {"account", `IEWIN7\IEUser`, "target"}, {"program", `C:\Windows\System32\mmc.exe`, "object"}}},
+		{"mmc opened by a person", "IEWIN7", sm("1", `"Image":"C:\\Windows\\System32\\mmc.exe","CommandLine":"\"C:\\Windows\\system32\\mmc.exe\" compmgmt.msc","ParentImage":"C:\\Windows\\explorer.exe","User":"IEWIN7\\IEUser"`), "", nil},
+		{"Excel automation as SYSTEM", "SRV", sm("1", `"Image":"C:\\Office\\EXCEL.EXE","CommandLine":"EXCEL.EXE /automation -Embedding","ParentImage":"C:\\Windows\\System32\\svchost.exe","User":"NT AUTHORITY\\SYSTEM"`), "", nil},
+		{"child of a DCOM object (Sysmon)", "IEWIN7", sm("1", `"Image":"C:\\Windows\\System32\\cmd.exe","ParentImage":"C:\\Windows\\System32\\mmc.exe","ParentCommandLine":"C:\\Windows\\system32\\mmc.exe -Embedding","User":"IEWIN7\\IEUser"`), "exec-in",
+			[]Observable{{"via", "dcom", "object"}, {"account", `IEWIN7\IEUser`, "target"}, {"program", `C:\Windows\System32\cmd.exe`, "object"}}},
+		{"child of Excel opened by a person", "IEWIN7", sm("1", `"Image":"C:\\Windows\\System32\\cmd.exe","ParentImage":"C:\\Office\\EXCEL.EXE","ParentCommandLine":"\"C:\\Office\\EXCEL.EXE\" C:\\a.xlsx","User":"IEWIN7\\IEUser"`), "", nil},
+		{"child of mmc (4688, no parent command line)", "DC01", `{"channel":"Security","event_id":"4688","event":{"EventData":{"NewProcessName":"C:\\Windows\\System32\\cmd.exe","ParentProcessName":"C:\\Windows\\System32\\mmc.exe","TargetUserName":"alice","TargetDomainName":"CORP"}}}`, "exec-in",
+			[]Observable{{"via", "dcom", "object"}, {"account", `CORP\alice`, "target"}, {"program", `C:\Windows\System32\cmd.exe`, "object"}}},
+		{"10016 remote", "MSEDGEWIN10", `{"channel":"System","event_id":"10016","event":{"EventData":{"param2":"Remote","param3":"Launch","param4":"{49B2791A-B1AE-4C90-9B8E-E860BA07F889}","param6":"MSEDGEWIN10","param7":"IEUser","param9":"10.0.2.17"}}}`, "exec-in",
+			[]Observable{{"ip", "10.0.2.17", "source"}, {"account", `MSEDGEWIN10\IEUser`, "target"}, {"class", "MMC20.Application", "object"}, {"via", "dcom-refused", "object"}}},
+		{"10016 local", "MSEDGEWIN10", `{"channel":"System","event_id":"10016","event":{"EventData":{"param2":"Local","param3":"Launch","param4":"Windows.SecurityCenter.WscBrokerManager","param6":"NT AUTHORITY","param7":"SYSTEM","param9":"LocalHost (Using LRPC)"}}}`, "", nil},
+		{"PowerShell DCOM", "WS7", `{"channel":"Security","event_id":"4688","event":{"EventData":{"NewProcessName":"C:\\pwsh.exe","CommandLine":"pwsh -c $o=[activator]::CreateInstance([type]::GetTypeFromProgID('MMC20.Application.1','srv-file01'))","SubjectUserName":"bob"}}}`, "exec-out",
+			[]Observable{{"host", "SRV-FILE01", "target"}, {"account", "bob", "subject"}, {"program", `C:\pwsh.exe`, "object"}}},
+	}
+	for _, c := range cases {
+		oe := ObservedEvent{Host: c.host}
 		ok := observeEvent(&oe, c.fields)
 		if ok != (c.act != "") || oe.Act != c.act && ok || !reflect.DeepEqual(oe.Items, c.items) && ok {
 			t.Errorf("%s: %v %q %+v, want %q %+v", c.name, ok, oe.Act, oe.Items, c.act, c.items)
