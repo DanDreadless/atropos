@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -250,6 +251,16 @@ func TestObserveArtefacts(t *testing.T) {
 		{"USB mouse", "device-first-arrival", "VID_046D&PID_C52B", `{"device":"VID_046D&PID_C52B","serial":"5&1f3a&0&1","bus":"USB"}`, "", nil},
 		{"USB storage key", "usb-device-key-last-write", "Kingston DataTraveler 3.0 USB Device", `{"key":"\\ControlSet001\\Enum\\USBSTOR\\Disk&Ven_Kingston&Prod_DataTraveler_3.0&Rev_PMAP\\60A44C3FAE22EEA0797900F7&0"}`, "device",
 			[]Observable{{"device", "Kingston DataTraveler 3.0 USB Device", "object"}, {"serial", "60A44C3FAE22EEA0797900F7", "object"}}},
+		{"Amcache file", "amcache-file-recorded", `c:\users\alice\downloads\pd.exe`, `{"sha1_first_31mb":"AB12CD34EF56AB12CD34EF56AB12CD34EF56AB12"}`, "file",
+			[]Observable{{"hash", "sha1:ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12", "object"}, {"file", `c:\users\alice\downloads\pd.exe`, "object"}}},
+		{"Amcache with no hash", "amcache-file-recorded", `c:\x.exe`, `{}`, "", nil},
+		{"Amcache with a hash of zeros", "amcache-file-recorded", `c:\x.exe`, `{"sha1_first_31mb":"0000000000000000000000000000000000000000"}`, "", nil},
+		{"download with its SHA-256", "download-finished", `C:\Users\alice\Downloads\pd.zip`, `{"sha256":"` + strings.Repeat("Ab", 32) + `"}`, "file",
+			[]Observable{{"hash", "sha256:" + strings.Repeat("ab", 32), "object"}, {"file", `C:\Users\alice\Downloads\pd.zip`, "object"}}},
+		{"download with no hash", "download-finished", `C:\x.zip`, `{}`, "", nil},
+		{"Defender detection with its hashes", "defender-detection", `C:\Windows\Temp\svcupd.exe`, `{"sha1":"` + strings.Repeat("CD", 20) + `","sha256":"` + strings.Repeat("ef", 32) + `","md5":"` + strings.Repeat("12", 16) + `"}`, "file",
+			[]Observable{{"hash", "sha1:" + strings.Repeat("cd", 20), "object"}, {"hash", "sha256:" + strings.Repeat("ef", 32), "object"}, {"file", `C:\Windows\Temp\svcupd.exe`, "object"}}},
+		{"Defender detection with no file tracked", "defender-detection", `HKLM\Software\x`, `{"threat_name":"x"}`, "", nil},
 		{"USB storage key with no friendly name", "usb-device-key-last-write", "Disk&Ven_Kingston&Prod_DT&Rev_1", `{"key":"\\ControlSet001\\Enum\\USBSTOR\\Disk&Ven_Kingston&Prod_DT&Rev_1\\ABC&0"}`, "device",
 			[]Observable{{"device", "Kingston DT", "object"}, {"serial", "ABC", "object"}}},
 	}
@@ -262,6 +273,41 @@ func TestObserveArtefacts(t *testing.T) {
 		}
 		if ok && !reflect.DeepEqual(oe.Items, c.items) {
 			t.Errorf("%s: items %v, want %v", c.name, oe.Items, c.items)
+		}
+	}
+}
+
+// The hashes Sysmon gives of the file a record names: SHA-1 and SHA-256
+// kept, MD5 and IMPHASH not; records without hashes, or of other kinds,
+// give nothing.
+func TestObserveSysmonHash(t *testing.T) {
+	sm := func(eid, data string) string {
+		return `{"channel":"` + chSysmon + `","event_id":"` + eid + `","event":{"EventData":{` + data + `}}}`
+	}
+	sha1, sha256 := strings.Repeat("1a", 20), strings.Repeat("2b", 32)
+	hashes := `SHA1=` + strings.ToUpper(sha1) + `,MD5=` + strings.Repeat("3c", 16) + `,SHA256=` + sha256 + `,IMPHASH=` + strings.Repeat("4d", 16)
+	cases := []struct {
+		name, fields, what string
+		items              []Observable
+	}{
+		{"program started", sm("1", `"Image":"C:\\Temp\\pd.exe","Hashes":"`+hashes+`"`), `Program started (Sysmon 1): C:\Temp\pd.exe`,
+			[]Observable{{"hash", "sha1:" + sha1, "object"}, {"hash", "sha256:" + sha256, "object"}, {"file", `C:\Temp\pd.exe`, "object"}}},
+		{"stream written, Hash", sm("15", `"TargetFilename":"C:\\Users\\a\\Downloads\\x.zip:Zone.Identifier","Hash":"SHA256=`+sha256+`"`), `File stream written (Sysmon 15): C:\Users\a\Downloads\x.zip:Zone.Identifier`,
+			[]Observable{{"hash", "sha256:" + sha256, "object"}, {"file", `C:\Users\a\Downloads\x.zip:Zone.Identifier`, "object"}}},
+		{"MD5 only", sm("1", `"Image":"C:\\a.exe","Hashes":"MD5=`+strings.Repeat("3c", 16)+`"`), "", nil},
+		{"no hashes", sm("1", `"Image":"C:\\a.exe"`), "", nil},
+		{"image loaded: not read", sm("7", `"ImageLoaded":"C:\\a.dll","Hashes":"`+hashes+`"`), "", nil},
+		{"not Sysmon", `{"channel":"Security","event_id":"1","event":{"EventData":{"Image":"C:\\a.exe","Hashes":"` + hashes + `"}}}`, "", nil},
+	}
+	for _, c := range cases {
+		var oe ObservedEvent
+		ok := observeSysmonHash(&oe, c.fields)
+		if ok != (c.what != "") || oe.What != c.what {
+			t.Errorf("%s: ok %v what %q", c.name, ok, oe.What)
+			continue
+		}
+		if ok && (oe.Act != "file" || !reflect.DeepEqual(oe.Items, c.items)) {
+			t.Errorf("%s: %s %v", c.name, oe.Act, oe.Items)
 		}
 	}
 }

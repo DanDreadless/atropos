@@ -8,7 +8,9 @@
 let connectionsLoaded = false;
 // range: the period shown, { from, to } as BigInt nanoseconds (either may
 // be null for open); null for the whole time.
-const CN = { mode: 'graph', kind: '', rep: null, pick: null, pos: null, selected: null, range: null };
+// vb: the graph's zoomed view box, null for the whole graph; q and found:
+// what was searched for and the nodes it found.
+const CN = { mode: 'graph', kind: '', rep: null, pick: null, pos: null, selected: null, range: null, vb: null, q: '', found: null };
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 function sv(tag, attrs, ...kids) {
@@ -28,10 +30,10 @@ function sv(tag, attrs, ...kids) {
 const CONF_WORDS = { strong: 'strong', possible: 'possible', 'one-end': 'one end only' };
 const SEEN_WORDS = { both: 'both ends', source: 'the connecting end only', target: 'the end connected to only' };
 // Each kind of connection: its name, and the short tag drawn on its arrows.
-const KIND_WORDS = { rdp: 'Remote Desktop', smb: 'File share', exec: 'Started remotely', usb: 'The same USB device' };
-const KIND_TAG = { rdp: 'RDP', smb: 'Share', exec: 'Exec', usb: 'USB' };
+const KIND_WORDS = { rdp: 'Remote Desktop', smb: 'File share', exec: 'Started remotely', usb: 'The same USB device', file: 'The same file' };
+const KIND_TAG = { rdp: 'RDP', smb: 'Share', exec: 'Exec', usb: 'USB', file: 'File' };
 // How the summary counts each kind.
-const kindCount = (k) => (k === 'usb' ? 'USB device on two hosts' : KIND_WORDS[k].toLowerCase());
+const kindCount = (k) => (k === 'usb' ? 'USB device on two hosts' : k === 'file' ? 'file on two hosts' : KIND_WORDS[k].toLowerCase());
 
 function cnLabel(id) {
   const n = CN.rep && CN.rep.nodes.find((x) => x.id === id);
@@ -40,6 +42,8 @@ function cnLabel(id) {
 
 function setCnMode(m) {
   CN.mode = m;
+  $('cnwrap').classList.toggle('graph', m === 'graph');
+  $('cnzoom').hidden = m !== 'graph';
   for (const b of $('cnmode').children) b.classList.toggle('on', b.dataset.mode === m);
   drawConnections();
 }
@@ -180,6 +184,10 @@ async function loadConnections() {
 
 function drawSummary() {
   const r = CN.rep;
+  for (const b of $('cnkind').children) {
+    const k = b.dataset.kind;
+    b.querySelector('i').textContent = fmtInt(r.connections.filter((c) => (!k || c.kind === k) && inRange(c)).length);
+  }
   const conns = kindConns();
   const both = conns.filter((c) => c.seen_on === 'both').length;
   const undated = conns.filter((c) => c.undated).length;
@@ -222,6 +230,7 @@ function drawConnections() {
   else drawLanes(box, r);
   drawLegend();
   drawConnRows();
+  drawSide();
 }
 
 function drawLegend() {
@@ -288,10 +297,11 @@ function layoutGraph(r, w, hgt) {
 }
 
 function drawGraph(box, r) {
-  const w = Math.max(480, box.clientWidth || 800), hgt = 380;
-  if (!CN.pos || CN.pos.w !== w) CN.pos = { w, at: layoutGraph(r, w, hgt) };
+  const w = Math.max(320, box.clientWidth || 800), hgt = Math.max(360, box.clientHeight || 520);
+  if (!CN.pos || CN.pos.w !== w || CN.pos.h !== hgt) { CN.pos = { w, h: hgt, at: layoutGraph(r, w, hgt) }; CN.vb = null; }
   const at = CN.pos.at;
-  const svg = sv('svg', { class: 'cngraph', viewBox: `0 0 ${w} ${hgt}`, width: w, height: hgt, role: 'img', 'aria-label': 'Graph of connections' });
+  const vb = CN.vb || { x: 0, y: 0, w, h: hgt };
+  const svg = sv('svg', { class: 'cngraph', viewBox: `${vb.x} ${vb.y} ${vb.w} ${vb.h}`, width: w, height: hgt, role: 'img', 'aria-label': 'Graph of connections' });
   const defs = sv('defs', {}, ...['strong', 'possible', 'oneend'].map((k) =>
     sv('marker', { id: 'cnarrow-' + k, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 10, markerHeight: 10, markerUnits: 'userSpaceOnUse', orient: 'auto-start-reverse' },
       sv('path', { d: 'M0,0 L10,5 L0,10 z', class: 'cnarrowhead ' + k }))));
@@ -362,7 +372,7 @@ function drawGraph(box, r) {
   for (const n of r.nodes) {
     const p = at[n.id];
     const on = CN.pick && (CN.pick.event != null ? picked.some((c) => c.from === n.id || c.to === n.id) : CN.pick.node === n.id);
-    const cls = 'cnnode ' + (n.in_case ? 'host' : n.kind) + (on ? ' on' : '');
+    const cls = 'cnnode ' + (n.in_case ? 'host' : n.kind) + (on ? ' on' : '') + (CN.found && CN.found.has(n.id) ? ' found' : '');
     const count = conns.filter((c) => c.from === n.id || c.to === n.id).length;
     const title = `${n.label}${n.in_case ? ' (a host of the case)' : ''}: ${count} connection${count === 1 ? '' : 's'}` + (n.detail ? `. ${n.detail}` : '');
     const g = sv('g', { class: cls, transform: `translate(${p.x},${p.y})`, tabindex: 0, role: 'button', 'aria-label': title },
@@ -374,7 +384,7 @@ function drawGraph(box, r) {
     g.addEventListener('pointerdown', (ev) => { drag = { x: ev.clientX, y: ev.clientY, moved: false }; g.setPointerCapture(ev.pointerId); ev.stopPropagation(); });
     g.addEventListener('pointermove', (ev) => {
       if (!drag) return;
-      const scale = w / svg.getBoundingClientRect().width;
+      const scale = svg.viewBox.baseVal.width / svg.getBoundingClientRect().width;
       const dx = (ev.clientX - drag.x) * scale, dy = (ev.clientY - drag.y) * scale;
       if (Math.abs(dx) + Math.abs(dy) > 2) drag.moved = true;
       drag.x = ev.clientX; drag.y = ev.clientY;
@@ -390,6 +400,7 @@ function drawGraph(box, r) {
     });
     g.addEventListener('pointerup', (ev) => { const moved = drag && drag.moved; drag = null; ev.stopPropagation(); if (!moved) pickConn(on ? null : { node: n.id }); });
     g.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') pickConn(on ? null : { node: n.id }); });
+    g.addEventListener('click', (ev) => ev.stopPropagation());
     svg.append(g);
   }
   // A host picked opens into its accounts and USB storage devices, on the
@@ -398,7 +409,7 @@ function drawGraph(box, r) {
   const placeLeaves = () => {
     if (!leafEls.length) return;
     const p = at[CN.pick.node];
-    const n = leafEls.length, arc = Math.min(Math.PI * 1.6, (n - 1) * 0.8), R = 92;
+    const n = leafEls.length, arc = Math.min(Math.PI * 1.7, (n - 1) * 1.1), R = 115;
     const spots = (base) => leafEls.map((x, i) => {
       const a = base + (n > 1 ? -arc / 2 + (arc * i) / (n - 1) : 0);
       return { x: Math.max(60, Math.min(w - 60, p.x + R * Math.cos(a))), y: Math.max(16, Math.min(hgt - 24, p.y + R * Math.sin(a))) };
@@ -435,7 +446,7 @@ function drawGraph(box, r) {
         onclick: (ev) => { ev.stopPropagation(); open(); }, onkeydown: (ev) => { if (ev.key === 'Enter') open(); } },
         sv('title', {}, title + '. Click for its records on the timeline.'),
         l.kind === 'device' ? sv('rect', { x: -6, y: -6, width: 12, height: 12, rx: 2 }) : sv('circle', { r: 6 }),
-        sv('text', { y: 19, class: 'cnlabel' }, short.length > 24 ? short.slice(0, 23) + '…' : short));
+        sv('text', { y: 19, class: 'cnlabel' }, short.length > 20 ? short.slice(0, 19) + '…' : short));
       leafEls.push({ line, g });
       svg.insertBefore(line, svg.firstChild.nextSibling);
       svg.append(g);
@@ -446,8 +457,66 @@ function drawGraph(box, r) {
     }
     placeLeaves();
   }
-  svg.addEventListener('click', () => { if (CN.pick) pickConn(null); });
+  panGraph(svg, w, hgt);
   box.replaceChildren(svg);
+}
+
+// Dragging the background pans the graph and the wheel zooms it; a click
+// on the background without moving shows everything again.
+function panGraph(svg, w, hgt) {
+  let drag = null;
+  const scale = () => svg.viewBox.baseVal.width / (svg.getBoundingClientRect().width || w);
+  const set = (vb) => { CN.vb = vb; svg.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`); };
+  svg.addEventListener('pointerdown', (ev) => {
+    if (ev.button !== 0 || ev.target.closest('.cnnode, .cnleaf, .cnhit')) return;
+    drag = { x: ev.clientX, y: ev.clientY, moved: false, id: ev.pointerId };
+  });
+  svg.addEventListener('pointermove', (ev) => {
+    if (!drag) return;
+    const dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
+    if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+    if (!drag.moved) try { svg.setPointerCapture(drag.id); } catch (e) { /* a synthetic pointer */ }
+    drag.moved = true;
+    const k = scale(), vb = CN.vb || { x: 0, y: 0, w, h: hgt };
+    set({ x: vb.x - dx * k, y: vb.y - dy * k, w: vb.w, h: vb.h });
+    drag.x = ev.clientX; drag.y = ev.clientY;
+    svg.classList.add('panning');
+  });
+  let panned = false;
+  svg.addEventListener('pointerup', () => {
+    panned = !!(drag && drag.moved);
+    drag = null;
+    svg.classList.remove('panning');
+  });
+  svg.addEventListener('click', () => {
+    if (panned) { panned = false; return; }
+    if (CN.pick) pickConn(null);
+  });
+  svg.addEventListener('wheel', (ev) => {
+    ev.preventDefault();
+    const b = svg.getBoundingClientRect(), vb = CN.vb || { x: 0, y: 0, w, h: hgt };
+    const fx = (ev.clientX - b.left) / b.width, fy = (ev.clientY - b.top) / b.height;
+    set(zoomed(vb, ev.deltaY < 0 ? 1.2 : 1 / 1.2, vb.x + fx * vb.w, vb.y + fy * vb.h, w, hgt));
+  }, { passive: false });
+}
+
+// zoomed is the view box vb zoomed by f about the point (cx, cy), no
+// further out than the whole graph and no further in than eight times.
+function zoomed(vb, f, cx, cy, w, hgt) {
+  const nw = Math.min(w, Math.max(w / 8, vb.w / f)), nh = nw * (hgt / w);
+  return { x: cx - (cx - vb.x) * (nw / vb.w), y: cy - (cy - vb.y) * (nh / vb.h), w: nw, h: nh };
+}
+
+function zoomGraph(how) {
+  if (!CN.pos) return;
+  const { w, h: hgt } = CN.pos;
+  if (how === 'fit') CN.vb = null;
+  else {
+    const vb = CN.vb || { x: 0, y: 0, w, h: hgt };
+    CN.vb = zoomed(vb, how === 'in' ? 1.3 : 1 / 1.3, vb.x + vb.w / 2, vb.y + vb.h / 2, w, hgt);
+    if (CN.vb.w >= w) CN.vb = null;
+  }
+  drawConnections();
 }
 
 // ---- lanes ----
@@ -598,14 +667,6 @@ function drawConnRows() {
   if (CN.pick) {
     out.push(h('p', { class: 'hint cnpicked' }, CN.pick.event != null ? `Connections that event #${CN.pick.event} is part of (${CN.pick.what})`
       : CN.pick.node ? `Connections to and from ${cnLabel(CN.pick.node)}` : `${KIND_WORDS[CN.pick.kind] || ''} connections from ${cnLabel(CN.pick.from)} to ${cnLabel(CN.pick.to)}`));
-    const leaves = CN.pick.node ? nodeLeaves(CN.pick.node) : [];
-    if (leaves.length) {
-      out.push(h('div', { class: 'cnleaves' }, ...[['account', 'Accounts of these connections'], ['device', 'USB storage devices in its SYSTEM hive']].map(([k, head]) => {
-        const ls = leaves.filter((l) => l.kind === k);
-        return ls.length ? h('div', {}, h('b', {}, head + ': '), h('ul', { class: 'cnevents' }, ...ls.map((l) => h('li', {}, leafWords(l).replace(/^(Account|USB storage device) /, ''), ' ',
-          h('button', { class: 'link', onclick: () => showEvents(l.events.map((e) => e.id)) }, `its ${l.events.length} record${l.events.length === 1 ? '' : 's'}`))))) : '';
-      })));
-    }
   }
   for (const c of list) {
     const on = CN.selected === c;
@@ -643,9 +704,8 @@ function drawConnRows() {
         h('button', { class: 'link', onclick: () => showEvents(c.event_ids) }, `Show the ${c.event_ids.length} event${c.event_ids.length === 1 ? '' : 's'} on the timeline`))));
   }
   if (!list.length && CN.pick && CN.pick.event != null) {
-    out.push(h('p', { class: 'anempty' }, `Event #${CN.pick.event} is not part of any connection. Network logons and connections to file sharing support a connection but are not shown on their own, and records of a host's own work (a service, task or WMI program with no network logon near it) are taken as local: the notes below list those.`));
+    out.push(h('p', { class: 'anempty' }, `Event #${CN.pick.event} is not part of any connection. Network logons and connections to file sharing support a connection but are not shown on their own, and records of a host's own work (a service, task or WMI program with no network logon near it) are taken as local: the notes in the side panel list those.`));
   } else if (!list.length) out.push(h('p', { class: 'anempty' }, !r.events ? 'No records of connections have been found in the evidence yet. Add the hosts\' Security, System and Terminal Services logs.' : CN.kind ? 'No connections of this kind were found.' : 'No connections were found.'));
-  out.push(h('div', { class: 'anhead' }, h('h3', {}, 'Notes'), h('ul', { class: 'annotes' }, ...r.notes.map((n) => h('li', {}, n)))));
   $('cnrows').replaceChildren(...out);
 }
 
@@ -659,6 +719,126 @@ function setupConnections() {
     $(id).addEventListener('keydown', (ev) => { if (ev.key === 'Enter') applyCnRange(); });
   }
   $('cnwhole').onclick = () => setCnRange(null, null);
+  let ft;
+  $('cnsearch').addEventListener('input', (ev) => { clearTimeout(ft); ft = setTimeout(() => findConns(ev.target.value), 200); });
+  $('cnzoom').addEventListener('click', (ev) => { const b = ev.target.closest('button'); if (b) zoomGraph(b.dataset.zoom); });
+  $('cnwrap').classList.add('graph');
   let rt;
   window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { if (S.view === 'connections' && CN.rep) { CN.pos = null; drawConnections(); } }, 200); });
+}
+
+// ---- the side panel ----
+function drawSide() {
+  const r = CN.rep;
+  if (!r) return;
+  drawSelected();
+  $('cnnotes').replaceChildren(...r.notes.map((n) => h('li', {}, n)));
+  $('cnnotescount').textContent = fmtInt(r.notes.length);
+  const read = r.read || [];
+  const done = read.filter((x) => x.done).length;
+  $('cnreadcount').textContent = `${done} kinds, ${read.length - done} not yet`;
+  $('cnread').replaceChildren(...read.map((x) => h('li', { class: x.done ? 'done' : 'todo' },
+    h('span', { class: 'cntick', 'aria-label': x.done ? 'read' : 'not read yet' }, x.done ? '✓' : '–'),
+    h('div', {}, h('b', {}, x.what),
+      ...[['On the computer connecting', x.connecting], ['On the computer connected to', x.connected_to], ['', x.either]]
+        .filter(([, l]) => l && l.length).map(([k, l]) => h('div', { class: 'cnreadline' }, k ? h('span', { class: 'dimc' }, k + ': ') : '', l.join('; '))),
+      x.why ? h('div', { class: 'cnreadline dimc' }, x.done ? x.why : 'Not read yet: ' + x.why) : ''))));
+  $('cnrules').replaceChildren(...(r.rules || []).map((n) => h('li', {}, n)));
+}
+
+// What is picked: a host with its names, addresses, accounts and devices;
+// an arrow; or an event of the timeline.
+function drawSelected() {
+  const r = CN.rep, p = CN.pick, box = $('cnsel');
+  const head = h('div', { class: 'cncardhead' }, 'Selected');
+  if (!p) {
+    box.replaceChildren(head, h('p', { class: 'hint cnselhint' }, 'Click a host or an arrow on the graph, or find one above. A host of the case opens into its accounts and USB storage devices; drag the background to move about, and the wheel or the buttons to zoom.'));
+    return;
+  }
+  const list = pickedConns();
+  const ids = [...new Set(list.flatMap((c) => c.event_ids))].sort((a, b) => a - b);
+  const props = [];
+  let name;
+  if (p.node) {
+    const n = r.nodes.find((x) => x.id === p.node) || { label: p.node };
+    const hi = (r.hosts || []).find((x) => 'host:' + x.name === p.node);
+    name = n.label;
+    props.push(['Is', n.in_case ? 'a host of the case' : ({ address: 'an address outside the case', computer: 'a computer outside the case', loopback: 'this computer, by its loopback address' }[n.kind] || n.kind)]);
+    if (hi) {
+      if (hi.names && hi.names.length > 1) props.push(['Names', hi.names.join(', ')]);
+      const ips = [...new Set([...(hi.ips || []), ...(hi.hive_ips || []).map((f) => f.value)])];
+      if (ips.length) props.push(['Addresses', ips.join(', ')]);
+      if (hi.clock_text) props.push(['Clock', hi.clock_text]);
+    }
+    if (n.detail) props.push(['Note', n.detail]);
+    props.push(['Connections', `${fmtInt(list.filter((c) => c.to === p.node).length)} to it, ${fmtInt(list.filter((c) => c.from === p.node).length)} from it`]);
+  } else if (p.event != null) {
+    name = `Event #${p.event}`;
+    props.push(['Is', p.what || '']);
+    props.push(['Connections', fmtInt(list.length)]);
+  } else {
+    name = `${cnLabel(p.from)} → ${cnLabel(p.to)}`;
+    props.push(['Kind', KIND_WORDS[p.kind] || p.kind]);
+    props.push(['Connections', `${fmtInt(list.length)}: ${fmtInt(list.filter((c) => c.confidence === 'strong').length)} strong, ${fmtInt(list.filter((c) => c.confidence === 'possible').length)} possible, ${fmtInt(list.filter((c) => c.confidence === 'one-end').length)} at one end only`]);
+  }
+  const timed = list.filter((c) => !c.undated).map((c) => BigInt(c.start_utc)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  if (timed.length) props.push(['Time', fmtNs(timed[0], 0) + (timed.length > 1 && timed[timed.length - 1] !== timed[0] ? ' to ' + fmtNs(timed[timed.length - 1], 0) : '') + ' UTC']);
+  const leaves = p.node ? nodeLeaves(p.node) : [];
+  box.replaceChildren(head, h('div', { class: 'cnselname' }, name),
+    h('dl', { class: 'cnprops' }, ...props.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)])),
+    leaves.length ? h('div', { class: 'cnleaves' }, ...[['account', 'Accounts of its connections'], ['device', 'USB storage devices in its SYSTEM hive']].map(([k, title]) => {
+      const ls = leaves.filter((l) => l.kind === k);
+      return ls.length ? h('div', {}, h('div', { class: 'cnsubhead' }, title), h('ul', { class: 'cnevents' }, ...ls.map((l) => h('li', {}, leafWords(l).replace(/^(Account|USB storage device) /, ''), ' ',
+        h('button', { class: 'link', onclick: () => showEvents(l.events.map((e) => e.id)) }, `its ${l.events.length} record${l.events.length === 1 ? '' : 's'}`))))) : '';
+    })) : '',
+    ids.length ? h('div', { class: 'cnselact' }, h('button', { class: 'link', onclick: () => showEvents(ids) }, `Show their ${fmtInt(ids.length)} events on the timeline`)) : '');
+}
+
+// ---- finding ----
+// Hosts and addresses by name, other names and addresses; accounts and
+// devices by name and serial; connections by account and by what their
+// reasons name (paths, hashes, shares, services).
+function findConns(q) {
+  q = q.trim().toLowerCase();
+  CN.q = q;
+  const r = CN.rep, out = [], found = new Set();
+  if (r && q.length >= 2) {
+    const has = (...xs) => xs.some((x) => x && String(x).toLowerCase().includes(q));
+    for (const n of r.nodes) {
+      const hi = (r.hosts || []).find((x) => 'host:' + x.name === n.id);
+      if (has(n.label, ...(hi ? [...(hi.names || []), ...(hi.ips || []), ...(hi.hive_ips || []).map((f) => f.value)] : []))) {
+        found.add(n.id);
+        out.push({ label: n.label, what: n.in_case ? 'host' : 'outside the case', go: () => pickConn({ node: n.id }) });
+      }
+    }
+    for (const l of r.leaves || []) {
+      if (has(l.label, l.detail)) {
+        found.add(l.node);
+        out.push({ label: l.label, what: `${l.kind === 'device' ? 'USB device' : 'account'} on ${cnLabel(l.node)}`, go: () => pickConn({ node: l.node }) });
+      }
+    }
+    for (const c of r.connections) {
+      if (has(c.account, ...c.reasons)) {
+        found.add(c.from); found.add(c.to);
+        out.push({ label: `${c.undated ? 'no time' : fmtNs(c.start_utc, 0).slice(5, 16)}  ${cnLabel(c.from)} → ${cnLabel(c.to)}`, what: KIND_WORDS[c.kind] || c.kind, go: () => showConn(c) });
+      }
+    }
+  }
+  CN.found = q.length >= 2 ? found : null;
+  const shown = out.slice(0, 40);
+  $('cnfound').replaceChildren(...(q.length < 2 ? [] : !out.length ? [h('p', { class: 'hint' }, 'Nothing found.')]
+    : [h('p', { class: 'hint' }, `${fmtInt(out.length)} found${out.length > shown.length ? `, the first ${shown.length} listed` : ''}`),
+      h('ul', { class: 'cnfoundlist' }, ...shown.map((x) => h('li', {}, h('button', { class: 'cnfounditem', onclick: x.go }, h('span', {}, x.label), h('i', {}, x.what)))))]));
+  if (CN.rep && CN.mode === 'graph') drawConnections();
+}
+
+// Opens one connection in the list, showing every kind and time if it is
+// hidden by them.
+function showConn(c) {
+  CN.pick = null;
+  $('cnall').hidden = true;
+  if (CN.kind && CN.kind !== c.kind) setCnKind('');
+  if (!inRange(c)) setCnRange(null, null);
+  CN.selected = null;
+  selectConn(c);
 }

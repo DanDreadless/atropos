@@ -55,3 +55,67 @@ func TestDeviceLinks(t *testing.T) {
 		t.Errorf("B to C: %+v", bc)
 	}
 }
+
+// The same file on three hosts, seen by Sysmon (SHA-1 and SHA-256), by
+// Amcache (SHA-1 alone) and by a browser download (SHA-256 alone): one file,
+// linked A to B to C, renamed on B. A Windows file on two hosts, and a file
+// on one, are not links.
+func TestFileLinks(t *testing.T) {
+	c := &connCtx{hosts: map[string]*store.HostIdentity{}, byName: map[string]string{}}
+	for _, n := range []string{"A", "B", "C"} {
+		c.hosts[n] = &store.HostIdentity{Name: n}
+		c.byName[n] = n
+	}
+	at := func(hm string) int64 {
+		tm, _ := time.Parse("15:04", hm)
+		return time.Date(2026, 11, 20, tm.Hour(), tm.Minute(), 0, 0, time.UTC).UnixNano()
+	}
+	sha1, sha256 := "sha1:"+strings.Repeat("1a", 20), "sha256:"+strings.Repeat("2b", 32)
+	n := int64(0)
+	file := func(host, hm, what, path string, hashes ...string) store.ObservedEvent {
+		n++
+		e := store.ObservedEvent{EventID: n, TSUTC: at(hm), Host: host, Act: "file", What: what}
+		for _, h := range hashes {
+			e.Items = append(e.Items, store.Observable{Kind: "hash", Value: h, Role: "object"})
+		}
+		e.Items = append(e.Items, store.Observable{Kind: "file", Value: path, Role: "object"})
+		return e
+	}
+	notepad := "sha1:" + strings.Repeat("3c", 20)
+	got := c.fileLinks([]store.ObservedEvent{
+		file("A", "08:00", "Program started (Sysmon 1): x", `C:\Users\a\Downloads\pd.exe`, sha1, sha256),
+		file("B", "09:00", "File recorded in Amcache with its SHA-1 (of the first 31.4 MB): x", `c:\windows\temp\svcupd.exe`, sha1),
+		file("C", "10:00", "File downloaded by the browser, with its SHA-256: x", `C:\Users\c\Downloads\pd.exe`, sha256),
+		file("A", "07:00", "File recorded in Amcache with its SHA-1 (of the first 31.4 MB): x", `c:\windows\system32\notepad.exe`, notepad),
+		file("B", "07:00", "File recorded in Amcache with its SHA-1 (of the first 31.4 MB): x", `c:\windows\system32\notepad.exe`, notepad),
+		file("C", "07:00", "Program started (Sysmon 1): x", `C:\Tools\only-here.exe`, "sha1:"+strings.Repeat("4d", 20)),
+	})
+	// A file Defender detected in System32 on two hosts is shown.
+	det := "sha256:" + strings.Repeat("5e", 32)
+	if d := c.fileLinks([]store.ObservedEvent{
+		file("A", "11:00", "File detected by Defender, with its hashes: x", `C:\Windows\System32\evil.dll`, det),
+		file("B", "11:30", "File detected by Defender, with its hashes: x", `C:\Windows\System32\evil.dll`, det),
+	}); len(d) != 1 || d[0].From != "host:A" || d[0].To != "host:B" {
+		t.Errorf("Defender detections in System32: %+v", d)
+	}
+	if len(got) != 2 {
+		t.Fatalf("%d links: %+v", len(got), got)
+	}
+	ab, bc := got[0], got[1]
+	r := strings.Join(ab.Reasons, " | ")
+	if ab.Kind != "file" || ab.From != "host:A" || ab.To != "host:B" || time.Unix(0, ab.Start).UTC().Format("15:04") != "09:00" ||
+		!strings.Contains(r, "the same file, by its SHA-1 "+strings.Repeat("1a", 20)+" and SHA-256 "+strings.Repeat("2b", 32)+", is on both computers") ||
+		!strings.Contains(r, `on A as C:\Users\a\Downloads\pd.exe, first recorded 2026-11-20 08:00:00; on B as c:\windows\temp\svcupd.exe, first recorded 2026-11-20 09:00:00`) ||
+		!strings.Contains(r, "it was renamed") || !strings.Contains(r, "Amcache's SHA-1 covers only") {
+		t.Errorf("A to B: %s -> %s: %s", ab.From, ab.To, r)
+	}
+	if r := strings.Join(bc.Reasons, " | "); bc.From != "host:B" || bc.To != "host:C" || !strings.Contains(r, "renamed") {
+		t.Errorf("B to C: %s -> %s: %s", bc.From, bc.To, r)
+	}
+	for p, want := range map[string]bool{`C:\Windows\System32\x.exe`: true, `c:\windows\temp\x.exe`: false, `\SystemRoot\System32\drivers\x.sys`: true,
+		`C:\Program Files (x86)\App\a.exe`: true, `C:\ProgramData\Microsoft\Windows Defender\x.exe`: true, `C:\ProgramData\x.exe`: false, `C:\Users\a\x.exe`: false} {
+		if commonPlace(p) != want {
+			t.Errorf("commonPlace(%s) = %v", p, !want)
+		}
+	}
+}

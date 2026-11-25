@@ -128,36 +128,60 @@
     <div id="anrows" class="anrows"></div>
   </section>
 
-  <section id="view-connections" class="view" hidden>
-    <div class="bar">
-      <span id="cnmode" class="anmode">
-        <button data-mode="graph" class="on" title="Hosts and addresses, with an arrow for each way they connected">Graph</button>
-        <button data-mode="lanes" title="One lane per host, in time order: for following a path from host to host">Lanes</button>
-      </span>
-      <span id="cnkind" class="anmode" aria-label="Kind of connection">
-        <button data-kind="" class="on">All</button>
-        <button data-kind="rdp" title="Remote Desktop sessions">Remote Desktop</button>
-        <button data-kind="smb" title="Shares connected to, files copied">File shares</button>
-        <button data-kind="exec" title="PsExec and its kind, services and tasks created over the network, PowerShell remoting (WinRM), WMI and DCOM">Started remotely</button>
-        <button data-kind="usb" title="A USB storage device recorded in more than one host's SYSTEM hive, by its serial">USB devices</button>
-      </span>
-      <span id="cnrange" class="cnrange" role="group" aria-label="Period shown">
-        <input id="cnfrom" class="cntime" placeholder="from (UTC)" aria-label="From (UTC)" title="Show only connections from this time (UTC): 2026-11-20 09:00, or 09:00 for the day of the first connection. Press Enter.">
-        <span class="dimc">to</span>
-        <input id="cnto" class="cntime" placeholder="to (UTC)" aria-label="To (UTC)" title="Show only connections up to this time (UTC); a date alone means the end of that day. Press Enter.">
-        <button id="cnwhole" hidden title="Show the connections of every time again">Whole time</button>
-      </span>
-      <span id="cnsummary" class="summary"></span>
-      <span class="spacer"></span>
-      <button id="cnall" hidden>Show all</button>
-      <button id="cnrun">Run again</button>
+  <section id="view-connections" class="view cnview" hidden>
+    <div class="cnlayout">
+      <aside class="cnside" aria-label="Find, choose and inspect connections">
+        <div class="cncard">
+          <input type="search" id="cnsearch" placeholder="Find a host, address, account, file or serial" aria-label="Find in the connections" autocomplete="off" spellcheck="false">
+          <div id="cnfound" class="cnfound"></div>
+        </div>
+        <div class="cncard">
+          <div class="cncardhead">View</div>
+          <span id="cnmode" class="anmode">
+            <button data-mode="graph" class="on" title="Hosts and addresses, with an arrow for each way they connected">Graph</button>
+            <button data-mode="lanes" title="One lane per host, in time order: for following a path from host to host">Lanes</button>
+          </span>
+          <div id="cnkind" class="cnkinds" role="group" aria-label="Kind of connection">
+            <button data-kind="" class="on"><span>All</span><i></i></button>
+            <button data-kind="rdp" title="Remote Desktop sessions"><span>Remote Desktop</span><i></i></button>
+            <button data-kind="smb" title="Shares connected to, files copied"><span>File shares</span><i></i></button>
+            <button data-kind="exec" title="PsExec and its kind, services and tasks created over the network, PowerShell remoting (WinRM), WMI and DCOM"><span>Started remotely</span><i></i></button>
+            <button data-kind="usb" title="A USB storage device recorded in more than one host's SYSTEM hive, by its serial"><span>USB devices</span><i></i></button>
+            <button data-kind="file" title="A file with the same hash on more than one host (Sysmon, Amcache, a browser download), outside Windows and Program Files"><span>Same files</span><i></i></button>
+          </div>
+        </div>
+        <div class="cncard">
+          <div class="cncardhead">Period <span class="dimc">(UTC)</span></div>
+          <div id="cnrange" class="cnrange" role="group" aria-label="Period shown">
+            <input id="cnfrom" class="cntime" placeholder="from: 2026-11-20 09:00" aria-label="From (UTC)" title="Show only connections from this time (UTC): 2026-11-20 09:00, or 09:00 for the day of the first connection. Press Enter.">
+            <input id="cnto" class="cntime" placeholder="to: 10:00" aria-label="To (UTC)" title="Show only connections up to this time (UTC); a date alone means the end of that day. Press Enter.">
+            <button id="cnwhole" hidden title="Show the connections of every time again">Whole time</button>
+          </div>
+        </div>
+        <div class="cncard" id="cnsel" aria-live="polite"></div>
+        <details class="cncard cnfold" id="cnnotesbox"><summary>Notes <i id="cnnotescount"></i></summary><ul id="cnnotes" class="cnnotes"></ul></details>
+        <details class="cncard cnfold"><summary>What is read <i id="cnreadcount"></i></summary><ul id="cnread" class="cnchecks"></ul></details>
+        <details class="cncard cnfold"><summary>How ends are paired</summary><ul id="cnrules" class="cnnotes"></ul></details>
+        <details class="cncard cnfold"><summary>About this view</summary><p class="cnabout">Pairs the two ends of each connection found in the hosts' own logs (and, at the connecting end, the user's registry and jump lists): a Remote Desktop client with the logon the other computer recorded, a command naming a share with that share's access, PsExec, PowerShell remoting, WMI or DCOM run on one computer with the service, session or program it started on the other. Ends are matched on the names and addresses stated for each host on the Details tab (and the addresses and full name each host's own SYSTEM hive records, and addresses learned from logon records), with each host's stated clock difference taken off. A connection seen at one end only is shown too. These are readings of the evidence, consistent with a connection; open the events to check them.</p></details>
+        <div class="cnsidefoot">
+          <button id="cnall" hidden>Show all</button>
+          <button id="cnrun">Run again</button>
+        </div>
+      </aside>
+      <div class="cnmain">
+        <div class="cntop"><span id="cnsummary" class="summary"></span></div>
+        <div class="cnwrap" id="cnwrap">
+          <div id="cncanvas" class="cncanvas" tabindex="0" aria-label="Connections drawing"></div>
+          <div id="cnzoom" class="cnzoom" role="group" aria-label="Zoom">
+            <button data-zoom="in" title="Zoom in" aria-label="Zoom in">+</button>
+            <button data-zoom="fit" title="Fit the whole graph" aria-label="Fit the whole graph">⤢</button>
+            <button data-zoom="out" title="Zoom out" aria-label="Zoom out">−</button>
+          </div>
+          <div id="cnlegend" class="cnlegend"></div>
+        </div>
+        <div id="cnrows" class="anrows cnrows"></div>
+      </div>
     </div>
-    <p class="hint anintro">Pairs the two ends of each connection found in the hosts' own logs (and, at the connecting end, the user's registry and jump lists): a Remote Desktop client with the logon the other computer recorded, a command naming a share with that share's access, PsExec, PowerShell remoting, WMI or DCOM run on one computer with the service, session or program it started on the other. Ends are matched on the names and addresses stated for each host on the Details tab (and the addresses and full name each host's own SYSTEM hive records, and addresses learned from logon records), with each host's stated clock difference taken off. A connection seen at one end only is shown too. These are readings of the evidence, consistent with a connection; open the events to check them.</p>
-    <div class="cnwrap">
-      <div id="cncanvas" class="cncanvas" tabindex="0" aria-label="Connections drawing"></div>
-      <div id="cnlegend" class="cnlegend"></div>
-    </div>
-    <div id="cnrows" class="anrows"></div>
   </section>
 
   <section id="view-details" class="view" hidden>
@@ -432,7 +456,8 @@
         <p>Add each host's Security, System, Terminal Services and WinRM logs (and Sysmon's, if it ran), and its users' <code>NTUSER.DAT</code> and jump lists, under that host. Not read yet: the WMI-Activity log, and shortcut files (their times are the target file's, not when it was opened).</p>
         <p><b>How the ends are paired.</b> Each host's events within two minutes of each other are one end of a connection. The two ends pair when each names the other (the client named one of the other host's names or addresses, and the logon came from one of the first host's) and they are within ten minutes of each other once each host's <b>clock difference</b> from the Details tab is taken off. They pair <b>strongly</b> when within a minute and with the same account at both ends; otherwise <b>possibly</b>, and the reasons say why (further apart, or different accounts: other credentials can be typed at the logon prompt). A connection seen at <b>one end only</b> is listed too, with what that may mean: the other computer is not in the case, its logs are missing, the connection failed, or another program was used. A file share or remote program is often seen at the target only, because few computers log the commands they run.</p>
         <p><b>Names and addresses.</b> Matching depends on what you state for each host on the Details tab: <i>Other names</i> (its full name in the domain, a former name) and <i>IP addresses</i>. When a logon record gives both a workstation's name and the address it came from, that address is taken as that host's, and the notes say so; an address seen for two hosts is not used. Clock differences are written as, for example, <code>3 minutes ahead</code>, <code>90 seconds behind</code> or <code>-1m30s</code>.</p>
-        <p><b>The views.</b> <i>Graph</i> draws each host as a large circle and each other computer or address as a small one, with an arrow for each direction and kind of connection, labelled with the kind and how many times; drag a circle to move it, click one to list only its connections, click an arrow for those between two. <i>Lanes</i> gives each computer a lane, with time across, and draws each connection as an arrow from lane to lane: the view for following a path from host to host. A filled dot marks an end found in the evidence, a hollow one an end that was not. A bar along the lane of the computer connected to is a Remote Desktop session, from its start until it was logged off, or disconnected when no logoff was found; the list gives its length ("session 39 min") and the reasons say which records ended it. A session's end is found by the logon id the logon gave (Security 4634, 4647 and 4779 carry it) or by the session number and account (LocalSessionManager 23 and 24); a disconnection with no logoff after it may be a session left open or taken up again later. To look at a period, type its start and end (UTC) in the boxes beside the kinds, as 2026-11-20 09:00, or 09:00 for the day of the first connection (a date alone as the end means the end of that day), and press Enter; or drag across the lanes. Both views and the list then show only the connections in it, and a session that began earlier and runs into it; the lanes span just that period, and such a session is drawn as its bar from the edge. Connections with no time are left out of a period, and the summary says how many. <b>Whole time</b> shows everything again. Clicking a host of the case on the graph also opens it into small nodes around it: the accounts its connections name (signed in to it, or connecting out from it), and the USB storage devices its SYSTEM hive records (Enum\USBSTOR: when each was first installed, first and last connected and last removed, by the host's clock corrected). The list repeats them, with the times, a device's serial, and a link to the records; a small node opens its records on the timeline. A USB storage device whose serial is in the SYSTEM hives of two hosts is itself a link between them (the kind <b>USB devices</b>), drawn from the host that had it first to the next, at the time it first arrived there; its reasons give its times on each and say whether they overlap (it went back and forth). A serial shows the same device, not who carried it or what was copied. A serial Windows made up for a device with none (its second character is &amp;) belongs to one computer and is never matched. Each connection lists its reasons, opens each end's events (with the time as that host's clock had it), and opens all of them on the timeline. The other way round, an event on the timeline that is read for this tab says so in its panel ("Read for the Connections tab: …") with <b>Show its connections</b>, which opens the tab on the connections it is part of, the rest dimmed; <b>Show all</b> brings back the others. An event can be read and still be part of none: a network logon alone, or a service or task taken as local (the notes say which). A connection 127.0.0.1 → host is a session from the computer itself, which is how a tunnel (a port forwarded over SSH, a proxy) shows.</p>
+        <p><b>The layout.</b> The panel on the left finds and chooses; the drawing fills the rest of the window, with the list of connections under it. <b>Find</b> takes part of a host's name, other name or address, an account, a USB device or its serial, or anything a connection's reasons name (a path, a hash, a share, a service): it lists what matches, marks the hosts involved on the graph, and opens what you click. <b>View</b> switches between the graph and the lanes and chooses a kind of connection, each with its count. <b>Period</b> limits both to a stretch of time. <b>Selected</b> shows what you picked: a host with its names, addresses, clock, the count of its connections each way, its accounts and USB devices, and a link to all their events on the timeline; or an arrow, with how many of its connections are strong, possible or seen at one end. Folded away underneath: the <b>Notes</b> for this case (clock corrections, address conflicts, records taken as local, evidence still being read), <b>What is read</b> (each kind of connection ticked, with the records read at each end, and what is not read yet), <b>How ends are paired</b>, and <b>About this view</b>. The graph zooms with the buttons at its top right or the mouse wheel, and moves when you drag its background; a click on the background shows everything again.</p>
+        <p><b>The views.</b> <i>Graph</i> draws each host as a large circle and each other computer or address as a small one, with an arrow for each direction and kind of connection, labelled with the kind and how many times; drag a circle to move it, click one to list only its connections, click an arrow for those between two. <i>Lanes</i> gives each computer a lane, with time across, and draws each connection as an arrow from lane to lane: the view for following a path from host to host. A filled dot marks an end found in the evidence, a hollow one an end that was not. A bar along the lane of the computer connected to is a Remote Desktop session, from its start until it was logged off, or disconnected when no logoff was found; the list gives its length ("session 39 min") and the reasons say which records ended it. A session's end is found by the logon id the logon gave (Security 4634, 4647 and 4779 carry it) or by the session number and account (LocalSessionManager 23 and 24); a disconnection with no logoff after it may be a session left open or taken up again later. To look at a period, type its start and end (UTC) in the boxes beside the kinds, as 2026-11-20 09:00, or 09:00 for the day of the first connection (a date alone as the end means the end of that day), and press Enter; or drag across the lanes. Both views and the list then show only the connections in it, and a session that began earlier and runs into it; the lanes span just that period, and such a session is drawn as its bar from the edge. Connections with no time are left out of a period, and the summary says how many. <b>Whole time</b> shows everything again. Clicking a host of the case on the graph also opens it into small nodes around it: the accounts its connections name (signed in to it, or connecting out from it), and the USB storage devices its SYSTEM hive records (Enum\USBSTOR: when each was first installed, first and last connected and last removed, by the host's clock corrected). The list repeats them, with the times, a device's serial, and a link to the records; a small node opens its records on the timeline. A USB storage device whose serial is in the SYSTEM hives of two hosts is itself a link between them (the kind <b>USB devices</b>), drawn from the host that had it first to the next, at the time it first arrived there; its reasons give its times on each and say whether they overlap (it went back and forth). A serial shows the same device, not who carried it or what was copied. A serial Windows made up for a device with none (its second character is &amp;) belongs to one computer and is never matched. A file with the same hash on two hosts is a link too (the kind <b>Same files</b>): the SHA-1 or SHA-256 Sysmon gives of a program started, a driver loaded or a file written or deleted, Amcache's SHA-1, a browser download's SHA-256, and the SHA-1 and SHA-256 of a file Defender detected (its detection history, where Defender tracked the file). The reasons give its paths and first record on each, say when its name differs (renamed, or saved under another name), and that Amcache's SHA-1 covers only a file's first 31.4 MB and its time is when its key was last written. Files only ever under Windows (but not its Temp folder), Program Files or ProgramData\Microsoft are left out: every computer has its own copy of those. A file Defender detected is shown wherever it was. Each connection lists its reasons, opens each end's events (with the time as that host's clock had it), and opens all of them on the timeline. The other way round, an event on the timeline that is read for this tab says so in its panel ("Read for the Connections tab: …") with <b>Show its connections</b>, which opens the tab on the connections it is part of, the rest dimmed; <b>Show all</b> brings back the others. An event can be read and still be part of none: a network logon alone, or a service or task taken as local (the notes say which). A connection 127.0.0.1 → host is a session from the computer itself, which is how a tunnel (a port forwarded over SSH, a proxy) shows.</p>
         <p>Like the analysis checks, this adds nothing to the case and is recorded in the audit log when run. A pair is consistent with one connection; it does not prove it.</p>
 
         <h2 id="h-details">Case and host details</h2>

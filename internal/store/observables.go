@@ -26,8 +26,12 @@ import (
 // network logon, which only supports the others. "device" is a USB storage
 // device in a computer's SYSTEM hive (its first install, first and last
 // connection, removal, and its key's last write): never a connection, it
-// is shown with the host it was plugged into. Hashes are to follow (the
-// plan, H.2).
+// is shown with the host it was plugged into, and links hosts that both
+// had it. "file" is a file's hash where a record gives one: Sysmon (the
+// Hashes of programs started, drivers loaded, files written, deleted or
+// blocked), Amcache's SHA-1 of the first 31.4 MB, and a browser download's
+// SHA-256; the same hash on two hosts links them. A record can be both a
+// "file" and another act (Sysmon 1 naming a remote computer).
 //
 // "rdp-named" and "smb-named" are the connecting computer's registry
 // naming a computer it connected to (the Remote Desktop server lists,
@@ -39,7 +43,7 @@ import (
 // item saying how it was started: service, task, wmi or winrm. The analysis
 // ties it to a network logon by time, and by account where it names one.
 
-const observablesVersion = 7
+const observablesVersion = 9
 
 const observablesSchema = `
 CREATE TABLE IF NOT EXISTS observables (
@@ -50,7 +54,7 @@ CREATE TABLE IF NOT EXISTS observables (
   host        TEXT NOT NULL,      -- the event's host
   act         TEXT NOT NULL,      -- what the event shows: rdp-out, rdp-in, smb-in, exec-out, logon-in...
   what        TEXT NOT NULL,      -- the event, briefly: "RDP client connecting (1024)"
-  kind        TEXT NOT NULL,      -- ip, host, account, share, file, service, task, class, program, via, logon, session, end, device, serial
+  kind        TEXT NOT NULL,      -- ip, host, account, share, file, service, task, class, program, via, logon, session, end, device, serial, hash
   value       TEXT NOT NULL,
   role        TEXT NOT NULL,      -- source, target, subject, object
   version     INTEGER NOT NULL
@@ -106,8 +110,9 @@ func (s *Store) computeObservables(runID int64) error {
 	// are filed as general log records.
 	rows, err := s.r.Query(`SELECT id, evidence_id, ts_utc, host, fields FROM events
 		WHERE run_id = ? AND source = 'evtx' AND (category IN ('account', 'network', 'execution', 'persistence')
-			OR (category = 'log' AND json_extract(fields, '$.event_id') = '10016'))
-		AND json_extract(fields, '$.channel') IN (?,?,?,?,?,?,?,?)`, runID, chSecurity, chRDPCli, chRCM, chLSM, chCoreTS, chSystem, chSysmon, chWinRM)
+			OR (category = 'log' AND json_extract(fields, '$.event_id') = '10016')
+			OR json_extract(fields, '$.channel') = ?)
+		AND json_extract(fields, '$.channel') IN (?,?,?,?,?,?,?,?)`, runID, chSysmon, chSecurity, chRDPCli, chRCM, chLSM, chCoreTS, chSystem, chSysmon, chWinRM)
 	if err != nil {
 		return err
 	}
@@ -119,8 +124,12 @@ func (s *Store) computeObservables(runID int64) error {
 			rows.Close()
 			return err
 		}
+		hashed := oe
 		if observeEvent(&oe, fields) {
 			found = append(found, oe)
+		}
+		if strings.Contains(fields, `"Hash`) && observeSysmonHash(&hashed, fields) {
+			found = append(found, hashed)
 		}
 	}
 	rows.Close()
@@ -131,9 +140,10 @@ func (s *Store) computeObservables(runID int64) error {
 	// registry's Remote Desktop server lists and MountPoints2, and jump
 	// list entries on a share; and USB storage devices.
 	rows, err = s.r.Query(`SELECT id, evidence_id, ts_utc, host, ts_type, path, fields FROM events
-		WHERE run_id = ? AND source IN ('registry', 'jumplist') AND ts_type IN (?,?,?,?,?,?,?,?,?)`,
+		WHERE run_id = ? AND source IN ('registry', 'jumplist', 'browser', 'defender') AND ts_type IN (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		runID, "rdp-client-server-key-last-write", "rdp-client-recent-key-last-write", "network-share-key-last-write", "jumplist-entry-last-used",
-		"usb-device-key-last-write", "device-first-installed", "device-first-arrival", "device-last-connected", "device-last-removed")
+		"usb-device-key-last-write", "device-first-installed", "device-first-arrival", "device-last-connected", "device-last-removed",
+		"amcache-file-recorded", "amcache-file-hash-recorded", "amcache-driver-recorded", "download-started", "download-finished", "defender-detection")
 	if err != nil {
 		return err
 	}
@@ -1021,6 +1031,9 @@ func observeArtefact(oe *ObservedEvent, typ, path, fieldsJSON string) bool {
 		Serial      string `json:"serial"`
 		Bus         string `json:"bus"`
 		Key         string `json:"key"`
+		SHA1Head    string `json:"sha1_first_31mb"`
+		SHA256      string `json:"sha256"`
+		SHA1        string `json:"sha1"`
 		Values      map[string]struct {
 			Data string `json:"data"`
 		} `json:"values"`
@@ -1116,6 +1129,37 @@ func observeArtefact(oe *ObservedEvent, typ, path, fieldsJSON string) bool {
 			app = "an application"
 		}
 		oe.Act, oe.What = "smb-out", "File on a share opened (jump list of "+app+"): "+path
+	case "amcache-file-recorded", "amcache-file-hash-recorded", "amcache-driver-recorded":
+		h := hexHash(f.SHA1Head, 40)
+		if h == "" {
+			return false
+		}
+		add("hash", "sha1:"+h, "object")
+		add("file", path, "object")
+		oe.Act, oe.What = "file", "File recorded in Amcache with its SHA-1 (of the first 31.4 MB): "+path
+	case "download-started", "download-finished":
+		h := hexHash(f.SHA256, 64)
+		if h == "" {
+			return false
+		}
+		add("hash", "sha256:"+h, "object")
+		add("file", path, "object")
+		oe.Act, oe.What = "file", "File downloaded by the browser, with its SHA-256: "+path
+	case "defender-detection":
+		// A detection history record gives the hashes of the file Defender
+		// tracked, where it tracked one.
+		h1, h256 := hexHash(f.SHA1, 40), hexHash(f.SHA256, 64)
+		if h1 == "" && h256 == "" {
+			return false
+		}
+		if h1 != "" {
+			add("hash", "sha1:"+h1, "object")
+		}
+		if h256 != "" {
+			add("hash", "sha256:"+h256, "object")
+		}
+		add("file", path, "object")
+		oe.Act, oe.What = "file", "File detected by Defender, with its hashes: "+path
 	case "device-first-installed", "device-first-arrival", "device-last-connected", "device-last-removed":
 		// Only storage: the USB bus also lists every mouse, hub and
 		// receiver, and SCSI the computer's own disks.
@@ -1142,6 +1186,80 @@ func observeArtefact(oe *ObservedEvent, typ, path, fieldsJSON string) bool {
 	default:
 		return false
 	}
+	return true
+}
+
+// hexHash is h in lower case when it is n hexadecimal digits and not all
+// zeros; otherwise "".
+func hexHash(h string, n int) string {
+	h = strings.ToLower(strings.TrimSpace(h))
+	if len(h) != n || strings.Trim(h, "0") == "" {
+		return ""
+	}
+	for _, c := range h {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return ""
+		}
+	}
+	return h
+}
+
+// sysmonHashed are the Sysmon records that give a file's hashes, with the
+// field naming the file and what the record is.
+var sysmonHashed = map[string][2]string{
+	"1":  {"Image", "Program started (Sysmon 1)"},
+	"6":  {"ImageLoaded", "Driver loaded (Sysmon 6)"},
+	"15": {"TargetFilename", "File stream written (Sysmon 15)"},
+	"23": {"TargetFilename", "File deleted (Sysmon 23)"},
+	"26": {"TargetFilename", "File deleted (Sysmon 26)"},
+	"29": {"TargetFilename", "Executable file written (Sysmon 29)"},
+}
+
+// observeSysmonHash reads the SHA-1 and SHA-256 of the file a Sysmon
+// record names ("SHA1=…,MD5=…,SHA256=…,IMPHASH=…", in Hashes or, for
+// 15, Hash).
+func observeSysmonHash(oe *ObservedEvent, fieldsJSON string) bool {
+	var f struct {
+		Channel string `json:"channel"`
+		EventID string `json:"event_id"`
+		Event   struct {
+			EventData map[string]any `json:"EventData"`
+		} `json:"event"`
+	}
+	if json.Unmarshal([]byte(fieldsJSON), &f) != nil || f.Channel != chSysmon {
+		return false
+	}
+	which, ok := sysmonHashed[f.EventID]
+	if !ok {
+		return false
+	}
+	get := func(k string) string { s, _ := f.Event.EventData[k].(string); return strings.TrimSpace(s) }
+	file := get(which[0])
+	hashes := get("Hashes")
+	if hashes == "" {
+		hashes = get("Hash")
+	}
+	if file == "" || hashes == "" {
+		return false
+	}
+	for _, part := range strings.Split(hashes, ",") {
+		k, v, _ := strings.Cut(part, "=")
+		switch strings.ToUpper(strings.TrimSpace(k)) {
+		case "SHA1":
+			if h := hexHash(v, 40); h != "" {
+				oe.Items = append(oe.Items, Observable{"hash", "sha1:" + h, "object"})
+			}
+		case "SHA256":
+			if h := hexHash(v, 64); h != "" {
+				oe.Items = append(oe.Items, Observable{"hash", "sha256:" + h, "object"})
+			}
+		}
+	}
+	if len(oe.Items) == 0 {
+		return false
+	}
+	oe.Items = append(oe.Items, Observable{"file", file, "object"})
+	oe.Act, oe.What = "file", which[1]+": "+file
 	return true
 }
 
@@ -1225,7 +1343,7 @@ func (s *Store) ObservedEvents(acts ...string) (out []ObservedEvent, ok bool, er
 	q := `SELECT o.event_id, o.evidence_id, o.ts_utc, o.host, o.act, o.what, o.kind, o.value, o.role
 		FROM observables o JOIN current_runs c ON c.run_id = o.run_id AND c.evidence_id` + notExcluded + `
 		WHERE o.version = ? AND o.act IN (?` + strings.Repeat(",?", len(acts)-1) + `)
-		ORDER BY o.ts_utc, o.event_id, o.rowid`
+		ORDER BY o.ts_utc, o.event_id, o.act, o.rowid`
 	args := []any{observablesVersion}
 	for _, a := range acts {
 		args = append(args, a)
@@ -1242,7 +1360,7 @@ func (s *Store) ObservedEvents(acts ...string) (out []ObservedEvent, ok bool, er
 		if err := rows.Scan(&oe.EventID, &oe.EvidenceID, &oe.TSUTC, &oe.Host, &oe.Act, &oe.What, &it.Kind, &it.Value, &it.Role); err != nil {
 			return nil, false, err
 		}
-		if cur == nil || cur.EventID != oe.EventID {
+		if cur == nil || cur.EventID != oe.EventID || cur.Act != oe.Act {
 			out = append(out, oe)
 			cur = &out[len(out)-1]
 		}

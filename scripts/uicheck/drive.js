@@ -706,11 +706,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.click('#nav [data-view=connections]');
   await page.waitForFunction(() => document.querySelectorAll('#cnrows .cnrow').length >= 15, { timeout: 20000 }).catch(() => {});
   // The case holds another host from earlier checks, with no connections.
-  ok(/^16 connections \(10 seen at both ends, 2 with no time\) between 4 hosts and 3 other computers or addresses: 6 remote desktop, 3 file share, 6 started remotely, 1 USB device on two hosts/.test(await text('#cnsummary')),
-    'the Connections tab finds the sixteen connections of four kinds, two from the registry alone, one a USB stick on two hosts: ' + await text('#cnsummary'));
-  ok(await count('.cngraph .cnnode') === 7 && await count('.cngraph .cnnode.host') === 4 && await count('.cngraph .cnedge') === 12 && await count('.cngraph .cnedge.strong') === 7,
+  ok(/^17 connections \(11 seen at both ends, 2 with no time\) between 4 hosts and 3 other computers or addresses: 6 remote desktop, 3 file share, 6 started remotely, 1 USB device on two hosts, 1 file on two hosts/.test(await text('#cnsummary')),
+    'the Connections tab finds the seventeen connections of five kinds, two from the registry alone, one a USB stick and one a file on two hosts: ' + await text('#cnsummary'));
+  ok(await count('.cngraph .cnnode') === 7 && await count('.cngraph .cnnode.host') === 4 && await count('.cngraph .cnedge') === 13 && await count('.cngraph .cnedge.strong') === 8,
     'the graph draws each host and address once, an arrow for each way and kind of connection, the paired ones strong');
-  ok((await page.$$eval('.cngraph .cncount', (t) => t.map((x) => x.textContent))).sort().join() === 'Exec 2,Exec 2,Exec 2,RDP 1,RDP 1,RDP 1,RDP 1,RDP 1,RDP 1,Share 1,Share 2,USB 1',
+  ok((await page.$$eval('.cngraph .cncount', (t) => t.map((x) => x.textContent))).sort().join() === 'Exec 2,Exec 2,Exec 2,File 1,RDP 1,RDP 1,RDP 1,RDP 1,RDP 1,RDP 1,Share 1,Share 2,USB 1',
     'each arrow is labelled with its kind and count');
   ok(await count('#cnrows .cnconf.undated') === 2 && (await text('#cnrows')).includes('WS-ALICE opened a file on a share on SRV-FILE01') &&
     (await text('#cnrows')).includes("WS-ALICE's registry names JUMP-OLD as a computer this account connected to by Remote Desktop"),
@@ -720,7 +720,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     cnText.includes('services installed on DC01: PSEXESVC') && cnText.includes('shares on SRV-FILE01: Finance'),
     'each connection says why: the names, the clock correction, an address outside the case, the shares and services');
   ok((await page.$$eval('#cnrows .cnrow .anpath', (r) => r.map((x) => x.firstChild.textContent))).join() ===
-    '2026-11-02 14:00:00,2026-11-20 08:55:10,2026-11-20 09:14:18,2026-11-20 09:22:30,2026-11-20 09:41:03,2026-11-20 09:48:10,2026-11-20 10:05:42,2026-11-20 10:20:00,2026-11-20 10:20:01,2026-11-20 10:30:15,2026-11-20 10:50:05,2026-11-20 11:20:30,2026-11-20 11:35:40,2026-11-20 11:50:20,2026-11-20 12:05:10,2026-11-20 12:20:00', 'connections are listed in corrected time order');
+    '2026-11-02 14:00:00,2026-11-20 08:55:10,2026-11-20 09:14:18,2026-11-20 09:22:30,2026-11-20 09:41:03,2026-11-20 09:48:10,2026-11-20 10:05:42,2026-11-20 10:20:00,2026-11-20 10:20:01,2026-11-20 10:30:15,2026-11-20 10:50:05,2026-11-20 11:20:30,2026-11-20 11:35:40,2026-11-20 11:50:20,2026-11-20 12:05:10,2026-11-20 12:20:00,2026-11-20 12:21:40', 'connections are listed in corrected time order');
   await shot('18-connections-graph');
   await page.click('#cnkind [data-kind=exec]');
   ok(/^6 connections \(started remotely\)/.test(await text('#cnsummary')) && await count('#cnrows .cnrow') === 6 && await count('.cngraph .cnedge') === 3 &&
@@ -732,23 +732,29 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     (await text('#cnrows .cnrow')).includes('the same USB storage device, Kingston DataTraveler 3.0 USB Device (serial 60A44C3FAE22EEA0797900F7), is recorded in both computers\' SYSTEM hives') &&
     (await text('#cnrows .cnrow')).includes('it was first connected to SRV-FILE01 after it was last connected to WS-ALICE'),
     'a USB stick recorded on two hosts is a link between them, from the one that had it first: ' + await text('#cnsummary'));
+  await page.click('#cnkind [data-kind=file]');
+  ok(/^1 connection \(file on two hosts\)/.test(await text('#cnsummary')) && await count('#cnrows .cnrow') === 1 &&
+    (await text('#cnrows .cnrow')).includes('the same file, by its SHA-1 9d3c5a4f1b2e7a6c8d0f1e2a3b4c5d6e7f809a1b, is on both computers') &&
+    (await text('#cnrows .cnrow')).includes('c:\\windows\\temp\\svcupd.exe') && (await text('#cnrows .cnrow')).includes('it was renamed') &&
+    !(await text('#cnrows')).includes('notepad.exe'),
+    'a file with the same hash on two hosts is a link between them, renamed on one; a Windows file the same on both is not: ' + await text('#cnsummary'));
   await page.click('#cnkind [data-kind=""]');
   await page.evaluate(() => [...document.querySelectorAll('.cngraph .cnnode')].find((g) => g.textContent.endsWith('WS-ALICE')).dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 })));
   await page.evaluate(() => [...document.querySelectorAll('.cngraph .cnnode')].find((g) => g.textContent.endsWith('WS-ALICE')).dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 })));
-  await page.waitForFunction(() => document.querySelectorAll('#cnrows .cnrow').length === 12, { timeout: 5000 }).catch(() => {});
-  ok(await count('#cnrows .cnrow') === 12 && !(await page.$eval('#cnall', (b) => b.hidden)), 'picking a host lists only its connections, with a way back to all');
+  await page.waitForFunction(() => document.querySelectorAll('#cnrows .cnrow').length === 13, { timeout: 5000 }).catch(() => {});
+  ok(await count('#cnrows .cnrow') === 13 && !(await page.$eval('#cnall', (b) => b.hidden)), 'picking a host lists only its connections, with a way back to all');
   ok(await count('.cngraph .cnleaf') === 2 && await count('.cngraph .cnleaf.device') === 1 && await count('.cngraph .cnleafline') === 2 &&
-    (await text('#cnrows .cnleaves')).includes('Kingston DataTraveler 3.0 USB Device, serial 60A44C3FAE22EEA0797900F7: 5 records in the SYSTEM hive, 2026-11-20 08:40:11 to 2026-11-20 11:58:30 UTC') &&
-    (await text('#cnrows .cnleaves')).includes('CORP\\alice: connected out by 6') && (await text('#cnlegend')).includes('small: an account or USB storage device'),
-    'a host picked opens into its account and its USB stick (times corrected for its clock), on the graph and in the list: ' + await text('#cnrows .cnleaves'));
+    (await text('#cnsel .cnleaves')).includes('Kingston DataTraveler 3.0 USB Device, serial 60A44C3FAE22EEA0797900F7: 5 records in the SYSTEM hive, 2026-11-20 08:40:11 to 2026-11-20 11:58:30 UTC') &&
+    (await text('#cnsel .cnleaves')).includes('CORP\\alice: connected out by 6') && (await text('#cnlegend')).includes('small: an account or USB storage device'),
+    'a host picked opens into its account and its USB stick (times corrected for its clock), on the graph and in the list: ' + await text('#cnsel .cnleaves'));
   await shot('18b-connections-host');
   await page.click('.cngraph .cnleaf.device');
   await page.waitForFunction(() => !document.getElementById('view-timeline').hidden && document.querySelectorAll('#win .row').length === 5, { timeout: 20000 }).catch(() => {});
   ok(await summaryCount() === 5 && (await text('#win')).includes('Kingston'), "a device opens its five records on the timeline");
   await page.click('#nav [data-view=connections]');
-  await page.waitForFunction(() => document.querySelectorAll('#cnrows .cnrow').length === 12, { timeout: 10000 }).catch(() => {});
+  await page.waitForFunction(() => document.querySelectorAll('#cnrows .cnrow').length === 13, { timeout: 10000 }).catch(() => {});
   await page.click('#cnmode [data-mode=lanes]');
-  ok(await count('.cnlanes .cnconn') === 16 && await count('.cnlanes .cnconn.dim') === 4 && await count('.cnlanes .cnend.missing') === 6 && await count('.cnlanes .cnkindtag') === 16 &&
+  ok(await count('.cnlanes .cnconn') === 17 && await count('.cnlanes .cnconn.dim') === 4 && await count('.cnlanes .cnend.missing') === 6 && await count('.cnlanes .cnkindtag') === 17 &&
     await count('.cnlanes .cnconn.undated') === 2,
     "the lanes draw every connection in time with its kind, the picked host's in full, with a hollow end where nothing was recorded, and those with no time dotted");
   ok(await count('.cnlanes .cnsession') === 4 && await count('.cnlanes .cnsession.dim') === 2 && (await text('#cnlegend')).includes('bar: a Remote Desktop session'),
@@ -773,7 +779,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.keyboard.press('Enter');
   ok(await page.$eval('#cnfrom', (el) => el.classList.contains('bad')) && await count('#cnrows .cnrow') === 5, 'a time that cannot be read is marked, and the period stays');
   await page.click('#cnwhole');
-  ok(await count('#cnrows .cnrow') === 16 && !(await visible('#cnwhole')) && (await page.$eval('#cnfrom', (el) => el.value)) === '', '"Whole time" shows every connection again');
+  ok(await count('#cnrows .cnrow') === 17 && !(await visible('#cnwhole')) && (await page.$eval('#cnfrom', (el) => el.value)) === '', '"Whole time" shows every connection again');
   await page.$eval('.cnlanes', (el) => el.scrollIntoView({ block: 'center' }));
   const lb = await page.$eval('.cnlanes', (el) => { const b = el.getBoundingClientRect(); return { x: b.left, y: b.top, w: b.width }; });
   const plot = (f) => lb.x + 150 + f * (lb.w - 180);
@@ -809,7 +815,26 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   ok(evRows >= 1 && evRows < 15 && (await text('#cnrows .cnpicked')).startsWith(`Connections that event #${evId} is part of`) && await visible('#cnall') &&
     await count('.cngraph .cnedge.dim, .cnlanes .cnconn.dim') > 0, `"Show its connections" opens the Connections tab on the ${evRows} connection(s) event #${evId} is part of, the rest dimmed`);
   await page.click('#cnall');
-  ok(await count('#cnrows .cnrow') === 16, '"Show all" brings back every connection');
+  ok(await count('#cnrows .cnrow') === 17, '"Show all" brings back every connection');
+  // The side panel: finding, the notes and what is read folded away, zoom.
+  await page.click('#cnmode [data-mode=graph]');
+  ok(!(await page.$eval('#cnnotesbox', (d) => d.open)) && (await page.$$eval('.cnfold', (ds) => ds.every((d) => !d.open))) &&
+    (await page.$eval('#cnread', (u) => u.textContent)).includes('Remote Desktop') && await count('#cnread li.todo') >= 3 && await count('#cnread li.done') >= 7 &&
+    (await text('#cnkind [data-kind=usb] i')) === '1',
+    'the notes, what is read (ticked, and what is not read yet) and how ends are paired are folded away in the side panel, and each kind shows its count');
+  await page.type('#cnsearch', 'svcupd');
+  await page.waitForFunction(() => document.querySelectorAll('#cnfound .cnfounditem').length > 0, { timeout: 5000 }).catch(() => {});
+  ok(await count('#cnfound .cnfounditem') === 1 && (await text('#cnfound')).includes('The same file') && await count('.cngraph .cnnode.found') === 2,
+    'finding a file name lists the connection that names it and marks its two hosts on the graph: ' + await text('#cnfound'));
+  await page.click('#cnfound .cnfounditem');
+  ok((await text('#cnrows .cnrow.on')).includes('temp\\svcupd.exe'), 'a connection found opens in the list: ' + (await count('#cnrows .cnrow.on')) + ' ' + (await text('#cnrows .cnrow.on')).slice(0, 300));
+  await page.$eval('#cnsearch', (el) => { el.value = ''; el.dispatchEvent(new Event('input')); });
+  const vb0 = await page.$eval('.cngraph', (g) => g.getAttribute('viewBox'));
+  await page.click('#cnzoom [data-zoom=in]');
+  const vb1 = await page.$eval('.cngraph', (g) => g.getAttribute('viewBox'));
+  await page.click('#cnzoom [data-zoom=fit]');
+  ok(Number(vb1.split(' ')[2]) < Number(vb0.split(' ')[2]) && (await page.$eval('.cngraph', (g) => g.getAttribute('viewBox'))) === vb0 &&
+    await page.$eval('.cngraph', (g) => g.getBoundingClientRect().height) >= 440, 'the graph is tall, zooms in and fits again: ' + vb0 + ' / ' + vb1);
   await page.goto(URL, { waitUntil: 'networkidle0' });
 
   // ---- narrow window ----

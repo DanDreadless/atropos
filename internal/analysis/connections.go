@@ -64,7 +64,7 @@ type ConnEnd struct {
 
 // Connection is one connection from one computer to another.
 type Connection struct {
-	Kind       string   `json:"kind"` // rdp, smb (a file share), exec (a program started remotely), usb (the same USB storage device)
+	Kind       string   `json:"kind"` // rdp, smb (a file share), exec (a program started remotely), usb (the same USB storage device), file (the same file, by hash)
 	From       string   `json:"from"`
 	To         string   `json:"to"`
 	Start      int64    `json:"start_utc,string"` // corrected
@@ -119,6 +119,44 @@ type ConnLeaf struct {
 	Events []ConnEvent `json:"events"`
 }
 
+// ConnRead is one kind of connection and the records read for it at each
+// end; Done is false for what is not read yet, and Why then says why.
+type ConnRead struct {
+	What        string   `json:"what"`
+	Done        bool     `json:"done"`
+	Connecting  []string `json:"connecting,omitempty"` // on the computer connecting
+	ConnectedTo []string `json:"connected_to,omitempty"`
+	Either      []string `json:"either,omitempty"` // records that are not of one end
+	Why         string   `json:"why,omitempty"`
+}
+
+// connRead is what Connections looks for.
+var connRead = []ConnRead{
+	{What: "Remote Desktop", Done: true,
+		Connecting:  []string{"RDPClient 1024, 1102", "Security 4648 to TERMSRV", "Sysmon 3 to port 3389", `the account's Terminal Server Client servers and recent list (registry; the time is a key's last write)`},
+		ConnectedTo: []string{"Security 4624 type 10 or 12, 4778", "RemoteConnectionManager 1149", "LocalSessionManager 21, 22, 25", "RdpCoreTS 131", "Sysmon 3 on port 3389", "the session's end: Security 4634, 4647, 4779, LocalSessionManager 23, 24"}},
+	{What: "File shares", Done: true,
+		Connecting:  []string{`commands naming \\computer (Security 4688 with command lines, Sysmon 1)`, "Security 4648 to cifs", `jump list entries on \\computer\share`, "MountPoints2 (registry; the time is a key's last write)"},
+		ConnectedTo: []string{"Security 5140, 5145"}},
+	{What: "Programs started remotely", Done: true,
+		Connecting:  []string{`PsExec, PAExec, RemCom, sc, at and schtasks against \\computer`, "wmic /node:, winrs -r:, schtasks /s", "PowerShell remoting with -ComputerName, WinRM 6", "Security 4648 to RPCSS, WSMAN or HTTP from PowerShell"},
+		ConnectedTo: []string{"the service and task managers' pipes, PsExec's pipes", "programs written to ADMIN$", "services installed (System 7045, Security 4697)", "scheduled tasks made or changed under a person's account (Security 4698, 4702)", "WinRM 91, the PowerShell remoting and winrs hosts and what they start", "programs WMI starts under a person's account", "Sysmon 3 on ports 5985, 5986"}},
+	{What: "DCOM", Done: true,
+		Connecting:  []string{"PowerShell's GetTypeFromProgID or GetTypeFromCLSID naming a computer", "Security 4648 to RPCSS"},
+		ConnectedTo: []string{"MMC, mshta or Office started as a DCOM object (-Embedding) under a person's account, and what they start", "network connections accepted by them or by explorer.exe (Sysmon 3: ShellWindows, ShellBrowserWindow)", "a remote launch refused (System 10016)"}},
+	{What: "Network logons and connections, which support the others", Done: true,
+		ConnectedTo: []string{"Security 4624 type 3", "Sysmon 3 to file sharing (445, 139) and the RPC endpoint mapper (135)"},
+		Why:         "not shown alone: a domain controller or file server has thousands"},
+	{What: "The same USB storage device on two hosts", Done: true,
+		Either: []string{`SYSTEM hive, Enum\USBSTOR, by serial (not a serial Windows made up)`}},
+	{What: "The same file on two hosts", Done: true,
+		Either: []string{"SHA-1 and SHA-256 from Sysmon 1, 6, 15, 23, 26, 29", "Amcache's SHA-1 (of the first 31.4 MB)", "a browser download's SHA-256", "Defender's detection history (the hashes of the file it tracked)", `not files only under Windows (but not its Temp), Program Files or ProgramData\Microsoft`}},
+	{What: "Shortcut files", Why: "their times are the target's; the shortcut file's own times are needed"},
+	{What: "ShellWindows and ShellBrowserWindow without Sysmon 3", Why: "they run inside explorer.exe and leave no record of their own"},
+	{What: "The WMI-Activity log (5857, 5860, 5861)", Why: "no real record has been seen to check against"},
+	{What: "Remote Desktop's (mstsc) jump list", Why: "the layout of its entries has not been confirmed"},
+}
+
 // ConnectionsReport is the whole reading.
 type ConnectionsReport struct {
 	Ready       bool                 `json:"ready"` // every run has been read
@@ -127,8 +165,12 @@ type ConnectionsReport struct {
 	Connections []Connection         `json:"connections"`
 	Leaves      []ConnLeaf           `json:"leaves"`
 	Hosts       []store.HostIdentity `json:"hosts"`
-	Notes       []string             `json:"notes"`
-	Events      int                  `json:"events"` // observed events read
+	Notes       []string             `json:"notes"` // about this case: clocks, addresses, what is still being read
+	// Read lists the kinds of record looked for, and Rules how ends are
+	// paired: the same for every case.
+	Read   []ConnRead `json:"read"`
+	Rules  []string   `json:"rules"`
+	Events int        `json:"events"` // observed events read
 }
 
 type connCtx struct {
@@ -190,7 +232,7 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	evs, ready, err := s.ObservedEvents("rdp-in", "rdp-out", "smb-in", "smb-out", "exec-in", "exec-out", "logon-in", "net-in", "net-out", "rdp-named", "smb-named", "rdp-end", "device")
+	evs, ready, err := s.ObservedEvents("rdp-in", "rdp-out", "smb-in", "smb-out", "exec-in", "exec-out", "logon-in", "net-in", "net-out", "rdp-named", "smb-named", "rdp-end", "device", "file")
 	if err != nil {
 		return nil, err
 	}
@@ -446,7 +488,7 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		id  *store.HostIdentity
 	}
 	var loose []sourceless
-	var named, ends, devices []store.ObservedEvent
+	var named, ends, devices, files []store.ObservedEvent
 	open := map[string]*cluster{}
 	for _, e := range evs {
 		if strings.HasSuffix(e.Act, "-named") {
@@ -459,6 +501,10 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		}
 		if e.Act == "device" {
 			devices = append(devices, e)
+			continue
+		}
+		if e.Act == "file" {
+			files = append(files, e)
 			continue
 		}
 		rec, hid := where(e)
@@ -918,6 +964,7 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 	}
 
 	rep.Connections = append(rep.Connections, c.deviceLinks(devices)...)
+	rep.Connections = append(rep.Connections, c.fileLinks(files)...)
 
 	// How long each Remote Desktop session lasted: its logoff, or failing
 	// that its disconnection, on the computer connected to, tied to the
@@ -1091,9 +1138,13 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 	if !ready {
 		rep.Notes = append(rep.Notes, "Some evidence is still being read for connections; open this again shortly for the full picture.")
 	}
-	rep.Notes = append(rep.Notes,
-		`Read so far: Remote Desktop (the client's log, RDPClient 1024 and 1102, and Security 4648 to TERMSRV on the computer connecting; Security 4624 type 10 or 12 and 4778, RemoteConnectionManager 1149, LocalSessionManager 21, 22 and 25, and RdpCoreTS 131 on the computer connected to); file shares (commands naming \\computer, from Security 4688 with command lines or Sysmon 1, and Security 4648 to cifs on the computer connecting; Security 5140 and 5145 on the computer connected to); and programs started remotely (on the computer connecting: PsExec, PAExec, RemCom, sc, at and schtasks against \\computer, wmic /node:, winrs -r:, schtasks /s, PowerShell remoting with -ComputerName, WinRM 6, and Security 4648 to RPCSS, WSMAN, or HTTP from PowerShell; on the computer connected to: the service and task managers' pipes, PsExec's pipes, programs written to ADMIN$, services installed (System 7045, Security 4697), scheduled tasks made or changed under a person's account (Security 4698, 4702), WinRM 91, the PowerShell remoting and winrs hosts and what they start, and programs WMI starts under a person's account). DCOM: on the computer connecting, PowerShell's GetTypeFromProgID or GetTypeFromCLSID naming a computer, and Security 4648 to RPCSS; on the computer connected to, MMC, mshta or Office started as a DCOM object (-Embedding) under a person's account and what they start, network connections accepted by them or by explorer.exe (Sysmon 3: ShellWindows, ShellBrowserWindow), and a remote launch refused (System 10016). Sysmon network connections (Sysmon 3) also give Remote Desktop (port 3389) and WinRM (5985, 5986) at either end. Network logons (Security 4624 type 3) and Sysmon connections to file sharing (445, 139) and the RPC endpoint mapper (135) support these but are not shown alone: a domain controller or file server has thousands. Records on the computer connected to that name no source are tied to a network logon or share access within two minutes, by the same account where they name one. Jump list entries on \\computer\share are files opened there, at the time they give. The account's registry names computers it connected to by Remote Desktop (Terminal Server Client) and shares it used (MountPoints2), but its times are only when a key was last written: these support the connections between the same two computers, and stand alone, marked as having no time, where there is none. A USB storage device in the SYSTEM hives of two hosts (Enum\USBSTOR, by serial; not a serial Windows made up) links them, from the host that had it first, at the time it first arrived on the next. Shortcut files, ShellWindows and ShellBrowserWindow without Sysmon 3 (they run inside explorer.exe), and the WMI-Activity log are not read yet.`,
-		fmt.Sprintf("Ends are paired when each names the other and they are within %s once stated clock differences are taken off; strongly when within %s and with the same account. A pair is consistent with one connection, not proof of it.", fmtDur(connWindow), fmtDur(connStrong)))
+	rep.Read = connRead
+	rep.Rules = []string{
+		fmt.Sprintf("Ends are paired when each names the other and they are within %s once stated clock differences are taken off; strongly when within %s and with the same account. A pair is consistent with one connection, not proof of it.", fmtDur(connWindow), fmtDur(connStrong)),
+		"Records on the computer connected to that name no source (a service installed, a task made, a program WMI started) are tied to a network logon or share access within two minutes, by the same account where they name one.",
+		"The registry's lists of computers and shares give no time of a connection: they support the connections between the same two computers, and stand alone, marked as having no time, where there is none.",
+		"A USB storage device or a file on two hosts links them from the host that had it first, at its first record on the next.",
+	}
 	return rep, nil
 }
 
@@ -1279,6 +1330,202 @@ func (c *connCtx) deviceLinks(devices []store.ObservedEvent) []Connection {
 	return out
 }
 
+// commonPlace says whether a file is where every Windows computer has its
+// own copy: under Windows (but not its Temp), Program Files or
+// ProgramData\Microsoft. The same hash there on two hosts is the same
+// Windows or the same program installed, not a file moved.
+func commonPlace(p string) bool {
+	p = strings.ToLower(strings.ReplaceAll(p, "/", `\`))
+	p = strings.TrimPrefix(p, `\\?\`)
+	if len(p) > 1 && p[1] == ':' {
+		p = p[2:]
+	}
+	for _, pre := range []string{`%systemroot%\`, `\systemroot\`, `%windir%\`, `system32\`} {
+		if strings.HasPrefix(p, pre) {
+			return true
+		}
+	}
+	if strings.HasPrefix(p, `\windows\`) {
+		return !strings.HasPrefix(p, `\windows\temp\`)
+	}
+	for _, pre := range []string{`\program files\`, `\program files (x86)\`, `\programdata\microsoft\`} {
+		if strings.HasPrefix(p, pre) {
+			return true
+		}
+	}
+	return false
+}
+
+// fileLinks are files with the same hash on more than one host of the
+// case: a link from the host that had it first to the next, at its first
+// record there. The hashes one record gives (a SHA-1 and a SHA-256) are
+// of one file, so a file is matched on either. Files that are only ever
+// in a common place (commonPlace) are left out, unless Defender detected
+// them.
+func (c *connCtx) fileLinks(files []store.ObservedEvent) []Connection {
+	// Union the hashes of each record into files.
+	parent := map[string]string{}
+	var find func(string) string
+	find = func(x string) string {
+		if parent[x] == "" || parent[x] == x {
+			parent[x] = x
+			return x
+		}
+		r := find(parent[x])
+		parent[x] = r
+		return r
+	}
+	hashesOf := func(e store.ObservedEvent) []string {
+		var hs []string
+		for _, it := range e.Items {
+			if it.Kind == "hash" {
+				hs = append(hs, it.Value)
+			}
+		}
+		return hs
+	}
+	for _, e := range files {
+		hs := hashesOf(e)
+		for _, h := range hs {
+			find(h)
+		}
+		for i := 1; i < len(hs); i++ {
+			a, b := find(hs[0]), find(hs[i])
+			if a != b {
+				if b < a {
+					a, b = b, a
+				}
+				parent[b] = a
+			}
+		}
+	}
+	type onHost struct {
+		node, name  string
+		first, last int64 // corrected
+		raw         int64
+		paths       []string
+		events      []ConnEvent
+		amcache     bool
+	}
+	type file struct {
+		hashes map[string]bool
+		hosts  map[string]*onHost
+		odd    bool // some copy is not in a common place
+	}
+	byFile := map[string]*file{}
+	var order []string
+	for _, e := range files {
+		hs := hashesOf(e)
+		h := c.hostByName(e.Host)
+		if len(hs) == 0 || h == "" {
+			continue
+		}
+		k := find(hs[0])
+		f := byFile[k]
+		if f == nil {
+			f = &file{hashes: map[string]bool{}, hosts: map[string]*onHost{}}
+			byFile[k] = f
+			order = append(order, k)
+		}
+		for _, x := range hs {
+			f.hashes[x] = true
+		}
+		node := hostNode(h)
+		o := f.hosts[node]
+		if o == nil {
+			o = &onHost{node: node, name: h, first: math.MaxInt64, last: math.MinInt64}
+			f.hosts[node] = o
+		}
+		ts := e.TSUTC
+		if id := c.hosts[strings.ToUpper(h)]; id != nil {
+			ts -= int64(id.Clock)
+		}
+		if ts < o.first {
+			o.first, o.raw = ts, e.TSUTC
+		}
+		if ts > o.last {
+			o.last = ts
+		}
+		path := item(e, "file", "object")
+		// A file Defender detected is worth showing wherever it was.
+		if !commonPlace(path) || strings.Contains(e.What, "Defender") {
+			f.odd = true
+		}
+		seen := false
+		for _, x := range o.paths {
+			if strings.EqualFold(x, path) {
+				seen = true
+			}
+		}
+		if !seen {
+			o.paths = append(o.paths, path)
+		}
+		if strings.Contains(e.What, "Amcache") {
+			o.amcache = true
+		}
+		o.events = append(o.events, ConnEvent{ID: e.EventID, TS: e.TSUTC, What: e.What})
+	}
+	base := func(p string) string {
+		if i := strings.LastIndexAny(p, `\/`); i >= 0 {
+			p = p[i+1:]
+		}
+		return strings.ToLower(p)
+	}
+	var out []Connection
+	for _, k := range order {
+		f := byFile[k]
+		if len(f.hosts) < 2 || !f.odd {
+			continue
+		}
+		var hosts []*onHost
+		for _, o := range f.hosts {
+			hosts = append(hosts, o)
+		}
+		sort.Slice(hosts, func(a, b int) bool {
+			if hosts[a].first != hosts[b].first {
+				return hosts[a].first < hosts[b].first
+			}
+			return hosts[a].node < hosts[b].node
+		})
+		var hs []string
+		for x := range f.hashes {
+			hs = append(hs, strings.Replace(strings.ToUpper(x[:strings.IndexByte(x, ':')])+" "+x[strings.IndexByte(x, ':')+1:], "SHA", "SHA-", 1))
+		}
+		sort.Strings(hs)
+		where := func(o *onHost) string {
+			return fmt.Sprintf("on %s as %s, first recorded %s", o.name, strings.Join(o.paths, ", "), time.Unix(0, o.first).UTC().Format("2006-01-02 15:04:05"))
+		}
+		end := func(o *onHost) *ConnEnd {
+			evs := append([]ConnEvent(nil), o.events...)
+			sort.SliceStable(evs, func(a, b int) bool { return evs[a].TS < evs[b].TS })
+			return &ConnEnd{Node: o.node, Start: o.raw, Corrected: o.first, Events: evs}
+		}
+		for i := 0; i+1 < len(hosts); i++ {
+			a, b := hosts[i], hosts[i+1]
+			reasons := []string{
+				"the same file, by its " + strings.Join(hs, " and ") + ", is on both computers",
+				where(a) + "; " + where(b) + " (UTC, each host's stated clock difference taken off)",
+			}
+			names := map[string]bool{}
+			for _, o := range []*onHost{a, b} {
+				for _, p := range o.paths {
+					names[base(p)] = true
+				}
+			}
+			if len(names) > 1 {
+				reasons = append(reasons, "its name is not the same on both: it was renamed, or saved under another name")
+			}
+			if a.amcache || b.amcache {
+				reasons = append(reasons, "Amcache's SHA-1 covers only a file's first 31.4 MB, and its time is when its key was last written, not when the file arrived")
+			}
+			reasons = append(reasons, "a hash shows the same content, not how it went from one computer to the other")
+			out = append(out, Connection{Kind: "file", From: a.node, To: b.node, Start: b.first, SeenOn: "both", Confidence: "strong",
+				Source: end(a), Target: end(b), Reasons: reasons})
+		}
+	}
+	return out
+}
+
 func isLoopback(ip string) bool {
 	return strings.HasPrefix(ip, "127.") || ip == "::1"
 }
@@ -1359,6 +1606,36 @@ func WriteConnectionsText(w io.Writer, r *ConnectionsReport) error {
 			}
 		}
 	}
+	fmt.Fprintln(w, "\nRead:")
+	for _, x := range r.Read {
+		if !x.Done {
+			fmt.Fprintf(w, "  [ ] %s: not read yet (%s)\n", x.What, x.Why)
+			continue
+		}
+		fmt.Fprintf(w, "  [x] %s\n", x.What)
+		for _, end := range []struct {
+			label string
+			list  []string
+		}{{"connecting", x.Connecting}, {"connected to", x.ConnectedTo}, {"", x.Either}} {
+			if len(end.list) == 0 {
+				continue
+			}
+			if end.label != "" {
+				fmt.Fprintf(w, "      %s: %s\n", end.label, strings.Join(end.list, "; "))
+			} else {
+				fmt.Fprintf(w, "      %s\n", strings.Join(end.list, "; "))
+			}
+		}
+		if x.Why != "" {
+			fmt.Fprintf(w, "      (%s)\n", x.Why)
+		}
+	}
+	fmt.Fprintln(w, "\nHow ends are paired:")
+	for _, x := range r.Rules {
+		if _, err := fmt.Fprintf(w, "  - %s\n", x); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1381,4 +1658,4 @@ func plural(n int, one, many string) string {
 }
 
 // ConnKindWords names each kind of connection.
-var ConnKindWords = map[string]string{"rdp": "Remote Desktop", "smb": "File share", "exec": "Program started remotely", "usb": "The same USB device"}
+var ConnKindWords = map[string]string{"rdp": "Remote Desktop", "smb": "File share", "exec": "Program started remotely", "usb": "The same USB device", "file": "The same file"}

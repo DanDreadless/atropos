@@ -32,6 +32,10 @@
 // first plugged in at 08:40 and last connected from 11:52 to 11:58; SRV-FILE01's
 // records the same stick from 12:20 to 12:24.
 //
+// Their Amcache hives record the same file: procdump64.exe in alice's
+// Downloads (08:45) and c:\windows\temp\svcupd.exe on SRV-FILE01 (12:21),
+// and each its own notepad.exe, which is the same on both and links nothing.
+//
 // WS-ALICE's clock is three minutes fast.
 package lateraldemo
 
@@ -395,6 +399,13 @@ func Write(dir0 string) error {
 	if err := systemHive(file, filepath.Join(dir0, file.name), "12:20:00", [4]string{"12:20:00", "12:20:00", "12:20:00", "12:24:10"}); err != nil {
 		return err
 	}
+	// The same file in both Amcache hives, under another name on the server.
+	if err := amcache(alice, filepath.Join(dir0, alice.name), `c:\users\alice\downloads\procdump64.exe`, "08:45:30"); err != nil {
+		return err
+	}
+	if err := amcache(file, filepath.Join(dir0, file.name), `c:\windows\temp\svcupd.exe`, "12:21:40"); err != nil {
+		return err
+	}
 	if err := os.WriteFile(filepath.Join(dir0, "README.txt"), []byte(strings.TrimLeft(readme, "\n")), 0o644); err != nil {
 		return err
 	}
@@ -472,6 +483,37 @@ func systemHive(h *host, dir, written string, times [4]string) error {
 	return os.WriteFile(filepath.Join(dir, "SYSTEM"), hive, 0o644)
 }
 
+// Made-up SHA-1s: the tool's, and notepad.exe's.
+const (
+	toolSHA1    = "9d3c5a4f1b2e7a6c8d0f1e2a3b4c5d6e7f809a1b"
+	notepadSHA1 = "c2a1e3f4d5b6a7980f1e2d3c4b5a69788796a5b4"
+)
+
+// amcache writes a host's Amcache.hve: the tool at path (its entry written
+// at written by the host's clock) and notepad.exe a month before.
+func amcache(h *host, dir, path, written string) error {
+	local := func(t time.Time) time.Time { return t.Add(h.clock) }
+	start := local(day.Add(-30 * 24 * time.Hour))
+	root := &artw.Key{Name: "ROOT", Written: start}
+	inv := `Root\InventoryApplicationFile\`
+	for _, f := range []struct {
+		path, sha1 string
+		at         time.Time
+	}{
+		{`c:\windows\system32\notepad.exe`, notepadSHA1, start},
+		{path, toolSHA1, local(at(written))},
+	} {
+		name := f.path[strings.LastIndex(f.path, `\`)+1:]
+		root.Path(inv+name+"|"+f.sha1[:16], f.at).Values = []artw.Value{
+			artw.SZ("LowerCaseLongPath", f.path), artw.SZ("FileId", "0000"+f.sha1), artw.SZ("Name", name)}
+	}
+	hive, err := artw.Hive(root, `\??\C:\Windows\AppCompat\Programs\Amcache.hve`, local(at("12:30:00")))
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "Amcache.hve"), hive, 0o644)
+}
+
 const readme = `
 Made-up event logs from three hosts that connect to each other by Remote
 Desktop, file shares, PsExec, PowerShell remoting, a scheduled task, WMI, DCOM,
@@ -490,8 +532,8 @@ describes a real machine, person or network.
 
 2. Add each folder's files, choosing its host in the add dialog. WS-ALICE's
    folder also holds alice's NTUSER.DAT and Excel's jump list, and the
-   computer's SYSTEM hive (a USB stick); SRV-FILE01's holds its SYSTEM
-   hive, with the same stick.
+   computer's SYSTEM hive (a USB stick) and Amcache.hve; SRV-FILE01's holds
+   its SYSTEM hive, with the same stick, and its Amcache.hve.
 
 3. Open the Connections tab. It should show, on 20 November 2026 (UTC):
 
