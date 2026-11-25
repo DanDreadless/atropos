@@ -28,8 +28,10 @@ function sv(tag, attrs, ...kids) {
 const CONF_WORDS = { strong: 'strong', possible: 'possible', 'one-end': 'one end only' };
 const SEEN_WORDS = { both: 'both ends', source: 'the connecting end only', target: 'the end connected to only' };
 // Each kind of connection: its name, and the short tag drawn on its arrows.
-const KIND_WORDS = { rdp: 'Remote Desktop', smb: 'File share', exec: 'Started remotely' };
-const KIND_TAG = { rdp: 'RDP', smb: 'Share', exec: 'Exec' };
+const KIND_WORDS = { rdp: 'Remote Desktop', smb: 'File share', exec: 'Started remotely', usb: 'The same USB device' };
+const KIND_TAG = { rdp: 'RDP', smb: 'Share', exec: 'Exec', usb: 'USB' };
+// How the summary counts each kind.
+const kindCount = (k) => (k === 'usb' ? 'USB device on two hosts' : KIND_WORDS[k].toLowerCase());
 
 function cnLabel(id) {
   const n = CN.rep && CN.rep.nodes.find((x) => x.id === id);
@@ -186,10 +188,10 @@ function drawSummary() {
   const byKind = Object.keys(KIND_WORDS).map((k) => [k, r.connections.filter((c) => c.kind === k && inRange(c)).length]).filter(([, n]) => n);
   const left = CN.range ? r.connections.filter((c) => (!CN.kind || c.kind === CN.kind) && c.undated).length : 0;
   $('cnsummary').replaceChildren(h('b', {}, fmtInt(conns.length)), conns.length === 1 ? ' connection' : ' connections',
-    CN.kind ? ` (${KIND_WORDS[CN.kind].toLowerCase()})` : '',
+    CN.kind ? ` (${kindCount(CN.kind)})` : '',
     CN.range ? ` ${rangeWords()}${left ? ` (${fmtInt(left)} with no time left out)` : ''}` : '',
     ` (${fmtInt(both)} seen at both ends${undated ? `, ${fmtInt(undated)} with no time` : ''}) between ${fmtInt(hosts)} host${hosts === 1 ? '' : 's'} and ${fmtInt(others)} other computer${others === 1 ? '' : 's'} or address${others === 1 ? '' : 'es'}`,
-    !CN.kind && byKind.length > 1 ? ': ' + byKind.map(([k, n]) => `${fmtInt(n)} ${KIND_WORDS[k].toLowerCase()}`).join(', ') : '',
+    !CN.kind && byKind.length > 1 ? ': ' + byKind.map(([k, n]) => `${fmtInt(n)} ${kindCount(k)}`).join(', ') : '',
     r.ready ? '' : ' (still reading some evidence)');
 }
 
@@ -231,7 +233,7 @@ function drawLegend() {
     CN.mode === 'lanes' && CN.rep && CN.rep.connections.some((c) => c.ended_utc) ? h('span', { class: 'cnkey session' }, 'bar: a Remote Desktop session, until logoff or disconnection') : '',
     CN.mode === 'lanes' ? h('span', {}, 'drag across the lanes to look at a period') : '',
     CN.mode === 'graph' ? h('span', { class: 'cnkey leaf' }, CN.pick && CN.pick.node && nodeLeaves(CN.pick.node).length ? 'small: an account or USB storage device of the host picked' : 'click a host for its accounts and USB storage devices') : '',
-    h('span', { class: 'cnkeytags' }, Object.keys(KIND_TAG).map((k) => `${KIND_TAG[k]}: ${KIND_WORDS[k].toLowerCase()}`).join(' · ')),
+    h('span', { class: 'cnkeytags' }, Object.keys(KIND_TAG).map((k) => `${KIND_TAG[k]}: ${k === 'usb' ? 'the same USB device' : KIND_WORDS[k].toLowerCase()}`).join(' · ')),
     h('span', { class: 'cnkey nodehost' }, 'host of the case'),
     h('span', { class: 'cnkey nodeext' }, 'outside the case'));
 }

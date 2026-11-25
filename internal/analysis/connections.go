@@ -3,6 +3,7 @@ package analysis
 import (
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -63,7 +64,7 @@ type ConnEnd struct {
 
 // Connection is one connection from one computer to another.
 type Connection struct {
-	Kind       string   `json:"kind"` // rdp, smb (a file share), exec (a program started remotely)
+	Kind       string   `json:"kind"` // rdp, smb (a file share), exec (a program started remotely), usb (the same USB storage device)
 	From       string   `json:"from"`
 	To         string   `json:"to"`
 	Start      int64    `json:"start_utc,string"` // corrected
@@ -916,6 +917,8 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		rep.Connections = append(rep.Connections, conn)
 	}
 
+	rep.Connections = append(rep.Connections, c.deviceLinks(devices)...)
+
 	// How long each Remote Desktop session lasted: its logoff, or failing
 	// that its disconnection, on the computer connected to, tied to the
 	// records that began it by the logon id, or by the session number and
@@ -1089,7 +1092,7 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		rep.Notes = append(rep.Notes, "Some evidence is still being read for connections; open this again shortly for the full picture.")
 	}
 	rep.Notes = append(rep.Notes,
-		`Read so far: Remote Desktop (the client's log, RDPClient 1024 and 1102, and Security 4648 to TERMSRV on the computer connecting; Security 4624 type 10 or 12 and 4778, RemoteConnectionManager 1149, LocalSessionManager 21, 22 and 25, and RdpCoreTS 131 on the computer connected to); file shares (commands naming \\computer, from Security 4688 with command lines or Sysmon 1, and Security 4648 to cifs on the computer connecting; Security 5140 and 5145 on the computer connected to); and programs started remotely (on the computer connecting: PsExec, PAExec, RemCom, sc, at and schtasks against \\computer, wmic /node:, winrs -r:, schtasks /s, PowerShell remoting with -ComputerName, WinRM 6, and Security 4648 to RPCSS, WSMAN, or HTTP from PowerShell; on the computer connected to: the service and task managers' pipes, PsExec's pipes, programs written to ADMIN$, services installed (System 7045, Security 4697), scheduled tasks made or changed under a person's account (Security 4698, 4702), WinRM 91, the PowerShell remoting and winrs hosts and what they start, and programs WMI starts under a person's account). DCOM: on the computer connecting, PowerShell's GetTypeFromProgID or GetTypeFromCLSID naming a computer, and Security 4648 to RPCSS; on the computer connected to, MMC, mshta or Office started as a DCOM object (-Embedding) under a person's account and what they start, network connections accepted by them or by explorer.exe (Sysmon 3: ShellWindows, ShellBrowserWindow), and a remote launch refused (System 10016). Sysmon network connections (Sysmon 3) also give Remote Desktop (port 3389) and WinRM (5985, 5986) at either end. Network logons (Security 4624 type 3) and Sysmon connections to file sharing (445, 139) and the RPC endpoint mapper (135) support these but are not shown alone: a domain controller or file server has thousands. Records on the computer connected to that name no source are tied to a network logon or share access within two minutes, by the same account where they name one. Jump list entries on \\computer\share are files opened there, at the time they give. The account's registry names computers it connected to by Remote Desktop (Terminal Server Client) and shares it used (MountPoints2), but its times are only when a key was last written: these support the connections between the same two computers, and stand alone, marked as having no time, where there is none. Shortcut files, ShellWindows and ShellBrowserWindow without Sysmon 3 (they run inside explorer.exe), and the WMI-Activity log are not read yet.`,
+		`Read so far: Remote Desktop (the client's log, RDPClient 1024 and 1102, and Security 4648 to TERMSRV on the computer connecting; Security 4624 type 10 or 12 and 4778, RemoteConnectionManager 1149, LocalSessionManager 21, 22 and 25, and RdpCoreTS 131 on the computer connected to); file shares (commands naming \\computer, from Security 4688 with command lines or Sysmon 1, and Security 4648 to cifs on the computer connecting; Security 5140 and 5145 on the computer connected to); and programs started remotely (on the computer connecting: PsExec, PAExec, RemCom, sc, at and schtasks against \\computer, wmic /node:, winrs -r:, schtasks /s, PowerShell remoting with -ComputerName, WinRM 6, and Security 4648 to RPCSS, WSMAN, or HTTP from PowerShell; on the computer connected to: the service and task managers' pipes, PsExec's pipes, programs written to ADMIN$, services installed (System 7045, Security 4697), scheduled tasks made or changed under a person's account (Security 4698, 4702), WinRM 91, the PowerShell remoting and winrs hosts and what they start, and programs WMI starts under a person's account). DCOM: on the computer connecting, PowerShell's GetTypeFromProgID or GetTypeFromCLSID naming a computer, and Security 4648 to RPCSS; on the computer connected to, MMC, mshta or Office started as a DCOM object (-Embedding) under a person's account and what they start, network connections accepted by them or by explorer.exe (Sysmon 3: ShellWindows, ShellBrowserWindow), and a remote launch refused (System 10016). Sysmon network connections (Sysmon 3) also give Remote Desktop (port 3389) and WinRM (5985, 5986) at either end. Network logons (Security 4624 type 3) and Sysmon connections to file sharing (445, 139) and the RPC endpoint mapper (135) support these but are not shown alone: a domain controller or file server has thousands. Records on the computer connected to that name no source are tied to a network logon or share access within two minutes, by the same account where they name one. Jump list entries on \\computer\share are files opened there, at the time they give. The account's registry names computers it connected to by Remote Desktop (Terminal Server Client) and shares it used (MountPoints2), but its times are only when a key was last written: these support the connections between the same two computers, and stand alone, marked as having no time, where there is none. A USB storage device in the SYSTEM hives of two hosts (Enum\USBSTOR, by serial; not a serial Windows made up) links them, from the host that had it first, at the time it first arrived on the next. Shortcut files, ShellWindows and ShellBrowserWindow without Sysmon 3 (they run inside explorer.exe), and the WMI-Activity log are not read yet.`,
 		fmt.Sprintf("Ends are paired when each names the other and they are within %s once stated clock differences are taken off; strongly when within %s and with the same account. A pair is consistent with one connection, not proof of it.", fmtDur(connWindow), fmtDur(connStrong)))
 	return rep, nil
 }
@@ -1176,6 +1179,103 @@ func (c *connCtx) leaves(conns []Connection, devices []store.ObservedEvent) []Co
 		}
 		return x.First < y.First
 	})
+	return out
+}
+
+// deviceLinks are USB storage devices recorded on more than one host of
+// the case, by serial: a link from the host that had it first to the next,
+// at the time it first arrived there. A serial Windows made up (its second
+// character "&") belongs to one computer and is never matched.
+func (c *connCtx) deviceLinks(devices []store.ObservedEvent) []Connection {
+	type onHost struct {
+		node, name  string
+		id          *store.HostIdentity
+		first, last int64 // corrected
+		raw         int64 // the first, as the host's clock had it
+		events      []ConnEvent
+	}
+	bySerial := map[string]map[string]*onHost{}
+	var serials []string
+	labels := map[string]string{}
+	for _, e := range devices {
+		h := c.hostByName(e.Host)
+		serial := item(e, "serial", "object")
+		if h == "" || len(serial) < 3 || serial[1] == '&' {
+			continue
+		}
+		k := strings.ToUpper(serial)
+		if bySerial[k] == nil {
+			bySerial[k] = map[string]*onHost{}
+			serials = append(serials, k)
+		}
+		node := hostNode(h)
+		o := bySerial[k][node]
+		if o == nil {
+			o = &onHost{node: node, name: h, id: c.hosts[strings.ToUpper(h)], first: math.MaxInt64, last: math.MinInt64}
+			bySerial[k][node] = o
+		}
+		o.events = append(o.events, ConnEvent{ID: e.EventID, TS: e.TSUTC, What: e.What})
+		keyWrite := strings.Contains(e.What, "key last written")
+		if keyWrite {
+			labels[k] = item(e, "device", "object")
+		} else if labels[k] == "" {
+			labels[k] = item(e, "device", "object")
+		}
+		// A key's last write is not when the device was there: only the
+		// times Windows keeps for the device date it.
+		if !keyWrite {
+			ts := e.TSUTC
+			if o.id != nil {
+				ts -= int64(o.id.Clock)
+			}
+			if ts < o.first {
+				o.first, o.raw = ts, e.TSUTC
+			}
+			if ts > o.last {
+				o.last = ts
+			}
+		}
+	}
+	var out []Connection
+	for _, k := range serials {
+		var hosts []*onHost
+		for _, o := range bySerial[k] {
+			if o.first != math.MaxInt64 {
+				hosts = append(hosts, o)
+			}
+		}
+		if len(hosts) < 2 {
+			continue
+		}
+		sort.Slice(hosts, func(a, b int) bool { return hosts[a].first < hosts[b].first })
+		when := func(o *onHost) string {
+			f := time.Unix(0, o.first).UTC().Format("2006-01-02 15:04:05")
+			if o.last == o.first {
+				return fmt.Sprintf("on %s at %s", o.name, f)
+			}
+			return fmt.Sprintf("on %s from %s to %s", o.name, f, time.Unix(0, o.last).UTC().Format("2006-01-02 15:04:05"))
+		}
+		end := func(o *onHost) *ConnEnd {
+			evs := append([]ConnEvent(nil), o.events...)
+			sort.SliceStable(evs, func(a, b int) bool { return evs[a].TS < evs[b].TS })
+			return &ConnEnd{Node: o.node, Start: o.raw, Corrected: o.first, Events: evs}
+		}
+		for i := 0; i+1 < len(hosts); i++ {
+			a, b := hosts[i], hosts[i+1]
+			reasons := []string{
+				fmt.Sprintf("the same USB storage device, %s (serial %s), is recorded in both computers' SYSTEM hives", labels[k], k),
+				fmt.Sprintf("%s; %s (UTC, each host's stated clock difference taken off)", when(a), when(b)),
+			}
+			if b.first <= a.last {
+				reasons = append(reasons, fmt.Sprintf("its times on the two overlap: it was plugged into %s before it was last connected to %s, so it went between them more than once", b.name, a.name))
+			} else {
+				reasons = append(reasons, fmt.Sprintf("it was first connected to %s after it was last connected to %s", b.name, a.name))
+			}
+			reasons = append(reasons, "a serial shows the same device, not who carried it or what was copied")
+			out = append(out, Connection{Kind: "usb", From: a.node, To: b.node, Start: b.first, SeenOn: "both", Confidence: "strong",
+				Source: end(a), Target: end(b), Reasons: reasons})
+		}
+	}
 	return out
 }
 
@@ -1281,4 +1381,4 @@ func plural(n int, one, many string) string {
 }
 
 // ConnKindWords names each kind of connection.
-var ConnKindWords = map[string]string{"rdp": "Remote Desktop", "smb": "File share", "exec": "Program started remotely"}
+var ConnKindWords = map[string]string{"rdp": "Remote Desktop", "smb": "File share", "exec": "Program started remotely", "usb": "The same USB device"}

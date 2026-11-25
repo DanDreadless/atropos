@@ -29,7 +29,8 @@
 // and \\DC01\C$ (the second supports nothing, so it stands alone).
 //
 // WS-ALICE's SYSTEM hive records a USB stick, a Kingston DataTraveler,
-// first plugged in at 08:40 and last connected from 11:52 to 11:58.
+// first plugged in at 08:40 and last connected from 11:52 to 11:58; SRV-FILE01's
+// records the same stick from 12:20 to 12:24.
 //
 // WS-ALICE's clock is three minutes fast.
 package lateraldemo
@@ -390,6 +391,10 @@ func Write(dir0 string) error {
 	if err := userFiles(alice, filepath.Join(dir0, alice.name)); err != nil {
 		return err
 	}
+	// The same stick, later, on the file server.
+	if err := systemHive(file, filepath.Join(dir0, file.name), "12:20:00", [4]string{"12:20:00", "12:20:00", "12:20:00", "12:24:10"}); err != nil {
+		return err
+	}
 	if err := os.WriteFile(filepath.Join(dir0, "README.txt"), []byte(strings.TrimLeft(readme, "\n")), 0o644); err != nil {
 		return err
 	}
@@ -432,7 +437,7 @@ func userFiles(h *host, dir string) error {
 	if err := os.WriteFile(filepath.Join(dir, "NTUSER.DAT"), hive, 0o644); err != nil {
 		return err
 	}
-	if err := systemHive(h, dir); err != nil {
+	if err := systemHive(h, dir, "11:52:04", [4]string{"08:40:11", "08:40:11", "11:52:04", "11:58:30"}); err != nil {
 		return err
 	}
 	jl := artw.JumpList([]artw.JumpEntry{
@@ -442,22 +447,23 @@ func userFiles(h *host, dir string) error {
 	return os.WriteFile(filepath.Join(dir, "6e855c85de07bc6a.automaticDestinations-ms"), jl, 0o644)
 }
 
-// systemHive writes WS-ALICE's SYSTEM hive: its name, and a USB stick
-// (Enum\USBSTOR) with the times Windows keeps for it. Its times are as
-// its clock had them.
-func systemHive(h *host, dir string) error {
+// systemHive writes a host's SYSTEM hive: its name, and the USB stick
+// (Enum\USBSTOR) with the times Windows keeps for it (first installed,
+// first connected, last connected, last removed) and when its key was
+// written. Its times are as the host's clock had them.
+func systemHive(h *host, dir, written string, times [4]string) error {
 	local := func(t time.Time) time.Time { return t.Add(h.clock) }
 	start := local(day.Add(-30 * 24 * time.Hour))
 	root := &artw.Key{Name: "ROOT", Written: start}
 	root.Path(`Select`, start).Values = []artw.Value{artw.DWORD("Current", 1)}
 	root.Path(`ControlSet001\Control\ComputerName\ComputerName`, start).Values = []artw.Value{artw.SZ("ComputerName", h.name)}
 	stick := `ControlSet001\Enum\USBSTOR\Disk&Ven_Kingston&Prod_DataTraveler_3.0&Rev_PMAP\60A44C3FAE22EEA0797900F7&0`
-	root.Path(stick, local(at("11:52:04"))).Values = []artw.Value{artw.SZ("FriendlyName", "Kingston DataTraveler 3.0 USB Device")}
-	for _, p := range []struct{ id, at string }{{"0064", "08:40:11"}, {"0065", "08:40:11"}, {"0066", "11:52:04"}, {"0067", "11:58:30"}} {
-		t := local(at(p.at))
+	root.Path(stick, local(at(written))).Values = []artw.Value{artw.SZ("FriendlyName", "Kingston DataTraveler 3.0 USB Device")}
+	for i, id := range []string{"0064", "0065", "0066", "0067"} {
+		t := local(at(times[i]))
 		ft := make([]byte, 8)
 		binary.LittleEndian.PutUint64(ft, uint64(t.UnixNano()/100+116444736000000000))
-		root.Path(stick+`\Properties\{83da6326-97a6-4088-9453-a1923f573b29}\`+p.id, t).Values = []artw.Value{{Name: "", Type: 0x10, Data: ft}}
+		root.Path(stick+`\Properties\{83da6326-97a6-4088-9453-a1923f573b29}\`+id, t).Values = []artw.Value{{Name: "", Type: 0x10, Data: ft}}
 	}
 	hive, err := artw.Hive(root, `\REGISTRY\MACHINE\SYSTEM`, local(at("12:00:00")))
 	if err != nil {
@@ -484,7 +490,8 @@ describes a real machine, person or network.
 
 2. Add each folder's files, choosing its host in the add dialog. WS-ALICE's
    folder also holds alice's NTUSER.DAT and Excel's jump list, and the
-   computer's SYSTEM hive (a USB stick).
+   computer's SYSTEM hive (a USB stick); SRV-FILE01's holds its SYSTEM
+   hive, with the same stick.
 
 3. Open the Connections tab. It should show, on 20 November 2026 (UTC):
 

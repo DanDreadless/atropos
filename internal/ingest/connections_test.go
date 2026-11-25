@@ -94,6 +94,7 @@ func TestLateralMovementConnections(t *testing.T) {
 		{"11:38:40", "exec", "host:WS-ALICE", "host:DC01", "both", "possible", `CORP\alice`},
 		{"11:53:20", "smb", "host:WS-ALICE", "host:SRV-FILE01", "both", "possible", `CORP\alice`},
 		{"12:08:10", "exec", "host:WS-ALICE", "host:SRV-FILE01", "both", "possible", `CORP\alice`},
+		{"12:20:00", "usb", "host:WS-ALICE", "host:SRV-FILE01", "both", "strong", ""},
 	})
 	if a := rep.Connections[2].Apart; a == nil || *a != int64(-178*time.Second) {
 		t.Errorf("apart %v, want -2m58s", a)
@@ -122,7 +123,16 @@ func TestLateralMovementConnections(t *testing.T) {
 		{"11:35:40", "exec", "host:WS-ALICE", "host:DC01", "both", "strong", `CORP\alice`},
 		{"11:50:20", "smb", "host:WS-ALICE", "host:SRV-FILE01", "both", "strong", `CORP\alice`},
 		{"12:05:10", "exec", "host:WS-ALICE", "host:SRV-FILE01", "both", "strong", `CORP\alice`},
+		{"12:20:00", "usb", "host:WS-ALICE", "host:SRV-FILE01", "both", "strong", ""},
 	})
+	// The same USB stick on WS-ALICE and then SRV-FILE01, its times on
+	// WS-ALICE corrected; the key's last write is among the events but does
+	// not date it.
+	if cn := rep.Connections[15]; len(cn.Source.Events) != 5 || len(cn.Target.Events) != 5 ||
+		!strings.Contains(strings.Join(cn.Reasons, " | "), "the same USB storage device, Kingston DataTraveler 3.0 USB Device (serial 60A44C3FAE22EEA0797900F7), is recorded in both computers' SYSTEM hives | on WS-ALICE from 2026-11-20 08:40:11 to 2026-11-20 11:58:30; on SRV-FILE01 from 2026-11-20 12:20:00 to 2026-11-20 12:24:10") ||
+		!strings.Contains(strings.Join(cn.Reasons, " | "), "it was first connected to SRV-FILE01 after it was last connected to WS-ALICE") {
+		t.Errorf("the USB stick: %d and %d events, %v", len(cn.Source.Events), len(cn.Target.Events), cn.Reasons)
+	}
 	cn := rep.Connections[2]
 	if *cn.Apart != int64(2*time.Second) || len(cn.Source.Events) != 3 || len(cn.Target.Events) != 9 {
 		t.Errorf("09:14: apart %v, %d source events, %d target events", *cn.Apart, len(cn.Source.Events), len(cn.Target.Events))
@@ -171,6 +181,7 @@ func TestLateralMovementConnections(t *testing.T) {
 host:DC01 account CORP\alice in 3 out 0 15 events 10:20:00-11:35:40
 host:SRV-FILE01 account CORP\svc_backup in 1 out 3 14 events 08:55:10-11:20:30
 host:SRV-FILE01 account CORP\alice in 5 out 0 21 events 09:14:18-12:05:10
+host:SRV-FILE01 device Kingston DataTraveler 3.0 USB Device in 0 out 0 5 events 12:20:00-12:24:10
 host:WS-ALICE account CORP\alice in 0 out 6 9 events 09:14:18-12:05:10
 host:WS-ALICE device Kingston DataTraveler 3.0 USB Device in 0 out 0 5 events 08:40:11-11:58:30` {
 		t.Errorf("leaves:\n%s", got)
@@ -248,7 +259,7 @@ host:WS-ALICE device Kingston DataTraveler 3.0 USB Device in 0 out 0 5 events 08
 	for _, e := range rep.Edges {
 		edges = append(edges, e.Kind+":"+e.From+">"+e.To)
 	}
-	if got := strings.Join(edges, " "); got != "rdp:host:WS-ALICE>computer:JUMP-OLD rdp:ip:203.0.113.45>host:SRV-FILE01 rdp:host:WS-ALICE>host:SRV-FILE01 smb:host:WS-ALICE>host:SRV-FILE01 rdp:host:SRV-FILE01>host:DC01 exec:host:SRV-FILE01>host:DC01 rdp:host:WS-ALICE>ip:10.9.9.9 exec:host:WS-ALICE>host:DC01 smb:host:WS-ALICE>host:DC01 rdp:host:WS-ALICE>host:DC01 exec:host:WS-ALICE>host:SRV-FILE01" {
+	if got := strings.Join(edges, " "); got != "rdp:host:WS-ALICE>computer:JUMP-OLD rdp:ip:203.0.113.45>host:SRV-FILE01 rdp:host:WS-ALICE>host:SRV-FILE01 smb:host:WS-ALICE>host:SRV-FILE01 rdp:host:SRV-FILE01>host:DC01 exec:host:SRV-FILE01>host:DC01 rdp:host:WS-ALICE>ip:10.9.9.9 exec:host:WS-ALICE>host:DC01 smb:host:WS-ALICE>host:DC01 rdp:host:WS-ALICE>host:DC01 exec:host:WS-ALICE>host:SRV-FILE01 usb:host:WS-ALICE>host:SRV-FILE01" {
 		t.Errorf("edges %s", got)
 	}
 	if len(rep.Nodes) != 6 || !rep.Nodes[0].InCase || rep.Nodes[3].Kind != "address" || rep.Nodes[5].Kind != "computer" {
@@ -282,6 +293,7 @@ host:WS-ALICE device Kingston DataTraveler 3.0 USB Device in 0 out 0 5 events 08
 		{"11:35:40", "exec", "host:WS-ALICE", "host:DC01", "source", "one-end", `CORP\alice`},
 		{"11:50:20", "smb", "host:WS-ALICE", "host:SRV-FILE01", "both", "strong", `CORP\alice`},
 		{"12:05:10", "exec", "host:WS-ALICE", "host:SRV-FILE01", "both", "strong", `CORP\alice`},
+		{"12:20:00", "usb", "host:WS-ALICE", "host:SRV-FILE01", "both", "strong", ""},
 	})
 	if !strings.Contains(strings.Join(rep.Connections[4].Reasons, " "), "DC01 has no matching logon") ||
 		!strings.Contains(strings.Join(rep.Connections[5].Reasons, " "), "DC01 has no matching record") {
