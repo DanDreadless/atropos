@@ -223,6 +223,140 @@ type HostIdentity struct {
 	ClockText   string        `json:"clock_text,omitempty"`
 	// Unread lists stated values that could not be used, for a note.
 	Unread []string `json:"unread,omitempty"`
+	// HiveIPs and HiveNames are the addresses and full names the host's own
+	// SYSTEM hive records (Services\Tcpip): evidence, not statements, so they
+	// are kept apart from what was stated.
+	HiveIPs   []HiveFact `json:"hive_ips,omitempty"`
+	HiveNames []HiveFact `json:"hive_names,omitempty"`
+}
+
+// HiveFact is a value a host's SYSTEM hive records, with where.
+type HiveFact struct {
+	Value      string `json:"value"`
+	Detail     string `json:"detail"`
+	EvidenceID int64  `json:"evidence_id"`
+}
+
+func sameHostName(a, b string) bool {
+	short := func(s string) string { s, _, _ = strings.Cut(strings.TrimSpace(s), "."); return s }
+	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+	return a != "" && (strings.EqualFold(a, b) || strings.EqualFold(short(a), short(b)))
+}
+
+// hiveFacts gives, by host id, what SYSTEM hives of the host's evidence
+// record about its names and addresses. A hive belongs to the host its
+// submission is assigned to, or, when the submission is not assigned, the
+// host it names. A hive naming another computer than the one its submission
+// is assigned to is not used, and the host gets a note saying so.
+func (s *Store) hiveFacts(hs []Host) (ips, names map[int64][]HiveFact, notes map[int64][]string, err error) {
+	ips, names, notes = map[int64][]HiveFact{}, map[int64][]HiveFact{}, map[int64][]string{}
+	assigned := map[int64]*int64{}
+	rows, err := s.w.Query(`SELECT b.batch_id, b.host_id FROM batch_hosts b WHERE b.id IN (SELECT max(id) FROM batch_hosts GROUP BY batch_id)`)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for rows.Next() {
+		var batch int64
+		var id sql.NullInt64
+		if err := rows.Scan(&batch, &id); err != nil {
+			rows.Close()
+			return nil, nil, nil, err
+		}
+		if id.Valid {
+			v := id.Int64
+			assigned[batch] = &v
+		} else {
+			assigned[batch] = nil
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, nil, err
+	}
+	rows, err = s.w.Query(`SELECT e.id, e.batch_id, f.key, f.value, f.detail FROM facts f JOIN evidence e ON e.id = f.evidence_id
+		WHERE f.key IN ('host.name','host.dns_name','host.ip_address') ORDER BY e.id, f.id`)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	type ev struct {
+		batch        int64
+		name         string
+		dns, ip      []HiveFact
+		seenDNS, ip4 map[string]bool
+	}
+	var order []int64
+	evs := map[int64]*ev{}
+	for rows.Next() {
+		var id, batch int64
+		var k, v, d string
+		if err := rows.Scan(&id, &batch, &k, &v, &d); err != nil {
+			rows.Close()
+			return nil, nil, nil, err
+		}
+		e := evs[id]
+		if e == nil {
+			e = &ev{batch: batch, seenDNS: map[string]bool{}, ip4: map[string]bool{}}
+			evs[id] = e
+			order = append(order, id)
+		}
+		switch k {
+		case "host.name":
+			e.name = v
+		case "host.dns_name":
+			if !e.seenDNS[v] { // a run read again gives its facts again
+				e.seenDNS[v] = true
+				e.dns = append(e.dns, HiveFact{v, d, id})
+			}
+		case "host.ip_address":
+			if ip, ok := normIP(v); ok && !e.ip4[ip] {
+				e.ip4[ip] = true
+				e.ip = append(e.ip, HiveFact{ip, d, id})
+			}
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, nil, err
+	}
+	noted := map[string]bool{}
+	for _, id := range order {
+		e := evs[id]
+		if len(e.dns) == 0 && len(e.ip) == 0 {
+			continue
+		}
+		var host *Host
+		if a, ok := assigned[e.batch]; ok {
+			if a == nil {
+				continue // stated to be from no host
+			}
+			for i := range hs {
+				if hs[i].ID == *a {
+					host = &hs[i]
+				}
+			}
+			if host != nil && e.name != "" && !sameHostName(e.name, host.Name) {
+				msg := fmt.Sprintf("a SYSTEM hive in its evidence (item %d) names the computer %s, so the addresses it records are not used", id, e.name)
+				if !noted[msg] {
+					noted[msg] = true
+					notes[host.ID] = append(notes[host.ID], msg)
+				}
+				continue
+			}
+		} else {
+			for i := range hs {
+				if sameHostName(e.name, hs[i].Name) {
+					host = &hs[i]
+					break
+				}
+			}
+		}
+		if host == nil {
+			continue
+		}
+		names[host.ID] = append(names[host.ID], e.dns...)
+		ips[host.ID] = append(ips[host.ID], e.ip...)
+	}
+	return ips, names, notes, nil
 }
 
 // HostIdentities lists every host of the case with what is stated about how
@@ -233,6 +367,10 @@ func (s *Store) HostIdentities() ([]HostIdentity, error) {
 		return nil, err
 	}
 	d, err := s.currentDetails()
+	if err != nil {
+		return nil, err
+	}
+	hiveIPs, hiveNames, hiveNotes, err := s.hiveFacts(hs)
 	if err != nil {
 		return nil, err
 	}
@@ -273,6 +411,20 @@ func (s *Store) HostIdentities() ([]HostIdentity, error) {
 				id.Clock, id.ClockStated = c, true
 			} else {
 				id.Unread = append(id.Unread, fmt.Sprintf("its clock difference %q was not understood; write it as, for example, 3 minutes ahead or -90s", t))
+			}
+		}
+		id.Unread = append(id.Unread, hiveNotes[h.ID]...)
+		seen := map[string]bool{}
+		for _, f := range hiveIPs[h.ID] {
+			if !seen[f.Value] {
+				seen[f.Value] = true
+				id.HiveIPs = append(id.HiveIPs, f)
+			}
+		}
+		for _, f := range hiveNames[h.ID] {
+			if !seen["n"+f.Value] {
+				seen["n"+f.Value] = true
+				id.HiveNames = append(id.HiveNames, f)
 			}
 		}
 		out = append(out, id)

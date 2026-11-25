@@ -15,9 +15,10 @@ import (
 
 // Registry value types.
 const (
-	RegSZ     = 1
-	RegBinary = 3
-	RegDWORD  = 4
+	RegSZ      = 1
+	RegBinary  = 3
+	RegDWORD   = 4
+	RegMultiSZ = 7
 )
 
 // Key is a registry key with its values and subkeys.
@@ -43,6 +44,13 @@ func SZ(name, s string) Value {
 		b = binary.LittleEndian.AppendUint16(b, c)
 	}
 	return Value{name, RegSZ, b}
+}
+
+// MultiSZ is a list of strings value.
+func MultiSZ(name string, list ...string) Value {
+	v := SZ(name, strings.Join(list, "\x00")+"\x00")
+	v.Type = RegMultiSZ
+	return v
 }
 
 // DWORD is a 32-bit number value.

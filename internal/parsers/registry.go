@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -18,7 +19,7 @@ type registryParser struct{}
 
 func (registryParser) Name() string { return "registry" }
 func (registryParser) Version() string {
-	return "15 (velocidex/regparser 31e704a; recent-file lists, SAM accounts, networks; key times to 100 ns; known folders named; Amcache name-and-hash entries; ShimCache times to 100 ns; BAM entries for Store apps; ShimCache slack and executed flag; transaction logs applied; deleted keys and values recovered; portable device, web folder and property view shell items)"
+	return "16 (velocidex/regparser 31e704a; the computer's addresses and domain from Tcpip; recent-file lists, SAM accounts, networks; key times to 100 ns; known folders named; Amcache name-and-hash entries; ShimCache times to 100 ns; BAM entries for Store apps; ShimCache slack and executed flag; transaction logs applied; deleted keys and values recovered; portable device, web folder and property view shell items)"
 }
 
 const (
@@ -288,7 +289,130 @@ func systemFacts(ctx *Context, reg *regparser.Registry) string {
 			}
 		}
 	}
+	tcpipFacts(ctx, reg, cs, host)
 	return host
+}
+
+// tcpipFacts reads the computer's domain and its IPv4 addresses from
+// Services\Tcpip\Parameters: the full name (host.dns_name) and each address
+// an interface was set to or last leased by DHCP (host.ip_address, the detail
+// saying which and when). Connections from other hosts that name only an
+// address are matched on these.
+func tcpipFacts(ctx *Context, reg *regparser.Registry, cs, host string) {
+	base := cs + `\Services\Tcpip\Parameters`
+	vals := func(k *regparser.CM_KEY_NODE) map[string]*regparser.ValueData {
+		m := map[string]*regparser.ValueData{}
+		for _, v := range k.Values() {
+			if d := safeData(v); d != nil {
+				m[strings.ToLower(valueName(v))] = d
+			}
+		}
+		return m
+	}
+	str := func(d *regparser.ValueData) string {
+		if d == nil || (d.Type != regparser.REG_SZ && d.Type != regparser.REG_EXPAND_SZ) {
+			return ""
+		}
+		return strings.TrimSpace(strings.TrimRight(d.String, "\x00"))
+	}
+	num := func(d *regparser.ValueData) (uint64, bool) {
+		if d == nil || (d.Type != regparser.REG_DWORD && d.Type != regparser.REG_QWORD) {
+			return 0, false
+		}
+		return d.Uint64, true
+	}
+	k := reg.OpenKey(base)
+	if k == nil {
+		return
+	}
+	p := vals(k)
+	name := str(p["hostname"])
+	if name == "" {
+		name = host
+	}
+	for _, dk := range []string{"domain", "nv domain", "dhcpdomain"} {
+		if dom := strings.Trim(str(p[dk]), ". "); dom != "" && name != "" && validDNS(name+"."+dom) {
+			ctx.Fact("host.dns_name", strings.ToUpper(name+"."+dom), fmt.Sprintf(`the computer's name with its domain, from %s (%s)`, base, valueLabel(dk)))
+			break
+		}
+	}
+	ifs := reg.OpenKey(base + `\Interfaces`)
+	if ifs == nil {
+		return
+	}
+	seen := map[string]bool{}
+	for _, ik := range ifs.Subkeys() {
+		path := base + `\Interfaces\` + clean(keyName(ik))
+		v := vals(ik)
+		dhcp, _ := num(v["enabledhcp"])
+		var addrs []string
+		how := "set on the interface"
+		if dhcp == 1 {
+			addrs = []string{str(v["dhcpipaddress"])}
+			how = "leased by DHCP"
+			var when []string
+			if t, ok := num(v["leaseobtainedtime"]); ok && t > 0 {
+				when = append(when, "obtained "+time.Unix(int64(t), 0).UTC().Format("2006-01-02 15:04:05")+" UTC")
+			}
+			if t, ok := num(v["leaseterminatestime"]); ok && t > 0 {
+				when = append(when, "ending "+time.Unix(int64(t), 0).UTC().Format("2006-01-02 15:04:05")+" UTC")
+			}
+			if srv := str(v["dhcpserver"]); srv != "" && srv != "255.255.255.255" {
+				when = append(when, "from the DHCP server "+srv)
+			}
+			if len(when) > 0 {
+				how += " (" + strings.Join(when, ", ") + ")"
+			}
+		} else if d := v["ipaddress"]; d != nil {
+			switch d.Type {
+			case regparser.REG_MULTI_SZ:
+				addrs = d.MultiSz
+			case regparser.REG_SZ:
+				addrs = []string{d.String}
+			}
+		}
+		for _, a := range addrs {
+			ip := net.ParseIP(strings.TrimSpace(strings.TrimRight(a, "\x00")))
+			if ip == nil || ip.To4() == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsMulticast() || ip.Equal(net.IPv4bcast) {
+				continue
+			}
+			s := ip.To4().String()
+			if seen[s] {
+				continue
+			}
+			seen[s] = true
+			ctx.Fact("host.ip_address", s, fmt.Sprintf("an address of this computer, %s, from %s", how, path))
+		}
+	}
+}
+
+func valueLabel(lower string) string {
+	switch lower {
+	case "nv domain":
+		return "NV Domain"
+	case "dhcpdomain":
+		return "DhcpDomain, given by DHCP"
+	}
+	return "Domain"
+}
+
+// validDNS says whether s is a plausible DNS name: letters, digits, hyphens
+// and dots, each label 1 to 63 characters.
+func validDNS(s string) bool {
+	if len(s) > 253 {
+		return false
+	}
+	for _, l := range strings.Split(s, ".") {
+		if l == "" || len(l) > 63 {
+			return false
+		}
+		for _, r := range l {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func rot13(s string) string {

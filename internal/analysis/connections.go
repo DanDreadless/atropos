@@ -118,6 +118,25 @@ type connCtx struct {
 type learnedIP struct {
 	host  string
 	event int64
+	hive  *store.HiveFact // the address is recorded in the host's own SYSTEM hive
+}
+
+// how says where an address of a host was learned.
+func (l learnedIP) how() string {
+	if l.hive != nil {
+		return fmt.Sprintf("the SYSTEM hive of item %d", l.hive.EvidenceID)
+	}
+	return fmt.Sprintf("event %d", l.event)
+}
+
+// hiveHow is the part of a hive address fact's detail saying how the
+// address was set: "leased by DHCP (obtained …)" or "set on the interface".
+func hiveHow(detail string) string {
+	d := strings.TrimPrefix(detail, "an address of this computer, ")
+	if i := strings.LastIndex(d, ", from "); i > 0 && strings.Contains(d[i:], `\Interfaces\`) {
+		d = d[:i]
+	}
+	return d
 }
 
 func shortName(n string) string {
@@ -178,6 +197,31 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 			c.notes = append(c.notes, h.Name+": "+u)
 		}
 	}
+	// The full names hosts' own SYSTEM hives give, where nothing stated
+	// says otherwise.
+	hiveName := map[string]string{}
+	for _, h := range ids {
+		for _, f := range h.HiveNames {
+			n := strings.ToUpper(f.Value)
+			if other, ok := c.byName[n]; ok {
+				if other != h.Name {
+					c.notes = append(c.notes, fmt.Sprintf("%s's SYSTEM hive (item %d) gives its name as %s, but that is stated as a name of %s; the stated name is used", h.Name, f.EvidenceID, n, other))
+				}
+				continue
+			}
+			if other, ok := hiveName[n]; ok && other != h.Name {
+				hiveName[n] = ""
+				continue
+			}
+			hiveName[n] = h.Name
+		}
+	}
+	for n, h := range hiveName {
+		if h != "" {
+			c.byName[n] = h
+			c.hosts[strings.ToUpper(h)].Names = append(c.hosts[strings.ToUpper(h)].Names, n)
+		}
+	}
 	for sn, h := range shortSeen {
 		if _, full := c.byName[sn]; !full && h != "" {
 			c.byName[sn] = h
@@ -189,9 +233,33 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		}
 	}
 
-	// An address is learned for a host from a logon record that names both
+	// An address is learned for a host from its own SYSTEM hive (the last
+	// address each interface had), and from a logon record that names both
 	// the workstation and the address it came from.
 	conflict := map[string]bool{}
+	for _, h := range ids {
+		for i := range h.HiveIPs {
+			f := &h.HiveIPs[i]
+			ip := f.Value
+			if stated, ok := c.byIP[ip]; ok {
+				if stated != h.Name && !conflict["s"+ip] {
+					conflict["s"+ip] = true
+					c.notes = append(c.notes, fmt.Sprintf("%s's SYSTEM hive (item %d) records %s as its address, but that is stated as an address of %s; the stated address is used", h.Name, f.EvidenceID, ip, stated))
+				}
+				continue
+			}
+			if l, ok := c.learned[ip]; ok && l.host != h.Name {
+				if !conflict[ip] {
+					conflict[ip] = true
+					c.notes = append(c.notes, fmt.Sprintf("%s is recorded as an address by the SYSTEM hives of both %s (item %d) and %s (item %d), so it is not used to match either: addresses change hands", ip, l.host, l.hive.EvidenceID, h.Name, f.EvidenceID))
+				}
+				continue
+			}
+			if _, ok := c.learned[ip]; !ok {
+				c.learned[ip] = learnedIP{host: h.Name, hive: f}
+			}
+		}
+	}
 	for _, e := range evs {
 		if !strings.HasSuffix(e.Act, "-in") {
 			continue
@@ -214,12 +282,12 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		if l, ok := c.learned[ip]; ok && l.host != h {
 			if !conflict[ip] {
 				conflict[ip] = true
-				c.notes = append(c.notes, fmt.Sprintf("%s was used by both %s (event %d) and %s (event %d), so it is not used to match either: addresses change hands", ip, l.host, l.event, h, e.EventID))
+				c.notes = append(c.notes, fmt.Sprintf("%s was used by both %s (%s) and %s (event %d), so it is not used to match either: addresses change hands", ip, l.host, l.how(), h, e.EventID))
 			}
 			continue
 		}
 		if _, ok := c.learned[ip]; !ok {
-			c.learned[ip] = learnedIP{h, e.EventID}
+			c.learned[ip] = learnedIP{host: h, event: e.EventID}
 		}
 	}
 	for ip := range conflict {
@@ -227,6 +295,10 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 	}
 	var learnedNotes []string
 	for ip, l := range c.learned {
+		if l.hive != nil {
+			learnedNotes = append(learnedNotes, fmt.Sprintf("%s is taken to be %s's address: its SYSTEM hive (item %d) records it as %s. That is the address the computer last had, not necessarily the one it had at the time: state the host's addresses on the Details tab to rely on them instead", ip, l.host, l.hive.EvidenceID, hiveHow(l.hive.Detail)))
+			continue
+		}
 		learnedNotes = append(learnedNotes, fmt.Sprintf("%s is taken to be %s's address: event %d records a logon from workstation %s at that address. State the host's addresses on the Details tab to rely on them instead", ip, l.host, l.event, l.host))
 	}
 	sort.Strings(learnedNotes)
@@ -293,6 +365,9 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 				return hostNode(h), fmt.Sprintf("%s, an address stated for %s", ip, h)
 			}
 			if l, ok := c.learned[ip]; ok {
+				if l.hive != nil {
+					return hostNode(l.host), fmt.Sprintf("%s, the address %s's SYSTEM hive records", ip, l.host)
+				}
 				return hostNode(l.host), fmt.Sprintf("%s, the address %s had in event %d", ip, l.host, l.event)
 			}
 		}
