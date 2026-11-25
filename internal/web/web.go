@@ -412,6 +412,11 @@ func (sv *server) event(w http.ResponseWriter, r *http.Request) {
 	if folder, err := sv.s.JournalParent(e); err == nil && folder != nil {
 		out["journal_folder"] = folder
 	}
+	// What it shows of a connection between computers, for "Show its
+	// connections".
+	if what, err := sv.s.EventObserved(id); err == nil && what != "" {
+		out["connection_record"] = what
+	}
 	writeJSON(w, out)
 }
 

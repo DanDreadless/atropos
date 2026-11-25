@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"regexp"
@@ -53,6 +54,7 @@ CREATE TABLE IF NOT EXISTS observables (
 );
 CREATE INDEX IF NOT EXISTS observables_run ON observables(run_id, version);
 CREATE INDEX IF NOT EXISTS observables_act ON observables(act, version);
+CREATE INDEX IF NOT EXISTS observables_event ON observables(event_id);
 CREATE TABLE IF NOT EXISTS observables_done (
   run_id  INTEGER NOT NULL REFERENCES runs(id),
   version INTEGER NOT NULL,
@@ -1074,6 +1076,19 @@ func normHostName(s string) string {
 		return ""
 	}
 	return s
+}
+
+// EventObserved says what an event shows about a connection between
+// computers ("RDP client connecting (1024)"), or "" when it shows none: the
+// event is read by the current observables of an included run.
+func (s *Store) EventObserved(eventID int64) (string, error) {
+	var what string
+	err := s.r.QueryRow(`SELECT o.what FROM observables o JOIN current_runs c ON c.run_id = o.run_id AND c.evidence_id`+notExcluded+`
+		WHERE o.event_id = ? AND o.version = ? LIMIT 1`, eventID, observablesVersion).Scan(&what)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return what, err
 }
 
 // ObservedEvents lists the observed events of the current, included runs

@@ -709,7 +709,7 @@ async function openVisit(evidenceId, visitId) {
   } catch (err) { fail(err); }
 }
 
-function renderDetail({ event: e, evidence: ev, annotations, journal_folder: jf }) {
+function renderDetail({ event: e, evidence: ev, annotations, journal_folder: jf, connection_record: conn }) {
   const panel = $('detail');
   const fields = e.fields || {};
   const caveat = fields._time_caveat;
@@ -741,6 +741,10 @@ function renderDetail({ event: e, evidence: ev, annotations, journal_folder: jf 
     kids.push(h('div', { class: 'note info' }, `The journal names the folder only by its file-table entry. This is that folder in the file table of #${jf.evidence_id}: ${jf.note}.`));
   }
   kids.push(h('h3', {}, 'Message'), h('pre', { class: 'msg' }, e.message));
+  if (conn) {
+    kids.push(h('div', { class: 'note info cnfrom' }, 'Read for the Connections tab: ', conn, '. ',
+      h('button', { class: 'link', onclick: () => showEventConnections(e.id, conn) }, 'Show its connections')));
+  }
 
   if (ev.kind === 'picture') kids.push(h('h3', {}, 'Picture'), pictureOf(ev));
   kids.push(h('h3', {}, 'Where this came from'), kv([

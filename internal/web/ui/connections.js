@@ -51,6 +51,19 @@ function setCnKind(k) {
 function kindConns() { return CN.rep ? CN.rep.connections.filter((c) => !CN.kind || c.kind === CN.kind) : []; }
 function kindEdges() { return CN.rep ? CN.rep.edges.filter((e) => !CN.kind || e.kind === CN.kind) : []; }
 
+// Opens the tab on the connections an event of the timeline is part of,
+// read again so that they include what was added since.
+async function showEventConnections(id, what) {
+  CN.pick = { event: Number(id), what };
+  CN.kind = '';
+  CN.selected = null;
+  for (const b of $('cnkind').children) b.classList.toggle('on', b.dataset.kind === '');
+  $('cnall').hidden = false;
+  connectionsLoaded = true;
+  setView('connections');
+  await loadConnections();
+}
+
 async function loadConnections() {
   connectionsLoaded = true;
   $('cnsummary').replaceChildren('Reading…');
@@ -87,6 +100,7 @@ function pickedConns() {
   const all = kindConns();
   const p = CN.pick;
   if (!p) return all;
+  if (p.event != null) return all.filter((c) => c.event_ids.includes(p.event) || (c.named || []).some((n) => n.id === p.event));
   if (p.node) return all.filter((c) => c.from === p.node || c.to === p.node);
   return all.filter((c) => c.from === p.from && c.to === p.to && c.kind === p.kind);
 }
@@ -215,10 +229,12 @@ function drawGraph(box, r) {
       x.lbl.setAttribute('x', lx); x.lbl.setAttribute('y', ly - 4);
     }
   };
+  const picked = CN.pick ? pickedConns() : [];
   for (const e of edges) {
     const kind = e.strong ? 'strong' : e.possible ? 'possible' : 'oneend';
     const p = pathFor(e);
-    const on = CN.pick && CN.pick.from === e.from && CN.pick.to === e.to && CN.pick.kind === e.kind;
+    const on = CN.pick && (CN.pick.event != null ? picked.some((c) => c.from === e.from && c.to === e.to && c.kind === e.kind)
+      : CN.pick.from === e.from && CN.pick.to === e.to && CN.pick.kind === e.kind);
     const dim = CN.pick && (CN.pick.node ? e.from !== CN.pick.node && e.to !== CN.pick.node : !on);
     const kw = KIND_WORDS[e.kind] || e.kind;
     const title = `${cnLabel(e.from)} → ${cnLabel(e.to)}: ${e.count} ${kw.toLowerCase()} connection${e.count === 1 ? '' : 's'}` +
@@ -236,7 +252,7 @@ function drawGraph(box, r) {
   const conns = kindConns();
   for (const n of r.nodes) {
     const p = at[n.id];
-    const on = CN.pick && CN.pick.node === n.id;
+    const on = CN.pick && (CN.pick.event != null ? picked.some((c) => c.from === n.id || c.to === n.id) : CN.pick.node === n.id);
     const cls = 'cnnode ' + (n.in_case ? 'host' : n.kind) + (on ? ' on' : '');
     const count = conns.filter((c) => c.from === n.id || c.to === n.id).length;
     const title = `${n.label}${n.in_case ? ' (a host of the case)' : ''}: ${count} connection${count === 1 ? '' : 's'}` + (n.detail ? `. ${n.detail}` : '');
@@ -351,7 +367,8 @@ function drawConnRows() {
   const list = pickedConns();
   const out = [];
   if (CN.pick) {
-    out.push(h('p', { class: 'hint cnpicked' }, CN.pick.node ? `Connections to and from ${cnLabel(CN.pick.node)}` : `${KIND_WORDS[CN.pick.kind] || ''} connections from ${cnLabel(CN.pick.from)} to ${cnLabel(CN.pick.to)}`));
+    out.push(h('p', { class: 'hint cnpicked' }, CN.pick.event != null ? `Connections that event #${CN.pick.event} is part of (${CN.pick.what})`
+      : CN.pick.node ? `Connections to and from ${cnLabel(CN.pick.node)}` : `${KIND_WORDS[CN.pick.kind] || ''} connections from ${cnLabel(CN.pick.from)} to ${cnLabel(CN.pick.to)}`));
   }
   for (const c of list) {
     const on = CN.selected === c;
@@ -387,7 +404,9 @@ function drawConnRows() {
         h('button', { class: 'link', onclick: () => selectConn(c) }, on ? 'Hide the events' : 'Each end\'s events'),
         h('button', { class: 'link', onclick: () => showEvents(c.event_ids) }, `Show the ${c.event_ids.length} event${c.event_ids.length === 1 ? '' : 's'} on the timeline`))));
   }
-  if (!list.length) out.push(h('p', { class: 'anempty' }, !r.events ? 'No records of connections have been found in the evidence yet. Add the hosts\' Security, System and Terminal Services logs.' : CN.kind ? 'No connections of this kind were found.' : 'No connections were found.'));
+  if (!list.length && CN.pick && CN.pick.event != null) {
+    out.push(h('p', { class: 'anempty' }, `Event #${CN.pick.event} is not part of any connection. Network logons and connections to file sharing support a connection but are not shown on their own, and records of a host's own work (a service, task or WMI program with no network logon near it) are taken as local: the notes below list those.`));
+  } else if (!list.length) out.push(h('p', { class: 'anempty' }, !r.events ? 'No records of connections have been found in the evidence yet. Add the hosts\' Security, System and Terminal Services logs.' : CN.kind ? 'No connections of this kind were found.' : 'No connections were found.'));
   out.push(h('div', { class: 'anhead' }, h('h3', {}, 'Notes'), h('ul', { class: 'annotes' }, ...r.notes.map((n) => h('li', {}, n)))));
   $('cnrows').replaceChildren(...out);
 }

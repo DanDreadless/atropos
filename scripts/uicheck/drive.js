@@ -746,6 +746,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.evaluate(() => [...document.querySelectorAll('#cnrows .cnrow')][2].querySelectorAll('.cnactions button')[1].click());
   await page.waitForFunction(() => !document.getElementById('view-timeline').hidden && document.querySelectorAll('#win .row').length === 9, { timeout: 20000 }).catch(() => {});
   ok((await page.$eval('#q', (el) => el.value)).startsWith('id:') && await summaryCount() === 9, 'a connection opens its nine events, from both hosts and the registry, on the timeline');
+  // And back: an event of a connection offers its connections.
+  await page.click('#win .row');
+  await page.waitForSelector('#detail:not([hidden]) .cnfrom', { timeout: 10000 }).catch(() => {});
+  const evId = await page.$eval('#detail h2', (x) => x.firstChild.textContent.replace('Event ', '')).catch(() => '');
+  ok(await count('#detail .cnfrom button') === 1, 'an event read for the Connections tab says so in its panel, with "Show its connections"');
+  await page.click('#detail .cnfrom button');
+  await page.waitForFunction(() => !document.getElementById('view-connections').hidden && document.querySelector('#cnrows .cnpicked'), { timeout: 20000 }).catch(() => {});
+  const evRows = await count('#cnrows .cnrow');
+  ok(evRows >= 1 && evRows < 15 && (await text('#cnrows .cnpicked')).startsWith(`Connections that event #${evId} is part of`) && await visible('#cnall') &&
+    await count('.cngraph .cnedge.dim, .cnlanes .cnconn.dim') > 0, `"Show its connections" opens the Connections tab on the ${evRows} connection(s) event #${evId} is part of, the rest dimmed`);
+  await page.click('#cnall');
+  ok(await count('#cnrows .cnrow') === 15, '"Show all" brings back every connection');
   await page.goto(URL, { waitUntil: 'networkidle0' });
 
   // ---- narrow window ----

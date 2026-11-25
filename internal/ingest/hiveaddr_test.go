@@ -113,6 +113,27 @@ func TestConnectionFromHiveAddress(t *testing.T) {
 		t.Errorf("WS-A's identity: %+v", ws)
 	}
 
+	// The event's detail says what it shows of a connection ("Show its
+	// connections"); an event of no connection, or of excluded evidence,
+	// says nothing.
+	rdp := cn.EventIDs[0]
+	if what, err := c.s.EventObserved(rdp); err != nil || !strings.Contains(what, "1149") {
+		t.Errorf("observed %q %v", what, err)
+	}
+	if what, err := c.s.EventObserved(rdp + 100000); err != nil || what != "" {
+		t.Errorf("no such event: %q %v", what, err)
+	}
+	ev, _ := c.s.GetEvent(rdp)
+	if err := c.s.SetExcluded(ev.EvidenceID, true, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if what, _ := c.s.EventObserved(rdp); what != "" {
+		t.Errorf("excluded: %q", what)
+	}
+	if err := c.s.SetExcluded(ev.EvidenceID, false, ""); err != nil {
+		t.Fatal(err)
+	}
+
 	// A stated address of another host wins, and says so.
 	if _, err := c.s.SetDetails("SRV-B", map[string]string{"ip_addresses": "10.1.2.30"}); err != nil {
 		t.Fatal(err)
