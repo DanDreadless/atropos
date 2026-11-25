@@ -243,6 +243,15 @@ func TestObserveArtefacts(t *testing.T) {
 		{"jump list local", "jumplist-entry-last-used", `C:\Users\alice\notes.txt`, `{}`, "", nil},
 		{"jump list device path", "jumplist-entry-last-used", `\\?\Volume{1}\x`, `{}`, "", nil},
 		{"jump list loopback", "jumplist-entry-last-used", `\\127.0.0.1\c$\x`, `{}`, "", nil},
+		{"USB storage last connected", "device-last-connected", "Disk&Ven_SanDisk&Prod_Cruzer_Blade&Rev_1.00", `{"device":"Disk&Ven_SanDisk&Prod_Cruzer_Blade&Rev_1.00","serial":"4C530001230109116201&0","bus":"USBSTOR"}`, "device",
+			[]Observable{{"device", "SanDisk Cruzer Blade", "object"}, {"serial", "4C530001230109116201", "object"}}},
+		{"USB storage with a made-up serial", "device-first-arrival", "Disk&Ven_&Prod_USB_DISK&Rev_PMAP", `{"device":"Disk&Ven_&Prod_USB_DISK&Rev_PMAP","serial":"7&2a5c6f1&0","bus":"USBSTOR"}`, "device",
+			[]Observable{{"device", "USB DISK", "object"}, {"serial", "7&2a5c6f1&0", "object"}}},
+		{"USB mouse", "device-first-arrival", "VID_046D&PID_C52B", `{"device":"VID_046D&PID_C52B","serial":"5&1f3a&0&1","bus":"USB"}`, "", nil},
+		{"USB storage key", "usb-device-key-last-write", "Kingston DataTraveler 3.0 USB Device", `{"key":"\\ControlSet001\\Enum\\USBSTOR\\Disk&Ven_Kingston&Prod_DataTraveler_3.0&Rev_PMAP\\60A44C3FAE22EEA0797900F7&0"}`, "device",
+			[]Observable{{"device", "Kingston DataTraveler 3.0 USB Device", "object"}, {"serial", "60A44C3FAE22EEA0797900F7", "object"}}},
+		{"USB storage key with no friendly name", "usb-device-key-last-write", "Disk&Ven_Kingston&Prod_DT&Rev_1", `{"key":"\\ControlSet001\\Enum\\USBSTOR\\Disk&Ven_Kingston&Prod_DT&Rev_1\\ABC&0"}`, "device",
+			[]Observable{{"device", "Kingston DT", "object"}, {"serial", "ABC", "object"}}},
 	}
 	for _, c := range cases {
 		var oe ObservedEvent

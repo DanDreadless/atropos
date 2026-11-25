@@ -101,12 +101,30 @@ type ConnEdge struct {
 	Last     int64  `json:"last_utc,string"`
 }
 
+// ConnLeaf is what a host of the case opens into on the graph: an account
+// its connections name, or a USB storage device its SYSTEM hive records.
+type ConnLeaf struct {
+	Node   string `json:"node"`
+	Kind   string `json:"kind"` // account, device
+	Label  string `json:"label"`
+	Detail string `json:"detail,omitempty"` // a device's serial
+	// An account: the connections it signed in to this host by, and those
+	// it made from it.
+	In  int `json:"in,omitempty"`
+	Out int `json:"out,omitempty"`
+	// First and Last are corrected for the host's stated clock.
+	First  int64       `json:"first_utc,string"`
+	Last   int64       `json:"last_utc,string"`
+	Events []ConnEvent `json:"events"`
+}
+
 // ConnectionsReport is the whole reading.
 type ConnectionsReport struct {
 	Ready       bool                 `json:"ready"` // every run has been read
 	Nodes       []ConnNode           `json:"nodes"`
 	Edges       []ConnEdge           `json:"edges"`
 	Connections []Connection         `json:"connections"`
+	Leaves      []ConnLeaf           `json:"leaves"`
 	Hosts       []store.HostIdentity `json:"hosts"`
 	Notes       []string             `json:"notes"`
 	Events      int                  `json:"events"` // observed events read
@@ -171,11 +189,11 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	evs, ready, err := s.ObservedEvents("rdp-in", "rdp-out", "smb-in", "smb-out", "exec-in", "exec-out", "logon-in", "net-in", "net-out", "rdp-named", "smb-named", "rdp-end")
+	evs, ready, err := s.ObservedEvents("rdp-in", "rdp-out", "smb-in", "smb-out", "exec-in", "exec-out", "logon-in", "net-in", "net-out", "rdp-named", "smb-named", "rdp-end", "device")
 	if err != nil {
 		return nil, err
 	}
-	rep := &ConnectionsReport{Ready: ready, Hosts: ids, Events: len(evs), Nodes: []ConnNode{}, Edges: []ConnEdge{}, Connections: []Connection{}}
+	rep := &ConnectionsReport{Ready: ready, Hosts: ids, Events: len(evs), Nodes: []ConnNode{}, Edges: []ConnEdge{}, Connections: []Connection{}, Leaves: []ConnLeaf{}}
 	c := &connCtx{hosts: map[string]*store.HostIdentity{}, byName: map[string]string{}, byIP: map[string]string{}, learned: map[string]learnedIP{}}
 	shortSeen := map[string]string{}
 	for i := range ids {
@@ -427,7 +445,7 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		id  *store.HostIdentity
 	}
 	var loose []sourceless
-	var named, ends []store.ObservedEvent
+	var named, ends, devices []store.ObservedEvent
 	open := map[string]*cluster{}
 	for _, e := range evs {
 		if strings.HasSuffix(e.Act, "-named") {
@@ -436,6 +454,10 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		}
 		if e.Act == "rdp-end" {
 			ends = append(ends, e)
+			continue
+		}
+		if e.Act == "device" {
+			devices = append(devices, e)
 			continue
 		}
 		rec, hid := where(e)
@@ -1052,6 +1074,8 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		rep.Nodes = append(rep.Nodes, nodes[id])
 	}
 
+	rep.Leaves = c.leaves(rep.Connections, devices)
+
 	for _, h := range ids {
 		if w := clockWords(&h); w != "" {
 			rep.Notes = append(rep.Notes, "Times of "+h.Name+" are corrected for "+w+".")
@@ -1077,6 +1101,82 @@ func item(e store.ObservedEvent, kind, role string) string {
 		}
 	}
 	return ""
+}
+
+// leaves are the accounts each host's connections name, and the USB
+// storage devices its SYSTEM hive records, for the graph to open a host
+// into.
+func (c *connCtx) leaves(conns []Connection, devices []store.ObservedEvent) []ConnLeaf {
+	byKey := map[string]*ConnLeaf{}
+	var order []string
+	leaf := func(node, kind, key, label string, ts int64) *ConnLeaf {
+		k := node + "\x00" + kind + "\x00" + key
+		l := byKey[k]
+		if l == nil {
+			l = &ConnLeaf{Node: node, Kind: kind, Label: label, First: ts, Last: ts, Events: []ConnEvent{}}
+			byKey[k] = l
+			order = append(order, k)
+		}
+		if ts < l.First {
+			l.First = ts
+		}
+		if ts > l.Last {
+			l.Last = ts
+		}
+		return l
+	}
+	acct := func(a string) string { return strings.ToLower(a) }
+	for _, cn := range conns {
+		if cn.Undated {
+			continue
+		}
+		if e := cn.Target; e != nil && e.Account != "" && strings.HasPrefix(e.Node, "host:") {
+			l := leaf(e.Node, "account", acct(e.Account), e.Account, cn.Start)
+			l.In++
+			l.Events = append(l.Events, e.Events...)
+		}
+		if e := cn.Source; e != nil && e.Account != "" && strings.HasPrefix(e.Node, "host:") {
+			l := leaf(e.Node, "account", acct(e.Account), e.Account, cn.Start)
+			l.Out++
+			l.Events = append(l.Events, e.Events...)
+		}
+	}
+	for _, e := range devices {
+		h := c.hostByName(e.Host)
+		if h == "" {
+			continue // not a host of the case: there is no node to open
+		}
+		serial := item(e, "serial", "object")
+		ts := e.TSUTC
+		if hi := c.hosts[strings.ToUpper(h)]; hi != nil {
+			ts -= int64(hi.Clock)
+		}
+		l := leaf(hostNode(h), "device", strings.ToUpper(serial), item(e, "device", "object"), ts)
+		l.Detail = "serial " + serial
+		// The friendly name from the key reads better than the vendor and
+		// product.
+		if strings.Contains(e.What, "key last written") {
+			l.Label = item(e, "device", "object")
+		}
+		l.Events = append(l.Events, ConnEvent{ID: e.EventID, TS: e.TSUTC, What: e.What})
+	}
+	out := make([]ConnLeaf, 0, len(order))
+	for _, k := range order {
+		l := byKey[k]
+		sort.SliceStable(l.Events, func(a, b int) bool { return l.Events[a].TS < l.Events[b].TS })
+		out = append(out, *l)
+	}
+	sort.SliceStable(out, func(a, b int) bool {
+		x, y := out[a], out[b]
+		if x.Node != y.Node {
+			return x.Node < y.Node
+		}
+		if x.Kind != y.Kind {
+			return x.Kind < y.Kind
+		}
+		return x.First < y.First
+	})
+	return out
 }
 
 func isLoopback(ip string) bool {

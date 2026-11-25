@@ -2,6 +2,8 @@ package ingest
 
 import (
 	"bytes"
+	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +17,7 @@ import (
 )
 
 // systemHive is a SYSTEM hive naming the computer, with one address leased
-// by DHCP and the domain.
+// by DHCP and the domain, and a USB stick last connected at 08:30.
 func systemHive(t *testing.T, name, ip string) []byte {
 	t.Helper()
 	t0 := time.Date(2026, 11, 2, 7, 0, 0, 0, time.UTC)
@@ -27,6 +29,11 @@ func systemHive(t *testing.T, name, ip string) []byte {
 	root.Path(tcp+`\Interfaces\{0D1C2B3A-0000-4000-8000-000000000001}`, t0).Values = []artw.Value{
 		artw.DWORD("EnableDHCP", 1), artw.SZ("DhcpIPAddress", ip), artw.DWORD("LeaseObtainedTime", uint32(t0.Unix())),
 	}
+	stick := `ControlSet001\Enum\USBSTOR\Disk&Ven_SanDisk&Prod_Cruzer_Blade&Rev_1.00\4C530001230109116201&0`
+	root.Path(stick, t0).Values = []artw.Value{artw.SZ("FriendlyName", "SanDisk Cruzer Blade USB Device")}
+	ft := make([]byte, 8)
+	binary.LittleEndian.PutUint64(ft, uint64(time.Date(2026, 11, 2, 8, 30, 0, 0, time.UTC).UnixNano()/100+116444736000000000))
+	root.Path(stick+`\Properties\{83da6326-97a6-4088-9453-a1923f573b29}\0066`, t0).Values = []artw.Value{{Name: "", Type: 0x10, Data: ft}}
 	b, err := artw.Hive(root, `\REGISTRY\MACHINE\SYSTEM`, t0)
 	if err != nil {
 		t.Fatal(err)
@@ -102,6 +109,14 @@ func TestConnectionFromHiveAddress(t *testing.T) {
 	if !strings.Contains(notes, "10.1.2.30 is taken to be WS-A's address: its SYSTEM hive (item ") ||
 		!strings.Contains(notes, "records it as leased by DHCP (obtained 2026-11-02 07:00:00 UTC). That is the address the computer last had") {
 		t.Errorf("notes: %s", notes)
+	}
+	// WS-A opens into its USB stick, SRV-B into the account that signed in.
+	var got []string
+	for _, l := range rep.Leaves {
+		got = append(got, fmt.Sprintf("%s %s %s %q in %d out %d, %d events, last %s", l.Node, l.Kind, l.Label, l.Detail, l.In, l.Out, len(l.Events), time.Unix(0, l.Last).UTC().Format("15:04")))
+	}
+	if strings.Join(got, " | ") != `host:SRV-B account CORP\alice "" in 1 out 0, 1 events, last 09:00 | host:WS-A device SanDisk Cruzer Blade USB Device "serial 4C530001230109116201" in 0 out 0, 2 events, last 08:30` {
+		t.Errorf("leaves: %s", strings.Join(got, " | "))
 	}
 	var ws *store.HostIdentity
 	for i := range rep.Hosts {

@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -157,6 +158,22 @@ func TestLateralMovementConnections(t *testing.T) {
 		if c.Kind != "rdp" && c.EndHow != "" {
 			t.Errorf("connection %d (%s) has a session end", i, c.Kind)
 		}
+	}
+	// What each host opens into on the graph: the accounts of its
+	// connections, and WS-ALICE's USB stick, its times corrected for her
+	// clock.
+	var leaves []string
+	for _, l := range rep.Leaves {
+		leaves = append(leaves, fmt.Sprintf("%s %s %s in %d out %d %d events %s-%s", l.Node, l.Kind, l.Label, l.In, l.Out, len(l.Events),
+			time.Unix(0, l.First).UTC().Format("15:04:05"), time.Unix(0, l.Last).UTC().Format("15:04:05")))
+	}
+	if got := strings.Join(leaves, "\n"); got != `host:DC01 account CORP\svc_backup in 3 out 0 19 events 09:41:03-11:20:30
+host:DC01 account CORP\alice in 3 out 0 15 events 10:20:00-11:35:40
+host:SRV-FILE01 account CORP\svc_backup in 1 out 3 14 events 08:55:10-11:20:30
+host:SRV-FILE01 account CORP\alice in 5 out 0 21 events 09:14:18-12:05:10
+host:WS-ALICE account CORP\alice in 0 out 6 9 events 09:14:18-12:05:10
+host:WS-ALICE device Kingston DataTraveler 3.0 USB Device in 0 out 0 5 events 08:40:11-11:58:30` {
+		t.Errorf("leaves:\n%s", got)
 	}
 	// Records of the registry alone: shown with their time said to be the
 	// key's, never paired.

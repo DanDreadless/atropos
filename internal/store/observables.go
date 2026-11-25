@@ -23,8 +23,11 @@ import (
 // on the computer connecting, "rdp-in" on the computer connected to; "smb-"
 // for a file share, "exec-" for a program started remotely (PsExec, a
 // service or task created over the network, WinRM, WMI); "logon-in" for a
-// network logon, which only supports the others. Devices and hashes are to
-// follow (the plan, H.2).
+// network logon, which only supports the others. "device" is a USB storage
+// device in a computer's SYSTEM hive (its first install, first and last
+// connection, removal, and its key's last write): never a connection, it
+// is shown with the host it was plugged into. Hashes are to follow (the
+// plan, H.2).
 //
 // "rdp-named" and "smb-named" are the connecting computer's registry
 // naming a computer it connected to (the Remote Desktop server lists,
@@ -36,7 +39,7 @@ import (
 // item saying how it was started: service, task, wmi or winrm. The analysis
 // ties it to a network logon by time, and by account where it names one.
 
-const observablesVersion = 6
+const observablesVersion = 7
 
 const observablesSchema = `
 CREATE TABLE IF NOT EXISTS observables (
@@ -47,7 +50,7 @@ CREATE TABLE IF NOT EXISTS observables (
   host        TEXT NOT NULL,      -- the event's host
   act         TEXT NOT NULL,      -- what the event shows: rdp-out, rdp-in, smb-in, exec-out, logon-in...
   what        TEXT NOT NULL,      -- the event, briefly: "RDP client connecting (1024)"
-  kind        TEXT NOT NULL,      -- ip, host, account, share, file, service, task, class, program, via, logon, session, end
+  kind        TEXT NOT NULL,      -- ip, host, account, share, file, service, task, class, program, via, logon, session, end, device, serial
   value       TEXT NOT NULL,
   role        TEXT NOT NULL,      -- source, target, subject, object
   version     INTEGER NOT NULL
@@ -126,10 +129,11 @@ func (s *Store) computeObservables(runID int64) error {
 	}
 	// The connecting computer's own records outside its logs: the
 	// registry's Remote Desktop server lists and MountPoints2, and jump
-	// list entries on a share.
+	// list entries on a share; and USB storage devices.
 	rows, err = s.r.Query(`SELECT id, evidence_id, ts_utc, host, ts_type, path, fields FROM events
-		WHERE run_id = ? AND source IN ('registry', 'jumplist') AND ts_type IN (?,?,?,?)`,
-		runID, "rdp-client-server-key-last-write", "rdp-client-recent-key-last-write", "network-share-key-last-write", "jumplist-entry-last-used")
+		WHERE run_id = ? AND source IN ('registry', 'jumplist') AND ts_type IN (?,?,?,?,?,?,?,?,?)`,
+		runID, "rdp-client-server-key-last-write", "rdp-client-recent-key-last-write", "network-share-key-last-write", "jumplist-entry-last-used",
+		"usb-device-key-last-write", "device-first-installed", "device-first-arrival", "device-last-connected", "device-last-removed")
 	if err != nil {
 		return err
 	}
@@ -1013,6 +1017,10 @@ func normIP(s string) (string, bool) {
 func observeArtefact(oe *ObservedEvent, typ, path, fieldsJSON string) bool {
 	var f struct {
 		Application string `json:"application"`
+		Device      string `json:"device"`
+		Serial      string `json:"serial"`
+		Bus         string `json:"bus"`
+		Key         string `json:"key"`
 		Values      map[string]struct {
 			Data string `json:"data"`
 		} `json:"values"`
@@ -1108,10 +1116,71 @@ func observeArtefact(oe *ObservedEvent, typ, path, fieldsJSON string) bool {
 			app = "an application"
 		}
 		oe.Act, oe.What = "smb-out", "File on a share opened (jump list of "+app+"): "+path
+	case "device-first-installed", "device-first-arrival", "device-last-connected", "device-last-removed":
+		// Only storage: the USB bus also lists every mouse, hub and
+		// receiver, and SCSI the computer's own disks.
+		if f.Bus != "USBSTOR" || f.Device == "" || f.Serial == "" {
+			return false
+		}
+		name := deviceName(f.Device)
+		add("device", name, "object")
+		add("serial", deviceSerial(f.Serial), "object")
+		oe.Act, oe.What = "device", "USB storage "+deviceTimes[typ]+": "+name+" (registry, Enum\\USBSTOR)"
+	case "usb-device-key-last-write":
+		// ...\Enum\USBSTOR\<device>\<serial>; the path is its FriendlyName.
+		parts := strings.Split(f.Key, `\`)
+		if len(parts) < 2 {
+			return false
+		}
+		name := clean(path)
+		if name == "" || name == parts[len(parts)-2] {
+			name = deviceName(parts[len(parts)-2])
+		}
+		add("device", name, "object")
+		add("serial", deviceSerial(parts[len(parts)-1]), "object")
+		oe.Act, oe.What = "device", "USB storage device's key last written: "+name+" (registry, Enum\\USBSTOR)"
 	default:
 		return false
 	}
 	return true
+}
+
+var deviceTimes = map[string]string{
+	"device-first-installed": "device first installed",
+	"device-first-arrival":   "device first connected",
+	"device-last-connected":  "device last connected",
+	"device-last-removed":    "device last removed",
+}
+
+// deviceName makes "Disk&Ven_SanDisk&Prod_Cruzer_Blade&Rev_1.00" read
+// "SanDisk Cruzer Blade".
+func deviceName(id string) string {
+	var ven, prod string
+	for _, p := range strings.Split(id, "&") {
+		switch {
+		case strings.HasPrefix(strings.ToLower(p), "ven_"):
+			ven = p[4:]
+		case strings.HasPrefix(strings.ToLower(p), "prod_"):
+			prod = p[5:]
+		}
+	}
+	n := strings.TrimSpace(strings.ReplaceAll(strings.TrimSpace(ven+" "+prod), "_", " "))
+	if n == "" {
+		return id
+	}
+	return n
+}
+
+// deviceSerial is the serial without the "&0" Windows adds; one whose
+// second character is "&" was made up by Windows, the device having none,
+// and is kept whole.
+func deviceSerial(s string) string {
+	if len(s) > 2 && s[1] != '&' {
+		if i := strings.LastIndexByte(s, '&'); i > 0 {
+			return s[:i]
+		}
+	}
+	return s
 }
 
 func isIPText(s string) bool {

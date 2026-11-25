@@ -731,6 +731,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.evaluate(() => [...document.querySelectorAll('.cngraph .cnnode')].find((g) => g.textContent.endsWith('WS-ALICE')).dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 })));
   await page.waitForFunction(() => document.querySelectorAll('#cnrows .cnrow').length === 11, { timeout: 5000 }).catch(() => {});
   ok(await count('#cnrows .cnrow') === 11 && !(await page.$eval('#cnall', (b) => b.hidden)), 'picking a host lists only its connections, with a way back to all');
+  ok(await count('.cngraph .cnleaf') === 2 && await count('.cngraph .cnleaf.device') === 1 && await count('.cngraph .cnleafline') === 2 &&
+    (await text('#cnrows .cnleaves')).includes('Kingston DataTraveler 3.0 USB Device, serial 60A44C3FAE22EEA0797900F7: 5 records in the SYSTEM hive, 2026-11-20 08:40:11 to 2026-11-20 11:58:30 UTC') &&
+    (await text('#cnrows .cnleaves')).includes('CORP\\alice: connected out by 6') && (await text('#cnlegend')).includes('small: an account or USB storage device'),
+    'a host picked opens into its account and its USB stick (times corrected for its clock), on the graph and in the list: ' + await text('#cnrows .cnleaves'));
+  await shot('18b-connections-host');
+  await page.click('.cngraph .cnleaf.device');
+  await page.waitForFunction(() => !document.getElementById('view-timeline').hidden && document.querySelectorAll('#win .row').length === 5, { timeout: 20000 }).catch(() => {});
+  ok(await summaryCount() === 5 && (await text('#win')).includes('Kingston'), "a device opens its five records on the timeline");
+  await page.click('#nav [data-view=connections]');
+  await page.waitForFunction(() => document.querySelectorAll('#cnrows .cnrow').length === 11, { timeout: 10000 }).catch(() => {});
   await page.click('#cnmode [data-mode=lanes]');
   ok(await count('.cnlanes .cnconn') === 15 && await count('.cnlanes .cnconn.dim') === 4 && await count('.cnlanes .cnend.missing') === 6 && await count('.cnlanes .cnkindtag') === 15 &&
     await count('.cnlanes .cnconn.undated') === 2,

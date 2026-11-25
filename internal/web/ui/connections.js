@@ -68,6 +68,25 @@ function kindEdges() {
   return [...m.values()];
 }
 
+// The accounts and USB storage devices of a host, in the period chosen:
+// what a host picked on the graph opens into.
+function nodeLeaves(id) {
+  const r = CN.range;
+  return CN.rep && CN.rep.leaves ? CN.rep.leaves.filter((l) => l.node === id &&
+    (!r || ((r.from == null || BigInt(l.last_utc) >= r.from) && (r.to == null || BigInt(l.first_utc) <= r.to)))) : [];
+}
+
+function leafWords(l) {
+  if (l.kind === 'device') {
+    return `USB storage device ${l.label}, ${l.detail}: ${l.events.length} record${l.events.length === 1 ? '' : 's'} in the SYSTEM hive, ${fmtNs(l.first_utc, 0)}` +
+      (l.last_utc !== l.first_utc ? ` to ${fmtNs(l.last_utc, 0)}` : '') + ' UTC';
+  }
+  const parts = [];
+  if (l.in) parts.push(`signed in here by ${l.in} connection${l.in === 1 ? '' : 's'}`);
+  if (l.out) parts.push(`connected out by ${l.out}`);
+  return `Account ${l.label}: ${parts.join(', ')}, ${fmtNs(l.first_utc, 0)}` + (l.last_utc !== l.first_utc ? ` to ${fmtNs(l.last_utc, 0)}` : '') + ' UTC';
+}
+
 // ---- the period shown ----
 // A connection is in it when it, or its session, overlaps it. One with no
 // time (a registry key's last write) is not.
@@ -211,6 +230,7 @@ function drawLegend() {
     CN.rep && CN.rep.connections.some((c) => c.undated) ? h('span', { class: 'cnkey undated' }, 'no time: named only in the registry') : '',
     CN.mode === 'lanes' && CN.rep && CN.rep.connections.some((c) => c.ended_utc) ? h('span', { class: 'cnkey session' }, 'bar: a Remote Desktop session, until logoff or disconnection') : '',
     CN.mode === 'lanes' ? h('span', {}, 'drag across the lanes to look at a period') : '',
+    CN.mode === 'graph' ? h('span', { class: 'cnkey leaf' }, CN.pick && CN.pick.node && nodeLeaves(CN.pick.node).length ? 'small: an account or USB storage device of the host picked' : 'click a host for its accounts and USB storage devices') : '',
     h('span', { class: 'cnkeytags' }, Object.keys(KIND_TAG).map((k) => `${KIND_TAG[k]}: ${KIND_WORDS[k].toLowerCase()}`).join(' · ')),
     h('span', { class: 'cnkey nodehost' }, 'host of the case'),
     h('span', { class: 'cnkey nodeext' }, 'outside the case'));
@@ -364,10 +384,65 @@ function drawGraph(box, r) {
         x.path.setAttribute('d', q.d); x.hit.setAttribute('d', q.d);
       }
       spreadLabels();
+      if (CN.pick && CN.pick.node === n.id) placeLeaves();
     });
     g.addEventListener('pointerup', (ev) => { const moved = drag && drag.moved; drag = null; ev.stopPropagation(); if (!moved) pickConn(on ? null : { node: n.id }); });
     g.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') pickConn(on ? null : { node: n.id }); });
     svg.append(g);
+  }
+  // A host picked opens into its accounts and USB storage devices, on the
+  // side away from the middle; each opens its records on the timeline.
+  const leafEls = [];
+  const placeLeaves = () => {
+    if (!leafEls.length) return;
+    const p = at[CN.pick.node];
+    const n = leafEls.length, arc = Math.min(Math.PI * 1.6, (n - 1) * 0.8), R = 92;
+    const spots = (base) => leafEls.map((x, i) => {
+      const a = base + (n > 1 ? -arc / 2 + (arc * i) / (n - 1) : 0);
+      return { x: Math.max(60, Math.min(w - 60, p.x + R * Math.cos(a))), y: Math.max(16, Math.min(hgt - 24, p.y + R * Math.sin(a))) };
+    });
+    // The way round the host that is clearest of the other computers and
+    // of the arrows' middles, where their labels are.
+    const others = r.nodes.filter((o) => o.id !== CN.pick.node).map((o) => at[o.id]);
+    for (const x of edgeEls) {
+      const q = pathFor(x.e);
+      others.push({ x: q.lx, y: q.ly });
+    }
+    let best = -Math.PI / 2, bestScore = -1;
+    for (let k = 0; k < 24; k++) {
+      const base = (2 * Math.PI * k) / 24;
+      const score = Math.min(...spots(base).map((sp) => Math.min(200, ...others.map((o) => Math.hypot(o.x - sp.x, o.y - sp.y)))));
+      if (score > bestScore + 1) { best = base; bestScore = score; }
+    }
+    spots(best).forEach((sp, i) => {
+      const x = leafEls[i];
+      x.line.setAttribute('x1', p.x); x.line.setAttribute('y1', p.y); x.line.setAttribute('x2', sp.x); x.line.setAttribute('y2', sp.y);
+      x.g.setAttribute('transform', `translate(${sp.x},${sp.y})`);
+    });
+  };
+  const host = CN.pick && CN.pick.node && r.nodes.find((n) => n.id === CN.pick.node && n.in_case);
+  if (host) {
+    const all = nodeLeaves(host.id);
+    const shown = all.slice(0, 12);
+    for (const l of shown) {
+      const title = leafWords(l);
+      const short = l.kind === 'account' ? l.label.replace(/^.*\\/, '') : l.label.replace(/ USB Device$/, '');
+      const line = sv('line', { class: 'cnleafline' });
+      const open = () => showEvents(l.events.map((e) => e.id));
+      const g = sv('g', { class: 'cnleaf ' + l.kind, tabindex: 0, role: 'button', 'aria-label': title + '. Opens its records on the timeline.',
+        onclick: (ev) => { ev.stopPropagation(); open(); }, onkeydown: (ev) => { if (ev.key === 'Enter') open(); } },
+        sv('title', {}, title + '. Click for its records on the timeline.'),
+        l.kind === 'device' ? sv('rect', { x: -6, y: -6, width: 12, height: 12, rx: 2 }) : sv('circle', { r: 6 }),
+        sv('text', { y: 19, class: 'cnlabel' }, short.length > 24 ? short.slice(0, 23) + '…' : short));
+      leafEls.push({ line, g });
+      svg.insertBefore(line, svg.firstChild.nextSibling);
+      svg.append(g);
+    }
+    if (all.length > shown.length) {
+      const g = sv('text', { class: 'cnleafmore', x: at[host.id].x, y: at[host.id].y - 30 }, `+${all.length - shown.length} more in the list`);
+      svg.append(g);
+    }
+    placeLeaves();
   }
   svg.addEventListener('click', () => { if (CN.pick) pickConn(null); });
   box.replaceChildren(svg);
@@ -521,6 +596,14 @@ function drawConnRows() {
   if (CN.pick) {
     out.push(h('p', { class: 'hint cnpicked' }, CN.pick.event != null ? `Connections that event #${CN.pick.event} is part of (${CN.pick.what})`
       : CN.pick.node ? `Connections to and from ${cnLabel(CN.pick.node)}` : `${KIND_WORDS[CN.pick.kind] || ''} connections from ${cnLabel(CN.pick.from)} to ${cnLabel(CN.pick.to)}`));
+    const leaves = CN.pick.node ? nodeLeaves(CN.pick.node) : [];
+    if (leaves.length) {
+      out.push(h('div', { class: 'cnleaves' }, ...[['account', 'Accounts of these connections'], ['device', 'USB storage devices in its SYSTEM hive']].map(([k, head]) => {
+        const ls = leaves.filter((l) => l.kind === k);
+        return ls.length ? h('div', {}, h('b', {}, head + ': '), h('ul', { class: 'cnevents' }, ...ls.map((l) => h('li', {}, leafWords(l).replace(/^(Account|USB storage device) /, ''), ' ',
+          h('button', { class: 'link', onclick: () => showEvents(l.events.map((e) => e.id)) }, `its ${l.events.length} record${l.events.length === 1 ? '' : 's'}`))))) : '';
+      })));
+    }
   }
   for (const c of list) {
     const on = CN.selected === c;
