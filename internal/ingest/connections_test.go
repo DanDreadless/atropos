@@ -123,7 +123,7 @@ func TestLateralMovementConnections(t *testing.T) {
 		{"12:05:10", "exec", "host:WS-ALICE", "host:SRV-FILE01", "both", "strong", `CORP\alice`},
 	})
 	cn := rep.Connections[2]
-	if *cn.Apart != int64(2*time.Second) || len(cn.Source.Events) != 3 || len(cn.Target.Events) != 5 {
+	if *cn.Apart != int64(2*time.Second) || len(cn.Source.Events) != 3 || len(cn.Target.Events) != 9 {
 		t.Errorf("09:14: apart %v, %d source events, %d target events", *cn.Apart, len(cn.Source.Events), len(cn.Target.Events))
 	}
 	reasons := strings.Join(cn.Reasons, " | ")
@@ -138,8 +138,25 @@ func TestLateralMovementConnections(t *testing.T) {
 	if strings.Contains(reasons, "recent connections list") || len(cn.Named) != 1 {
 		t.Errorf("09:14 named %v; reasons %s", cn.Named, reasons)
 	}
-	if len(cn.EventIDs) != 9 {
-		t.Errorf("09:14 has %d event ids, want 9", len(cn.EventIDs))
+	if len(cn.EventIDs) != 13 {
+		t.Errorf("09:14 has %d event ids, want 13", len(cn.EventIDs))
+	}
+	// The session's end, found by its logon id and session number: the
+	// disconnection, then the logoff.
+	if cn.EndHow != "logged off" || time.Unix(0, cn.Ended).UTC().Format("15:04:05") != "09:53:00" ||
+		!strings.Contains(reasons, "the session lasted 38 minutes 40 seconds: disconnected at 09:52:40 by SRV-FILE01's clock, Remote Desktop session disconnected (24), event ") ||
+		!strings.Contains(reasons, "and logged off at 09:53:00 by SRV-FILE01's clock, Remote Desktop session logoff (23), event ") {
+		t.Errorf("09:14 session end %q %s: %s", cn.EndHow, time.Unix(0, cn.Ended).UTC().Format("15:04:05"), reasons)
+	}
+	for i, end := range map[int]string{1: "09:31:22", 4: "10:12:50", 9: "10:44:20"} {
+		if got := time.Unix(0, rep.Connections[i].Ended).UTC().Format("15:04:05"); got != end || rep.Connections[i].EndHow != "logged off" {
+			t.Errorf("connection %d ended %s %q, want %s", i, got, rep.Connections[i].EndHow, end)
+		}
+	}
+	for i, c := range rep.Connections {
+		if c.Kind != "rdp" && c.EndHow != "" {
+			t.Errorf("connection %d (%s) has a session end", i, c.Kind)
+		}
 	}
 	// Records of the registry alone: shown with their time said to be the
 	// key's, never paired.

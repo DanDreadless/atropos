@@ -379,6 +379,10 @@ dialog p { margin: 6px 0; }
 .cnconn.undated .cnconnline { stroke-dasharray: 1 5; stroke-linecap: round; }
 .cnconn.on .cnconnline { stroke-width: 4.5; }
 .cnconn.dim { opacity: .25; }
+.cnsession { fill: var(--accent); opacity: .35; }
+.cnsession.dim { opacity: .1; }
+.cnkey.session::before { border-top: 0; background: var(--accent); opacity: .35; height: 6px; border-radius: 2px; }
+.cnsess { color: var(--dim); }
 .cnend { fill: var(--accent); stroke: var(--panel); stroke-width: 1.5; }
 .cnconn.possible .cnend { fill: var(--warn); }
 .cnconn.oneend .cnend { fill: var(--faint); }

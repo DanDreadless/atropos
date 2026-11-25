@@ -124,6 +124,7 @@ function drawLegend() {
     h('span', { class: 'cnkey possible' }, 'possible: both ends, further apart or different accounts'),
     h('span', { class: 'cnkey oneend' }, 'one end only'),
     CN.rep && CN.rep.connections.some((c) => c.undated) ? h('span', { class: 'cnkey undated' }, 'no time: named only in the registry') : '',
+    CN.mode === 'lanes' && CN.rep && CN.rep.connections.some((c) => c.ended_utc) ? h('span', { class: 'cnkey session' }, 'bar: a Remote Desktop session, until logoff or disconnection') : '',
     h('span', { class: 'cnkeytags' }, Object.keys(KIND_TAG).map((k) => `${KIND_TAG[k]}: ${KIND_WORDS[k].toLowerCase()}`).join(' · ')),
     h('span', { class: 'cnkey nodehost' }, 'host of the case'),
     h('span', { class: 'cnkey nodeext' }, 'outside the case'));
@@ -311,7 +312,10 @@ function drawLanes(box, r) {
   const timed = r.connections.filter((c) => !c.undated);
   const basis = timed.length ? timed : r.connections;
   let t0 = BigInt(basis[0].start_utc), t1 = t0;
-  for (const c of basis) { const t = BigInt(c.start_utc); if (t < t0) t0 = t; if (t > t1) t1 = t; }
+  for (const c of basis) {
+    const t = BigInt(c.start_utc); if (t < t0) t0 = t; if (t > t1) t1 = t;
+    if (c.ended_utc) { const e = BigInt(c.ended_utc); if (e > t1) t1 = e; }
+  }
   const pad = (t1 - t0) / 20n + 60000000000n;
   t0 -= pad; t1 += pad;
   const span = Number(t1 - t0);
@@ -329,6 +333,15 @@ function drawLanes(box, r) {
     const s = fmtNs(t, 0);
     svg.append(sv('line', { x1: x(t), x2: x(t), y1: top - 4, y2: hgt - 6, class: 'cntick' }),
       sv('text', { x: x(t), y: top - 9, class: 'cnticklabel' }, sameDay && step < 86400e9 ? s.slice(11, 16) : step < 86400e9 ? s.slice(5, 16) : s.slice(0, 10)));
+  }
+  // A Remote Desktop session's length, as a bar along the lane of the
+  // computer connected to, under the arrows.
+  for (const c of conns) {
+    if (!c.ended_utc || y[c.to] == null) continue;
+    const x1 = x(c.start_utc), x2 = Math.max(x1 + 2, x(c.ended_utc));
+    const dim = CN.pick && !pickedConns().includes(c);
+    svg.append(sv('rect', { x: x1, y: y[c.to] + 7, width: x2 - x1, height: 6, rx: 2, class: 'cnsession' + (dim ? ' dim' : '') },
+      sv('title', {}, `Session on ${cnLabel(c.to)} from ${fmtNs(c.start_utc, 0)} until ${c.end_how} at ${fmtNs(c.ended_utc, 0)} UTC (${sessionLength(c)})`)));
   }
   for (const c of conns) {
     if (y[c.from] == null || y[c.to] == null) continue;
@@ -350,6 +363,15 @@ function drawLanes(box, r) {
     svg.append(g);
   }
   box.replaceChildren(svg);
+}
+
+// How long a session lasted, from the connection's start to its end.
+function sessionLength(c) {
+  const s = Math.max(0, Number((BigInt(c.ended_utc) - BigInt(c.start_utc)) / 1000000000n));
+  if (s < 90) return `${s} s`;
+  if (s < 5400) return `${Math.round(s / 60)} min`;
+  const hrs = Math.floor(s / 3600), min = Math.round((s % 3600) / 60);
+  return min ? `${hrs} h ${min} min` : `${hrs} h`;
 }
 
 function selectConn(c) {
@@ -396,6 +418,7 @@ function drawConnRows() {
         h('span', {}, cnLabel(c.from), ' → ', cnLabel(c.to)),
         c.account ? h('span', { class: 'dimc' }, c.account) : '',
         h('span', { class: 'chip static cnconf ' + (c.confidence === 'one-end' ? 'oneend' : c.confidence) }, CONF_WORDS[c.confidence]),
+        c.ended_utc ? h('span', { class: 'chip static cnsess', title: `The session ${c.end_how === 'logged off' ? 'was logged off' : 'was disconnected, and no logoff was found'} at ${fmtNs(c.ended_utc, 0)} UTC` }, `${c.end_how === 'logged off' ? 'session' : 'until disconnected'} ${sessionLength(c)}`) : '',
         c.undated ? h('span', { class: 'chip static cnconf undated', title: 'Only the registry names this connection, and its time is when a key was last written, not when the connection was made' }, 'no time') : '',
         h('span', { class: 'dimc' }, 'seen at ' + SEEN_WORDS[c.seen_on])),
       h('ul', { class: 'annotes' }, ...c.reasons.map((x) => h('li', {}, x))),

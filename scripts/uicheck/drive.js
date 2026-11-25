@@ -733,6 +733,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   ok(await count('.cnlanes .cnconn') === 15 && await count('.cnlanes .cnconn.dim') === 4 && await count('.cnlanes .cnend.missing') === 6 && await count('.cnlanes .cnkindtag') === 15 &&
     await count('.cnlanes .cnconn.undated') === 2,
     "the lanes draw every connection in time with its kind, the picked host's in full, with a hollow end where nothing was recorded, and those with no time dotted");
+  ok(await count('.cnlanes .cnsession') === 4 && await count('.cnlanes .cnsession.dim') === 2 && (await text('#cnlegend')).includes('bar: a Remote Desktop session'),
+    'each Remote Desktop session with an end found is a bar along the lane of the computer connected to, and the legend says so');
   // The registry key written 18 days before does not stretch the time
   // across: it is drawn at the edge, and the day's connections keep their room.
   const xs = await page.$$eval('.cnlanes .cnconn .cnconnline', (ls) => ls.map((l) => Number(l.getAttribute('x1'))));
@@ -742,10 +744,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   ok((await text('#cnrows .cnrow.on')).includes('Remote Desktop client connecting (1024)') && (await text('#cnrows .cnrow.on')).includes('by its clock') &&
     (await text('#cnrows .cnrow.on')).includes("Also named in WS-ALICE's registry"),
     "a connection opens each end's events, with the time as that host's clock had it, and the registry's records that support it");
+  ok((await text('#cnrows .cnrow.on .cnsess')) === 'session 39 min' && (await text('#cnrows .cnrow.on')).includes('the session lasted 38 minutes 40 seconds') &&
+    (await text('#cnrows .cnrow.on')).includes('Remote Desktop session logoff (23)'), "a session's length is on its row, with the logoff among the events of the end connected to");
   await shot('19-connections-lanes');
   await page.evaluate(() => [...document.querySelectorAll('#cnrows .cnrow')][2].querySelectorAll('.cnactions button')[1].click());
-  await page.waitForFunction(() => !document.getElementById('view-timeline').hidden && document.querySelectorAll('#win .row').length === 9, { timeout: 20000 }).catch(() => {});
-  ok((await page.$eval('#q', (el) => el.value)).startsWith('id:') && await summaryCount() === 9, 'a connection opens its nine events, from both hosts and the registry, on the timeline');
+  await page.waitForFunction(() => !document.getElementById('view-timeline').hidden && document.querySelectorAll('#win .row').length === 13, { timeout: 20000 }).catch(() => {});
+  ok((await page.$eval('#q', (el) => el.value)).startsWith('id:') && await summaryCount() === 13, 'a connection opens its 13 events, from both hosts and the registry, the session\'s end among them, on the timeline');
   // And back: an event of a connection offers its connections.
   await page.click('#win .row');
   await page.waitForSelector('#detail:not([hidden]) .cnfrom', { timeout: 10000 }).catch(() => {});

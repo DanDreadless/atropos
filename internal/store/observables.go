@@ -36,7 +36,7 @@ import (
 // item saying how it was started: service, task, wmi or winrm. The analysis
 // ties it to a network logon by time, and by account where it names one.
 
-const observablesVersion = 5
+const observablesVersion = 6
 
 const observablesSchema = `
 CREATE TABLE IF NOT EXISTS observables (
@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS observables (
   host        TEXT NOT NULL,      -- the event's host
   act         TEXT NOT NULL,      -- what the event shows: rdp-out, rdp-in, smb-in, exec-out, logon-in...
   what        TEXT NOT NULL,      -- the event, briefly: "RDP client connecting (1024)"
-  kind        TEXT NOT NULL,      -- ip, host, account, share, file, service, task, class, program, via
+  kind        TEXT NOT NULL,      -- ip, host, account, share, file, service, task, class, program, via, logon, session, end
   value       TEXT NOT NULL,
   role        TEXT NOT NULL,      -- source, target, subject, object
   version     INTEGER NOT NULL
@@ -215,6 +215,17 @@ func observeEvent(oe *ObservedEvent, fieldsJSON string) bool {
 			add("ip", ip, "source")
 		}
 	}
+	// The logon id and session number tie a session's end to its start.
+	logonID := func(v string) {
+		if v = strings.ToLower(v); v != "" && v != "0x0" && v != "0x3e7" && v != "0x3e4" && v != "0x3e5" {
+			add("logon", v, "subject")
+		}
+	}
+	session := func(v string) {
+		if v != "" {
+			add("session", v, "subject")
+		}
+	}
 	account := func(domain, user, role string) {
 		if user == "" {
 			return
@@ -254,6 +265,7 @@ func observeEvent(oe *ObservedEvent, fieldsJSON string) bool {
 			add("host", h, "source")
 		}
 		account(get("TargetDomainName"), get("TargetUserName"), "target")
+		logonID(get("TargetLogonId"))
 	case chSecurity + "/4778":
 		oe.Act, oe.What = "rdp-in", "Session reconnected (Security 4778)"
 		source(get("ClientAddress"))
@@ -261,6 +273,43 @@ func observeEvent(oe *ObservedEvent, fieldsJSON string) bool {
 			add("host", h, "source")
 		}
 		account(get("AccountDomain"), get("AccountName"), "target")
+		logonID(get("LogonID"))
+	case chSecurity + "/4779":
+		// The end of a session (rdp-end): tied to its start by the logon id.
+		oe.Act, oe.What = "rdp-end", "Session disconnected (Security 4779)"
+		add("end", "disconnect", "object")
+		source(get("ClientAddress"))
+		account(get("AccountDomain"), get("AccountName"), "target")
+		logonID(get("LogonID"))
+	case chSecurity + "/4634", chSecurity + "/4647":
+		if f.EventID == "4634" {
+			if lt := get("LogonType"); lt != "10" && lt != "12" {
+				return false // network and console logoffs: constant, and no session
+			}
+			oe.Act, oe.What = "rdp-end", "Logoff (Security 4634)"
+		} else {
+			oe.Act, oe.What = "rdp-end", "User-initiated logoff (Security 4647)"
+		}
+		add("end", "logoff", "object")
+		account(get("TargetDomainName"), get("TargetUserName"), "target")
+		logonID(get("TargetLogonId"))
+		tied := false
+		for _, it := range oe.Items {
+			tied = tied || it.Kind == "logon"
+		}
+		if !tied {
+			return false // no logon id: nothing to tie it to
+		}
+	case chLSM + "/23", chLSM + "/24":
+		names := map[string]string{"23": "Remote Desktop session logoff (23)", "24": "Remote Desktop session disconnected (24)"}
+		how := map[string]string{"23": "logoff", "24": "disconnect"}
+		oe.Act, oe.What = "rdp-end", names[f.EventID]
+		add("end", how[f.EventID], "object")
+		if ip, ok := normIP(get("Address")); ok {
+			add("ip", ip, "source")
+		}
+		account("", get("User"), "target")
+		session(get("SessionID"))
 	case chSecurity + "/4648":
 		svc, rest, _ := strings.Cut(get("TargetInfo"), "/")
 		switch strings.ToUpper(svc) {
@@ -306,6 +355,7 @@ func observeEvent(oe *ObservedEvent, fieldsJSON string) bool {
 		oe.Act, oe.What = "rdp-in", names[f.EventID]
 		add("ip", ip, "source")
 		account("", get("User"), "target")
+		session(get("SessionID"))
 	case chCoreTS + "/131":
 		oe.Act, oe.What = "rdp-in", "Remote Desktop connection accepted (RdpCoreTS 131)"
 		v := get("ClientIP")

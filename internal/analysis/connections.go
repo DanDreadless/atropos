@@ -81,6 +81,11 @@ type Connection struct {
 	// Undated: the connection rests on such records alone, so its time is
 	// only when a registry key was last written.
 	Undated bool `json:"undated,omitempty"`
+	// Ended is when a Remote Desktop session ended on the computer
+	// connected to (corrected), and EndHow how: "logged off", or
+	// "disconnected" when no logoff was found.
+	Ended  int64  `json:"ended_utc,string,omitempty"`
+	EndHow string `json:"end_how,omitempty"`
 }
 
 // ConnEdge sums the connections between two nodes.
@@ -166,7 +171,7 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	evs, ready, err := s.ObservedEvents("rdp-in", "rdp-out", "smb-in", "smb-out", "exec-in", "exec-out", "logon-in", "net-in", "net-out", "rdp-named", "smb-named")
+	evs, ready, err := s.ObservedEvents("rdp-in", "rdp-out", "smb-in", "smb-out", "exec-in", "exec-out", "logon-in", "net-in", "net-out", "rdp-named", "smb-named", "rdp-end")
 	if err != nil {
 		return nil, err
 	}
@@ -422,11 +427,15 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		id  *store.HostIdentity
 	}
 	var loose []sourceless
-	var named []store.ObservedEvent
+	var named, ends []store.ObservedEvent
 	open := map[string]*cluster{}
 	for _, e := range evs {
 		if strings.HasSuffix(e.Act, "-named") {
 			named = append(named, e)
+			continue
+		}
+		if e.Act == "rdp-end" {
+			ends = append(ends, e)
 			continue
 		}
 		rec, hid := where(e)
@@ -885,6 +894,96 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		rep.Connections = append(rep.Connections, conn)
 	}
 
+	// How long each Remote Desktop session lasted: its logoff, or failing
+	// that its disconnection, on the computer connected to, tied to the
+	// records that began it by the logon id, or by the session number and
+	// the account.
+	for i := range rep.Connections {
+		cn := &rep.Connections[i]
+		if cn.Kind != "rdp" || cn.Target == nil {
+			continue
+		}
+		logons, sessions := map[string]bool{}, map[string]bool{}
+		for _, ev := range cn.Target.Events {
+			for _, it := range byID[ev.ID].Items {
+				switch it.Kind {
+				case "logon":
+					logons[it.Value] = true
+				case "session":
+					sessions[it.Value] = true
+				}
+			}
+		}
+		if len(logons)+len(sessions) == 0 {
+			continue
+		}
+		var matched []store.ObservedEvent
+		var off, disc *store.ObservedEvent
+		var hid *store.HostIdentity
+		for j := range ends {
+			e := ends[j]
+			if e.TSUTC < cn.Target.Start {
+				continue
+			}
+			node, h := where(e)
+			if node != cn.Target.Node {
+				continue
+			}
+			ok := logons[item(e, "logon", "subject")]
+			if !ok && sessions[item(e, "session", "subject")] {
+				a := item(e, "account", "target")
+				ok = a != "" && cn.Target.Account != "" && sameAccount(a, cn.Target.Account)
+			}
+			if !ok {
+				continue
+			}
+			if off != nil && e.TSUTC > off.TSUTC+int64(connCluster) {
+				break // the records of the logoff are together; what follows is later
+			}
+			hid = h
+			matched = append(matched, e)
+			if item(e, "end", "object") == "logoff" {
+				if off == nil {
+					off = &ends[j]
+				}
+			} else if disc == nil {
+				disc = &ends[j]
+			}
+		}
+		if off == nil && disc == nil {
+			continue
+		}
+		last := off
+		cn.EndHow = "logged off"
+		if last == nil {
+			last, cn.EndHow = disc, "disconnected"
+			// Only the records of the first disconnection.
+			keep := matched[:0]
+			for _, e := range matched {
+				if e.TSUTC <= disc.TSUTC+int64(connCluster) {
+					keep = append(keep, e)
+				}
+			}
+			matched = keep
+		}
+		cn.Ended = corrected(last.TSUTC, hid)
+		at := func(e *store.ObservedEvent) string {
+			return fmt.Sprintf("%s by %s's clock, %s, event %d", time.Unix(0, e.TSUTC).UTC().Format("15:04:05"), label(cn.Target.Node), e.What, e.EventID)
+		}
+		lasted := fmtDur(time.Duration(last.TSUTC - cn.Target.Start))
+		switch {
+		case off != nil && disc != nil && disc.TSUTC <= off.TSUTC:
+			cn.Reasons = append(cn.Reasons, fmt.Sprintf("the session lasted %s: disconnected at %s, and logged off at %s", lasted, at(disc), at(off)))
+		case off != nil:
+			cn.Reasons = append(cn.Reasons, fmt.Sprintf("the session lasted %s: logged off at %s", lasted, at(off)))
+		default:
+			cn.Reasons = append(cn.Reasons, fmt.Sprintf("the session was disconnected after %s, at %s; no logoff was found, so it may have been left open or reconnected later", lasted, at(disc)))
+		}
+		for _, e := range matched {
+			cn.Target.Events = append(cn.Target.Events, ConnEvent{ID: e.EventID, TS: e.TSUTC, What: e.What})
+		}
+	}
+
 	sort.SliceStable(rep.Connections, func(a, b int) bool {
 		x, y := rep.Connections[a], rep.Connections[b]
 		if x.Start != y.Start {
@@ -1043,6 +1142,9 @@ func WriteConnectionsText(w io.Writer, r *ConnectionsReport) error {
 		fmt.Fprintf(w, "\n%s  %s -> %s  %s", when, label[c.From], label[c.To], ConnKindWords[c.Kind])
 		if c.Account != "" {
 			fmt.Fprintf(w, "  %s", c.Account)
+		}
+		if c.EndHow != "" {
+			fmt.Fprintf(w, "  (%s %s UTC)", c.EndHow, ts(c.Ended))
 		}
 		fmt.Fprintf(w, "\n  %s, seen at %s; events %s\n", c.Confidence, seen, joinIDs(c.EventIDs))
 		for _, why := range c.Reasons {
