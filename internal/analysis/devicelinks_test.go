@@ -89,13 +89,13 @@ func TestFileLinks(t *testing.T) {
 		file("A", "07:00", "File recorded in Amcache with its SHA-1 (of the first 31.4 MB): x", `c:\windows\system32\notepad.exe`, notepad),
 		file("B", "07:00", "File recorded in Amcache with its SHA-1 (of the first 31.4 MB): x", `c:\windows\system32\notepad.exe`, notepad),
 		file("C", "07:00", "Program started (Sysmon 1): x", `C:\Tools\only-here.exe`, "sha1:"+strings.Repeat("4d", 20)),
-	})
+	}, nil)
 	// A file Defender detected in System32 on two hosts is shown.
 	det := "sha256:" + strings.Repeat("5e", 32)
 	if d := c.fileLinks([]store.ObservedEvent{
 		file("A", "11:00", "File detected by Defender, with its hashes: x", `C:\Windows\System32\evil.dll`, det),
 		file("B", "11:30", "File detected by Defender, with its hashes: x", `C:\Windows\System32\evil.dll`, det),
-	}); len(d) != 1 || d[0].From != "host:A" || d[0].To != "host:B" {
+	}, nil); len(d) != 1 || d[0].From != "host:A" || d[0].To != "host:B" {
 		t.Errorf("Defender detections in System32: %+v", d)
 	}
 	if len(got) != 2 {
@@ -111,6 +111,46 @@ func TestFileLinks(t *testing.T) {
 	}
 	if r := strings.Join(bc.Reasons, " | "); bc.From != "host:B" || bc.To != "host:C" || !strings.Contains(r, "renamed") {
 		t.Errorf("B to C: %s -> %s: %s", bc.From, bc.To, r)
+	}
+	// The case's own evidence items: one collected from B with a record of
+	// it on A, and one collected from both B and C with none.
+	tool := strings.Repeat("6f", 32)
+	coll := c.fileLinks([]store.ObservedEvent{
+		file("A", "12:00", "Program started (Sysmon 1): x", `C:\Users\a\Downloads\tool.exe`, "sha256:"+tool),
+	}, []collectedFile{
+		{ID: 7, Host: "B", Origin: `triage.zip/Users/b/AppData/Local/Temp/t.exe`, SHA256: tool},
+		{ID: 8, Host: "B", Origin: `notes.docx`, SHA1: strings.Repeat("7a", 20)},
+		{ID: 9, Host: "C", Origin: `C/Users/c/Desktop/notes.docx`, SHA1: strings.Repeat("7a", 20)},
+		{ID: 10, Host: "C", Origin: `image.E01/Windows/System32/kernel32.dll`, SHA1: strings.Repeat("8b", 20)},
+		{ID: 11, Host: "B", Origin: `image.E01/Windows/System32/kernel32.dll`, SHA1: strings.Repeat("8b", 20)},
+	})
+	if len(coll) != 2 {
+		t.Fatalf("collected: %d links: %+v", len(coll), coll)
+	}
+	ab, bc = coll[0], coll[1]
+	r = strings.Join(ab.Reasons, " | ")
+	if ab.From != "host:A" || ab.To != "host:B" || !ab.Undated || ab.NoTime != "the file was collected from B, and that gives no time" ||
+		time.Unix(0, ab.Start).UTC().Format("15:04") != "12:00" || !strings.Contains(r, "on B collected as item 7 (triage.zip/Users/b/AppData/Local/Temp/t.exe)") ||
+		!strings.Contains(r, "renamed") || !strings.Contains(r, "which way it went is not known") {
+		t.Errorf("A to B, collected: %+v %s", ab, r)
+	}
+	if bc.From != "host:B" || bc.To != "host:C" || bc.Start != 0 || bc.NoTime != "the file was collected from both, and that gives no time" ||
+		strings.Contains(strings.Join(bc.Reasons, " | "), "renamed") {
+		t.Errorf("B to C, collected: %+v", bc)
+	}
+	if !collectedCommon(`image.E01/Windows/System32/x.dll`) || collectedCommon(`image.E01/Windows/Temp/x.dll`) || collectedCommon(`x.exe`) {
+		t.Error("collectedCommon")
+	}
+	assigned := func(h string) *store.Assignment { return &store.Assignment{HostName: h} }
+	got2 := collectedFiles([]store.Evidence{
+		{ID: 1, Kind: "pe-executable", Size: 10, Name: "a.exe", SHA256: strings.ToUpper(tool), Assigned: assigned("A")},
+		{ID: 2, Kind: "windows-registry-hive", Size: 10, Name: "SYSTEM", SHA256: tool, Assigned: assigned("A")},
+		{ID: 3, Kind: "pe-executable", Size: 10, Name: "b.exe", SHA256: tool},
+		{ID: 4, Kind: "pe-executable", Size: 10, Name: "c.exe", SHA256: tool, Assigned: assigned("A"), Excluded: true},
+		{ID: 5, Kind: "text", Size: 10, Name: `x\Desktop.ini`, SHA256: tool, Assigned: assigned("A")},
+	})
+	if len(got2) != 1 || got2[0].ID != 1 || got2[0].SHA256 != tool || got2[0].Origin != "a.exe" {
+		t.Errorf("collectedFiles: %+v", got2)
 	}
 	for p, want := range map[string]bool{`C:\Windows\System32\x.exe`: true, `c:\windows\temp\x.exe`: false, `\SystemRoot\System32\drivers\x.sys`: true,
 		`C:\Program Files (x86)\App\a.exe`: true, `C:\ProgramData\Microsoft\Windows Defender\x.exe`: true, `C:\ProgramData\x.exe`: false, `C:\Users\a\x.exe`: false} {

@@ -233,12 +233,18 @@ function drawConnections() {
   drawSide();
 }
 
+// connWhen is a connection's time as words: when, or why it has none.
+function connWhen(c) {
+  if (c.no_time) return c.start_utc === '0' ? `No time (${c.no_time})` : `No time (${c.no_time}; recorded on ${cnLabel(c.from)} ${fmtNs(c.start_utc, 0)} UTC)`;
+  return c.undated ? 'No time (a registry key written ' + fmtNs(c.start_utc, 0) + ' UTC)' : fmtNs(c.start_utc, 0) + ' UTC';
+}
+
 function drawLegend() {
   $('cnlegend').replaceChildren(
     h('span', { class: 'cnkey strong' }, 'strong: both ends, within a minute, the same account'),
     h('span', { class: 'cnkey possible' }, 'possible: both ends, further apart or different accounts'),
     h('span', { class: 'cnkey oneend' }, 'one end only'),
-    CN.rep && CN.rep.connections.some((c) => c.undated) ? h('span', { class: 'cnkey undated' }, 'no time: named only in the registry') : '',
+    CN.rep && CN.rep.connections.some((c) => c.undated) ? h('span', { class: 'cnkey undated' }, CN.rep.connections.some((c) => c.undated && !c.no_time) ? 'no time: named only in the registry, or a file collected' : 'no time: a file collected') : '',
     CN.mode === 'lanes' && CN.rep && CN.rep.connections.some((c) => c.ended_utc) ? h('span', { class: 'cnkey session' }, 'bar: a Remote Desktop session, until logoff or disconnection') : '',
     CN.mode === 'lanes' ? h('span', {}, 'drag across the lanes to look at a period') : '',
     CN.mode === 'graph' ? h('span', { class: 'cnkey leaf' }, CN.pick && CN.pick.node && nodeLeaves(CN.pick.node).length ? 'small: an account or USB storage device of the host picked' : 'click a host for its accounts and USB storage devices') : '',
@@ -357,7 +363,7 @@ function drawGraph(box, r) {
     const dim = CN.pick && (CN.pick.node ? e.from !== CN.pick.node && e.to !== CN.pick.node : !on);
     const kw = KIND_WORDS[e.kind] || e.kind;
     const title = `${cnLabel(e.from)} → ${cnLabel(e.to)}: ${e.count} ${kw.toLowerCase()} connection${e.count === 1 ? '' : 's'}` +
-      ` (${e.strong} strong, ${e.possible} possible, ${e.one_end} seen at one end only), ${fmtNs(e.first_utc, 0)}` + (e.last_utc !== e.first_utc ? ` to ${fmtNs(e.last_utc, 0)}` : '') + ' UTC';
+      ` (${e.strong} strong, ${e.possible} possible, ${e.one_end} seen at one end only), ` + (e.first_utc === '0' ? 'no time' : `${fmtNs(e.first_utc, 0)}` + (e.last_utc !== e.first_utc ? ` to ${fmtNs(e.last_utc, 0)}` : '') + ' UTC');
     const pick = { from: e.from, to: e.to, kind: e.kind };
     const path = sv('path', { d: p.d, class: edgeClass(e) + (on ? ' on' : '') + (dim ? ' dim' : ''), 'stroke-width': Math.min(6, 1.6 + Math.log2(e.count)), 'marker-end': `url(#cnarrow-${kind})` });
     const hit = sv('path', { d: p.d, class: 'cnhit', tabindex: 0, role: 'button', 'aria-label': title,
@@ -592,7 +598,7 @@ function drawLanes(box, r) {
     const dir = y2 > y1 ? 1 : -1;
     const on = CN.selected === c;
     const dim = CN.pick && !pickedConns().includes(c);
-    const title = `${c.undated ? 'No time (a registry key written ' + fmtNs(c.start_utc, 0) + ' UTC)' : fmtNs(c.start_utc, 0) + ' UTC'}  ${KIND_WORDS[c.kind] || c.kind}  ${cnLabel(c.from)} → ${cnLabel(c.to)}${c.account ? '  ' + c.account : ''}: ${CONF_WORDS[c.confidence]}, seen at ${SEEN_WORDS[c.seen_on]}`;
+    const title = `${connWhen(c)}  ${KIND_WORDS[c.kind] || c.kind}  ${cnLabel(c.from)} → ${cnLabel(c.to)}${c.account ? '  ' + c.account : ''}: ${CONF_WORDS[c.confidence]}, seen at ${SEEN_WORDS[c.seen_on]}`;
     const g = sv('g', { class: 'cnconn ' + kind + (c.undated ? ' undated' : '') + (on ? ' on' : '') + (dim ? ' dim' : ''), tabindex: 0, role: 'button', 'aria-label': title,
       onclick: () => selectConn(c), onkeydown: (ev) => { if (ev.key === 'Enter') selectConn(c); } },
       sv('title', {}, title),
@@ -673,6 +679,7 @@ function drawConnRows() {
     const ends = [];
     for (const [label, e] of [['On ' + cnLabel(c.from), c.source], ['On ' + cnLabel(c.to), c.target]]) {
       if (!e) { ends.push(h('div', { class: 'cnendrow dimc' }, label + ': nothing recorded in the evidence added')); continue; }
+      if (!e.events.length) { ends.push(h('div', { class: 'cnendrow dimc' }, label + ': the file itself, collected as evidence (the reasons name the item); no record of it with a time')); continue; }
       const corrected = e.corrected_utc !== e.start_utc;
       ends.push(h('div', { class: 'cnendrow' },
         h('b', {}, label + ': '), `${e.events.length} event${e.events.length === 1 ? '' : 's'} from `, h('span', { class: 'mono' }, fmtNs(e.start_utc, 0)),
@@ -689,19 +696,19 @@ function drawConnRows() {
     }
     out.push(h('div', { class: 'anrow cnrow' + (on ? ' on' : '') },
       h('div', { class: 'anpath' },
-        h('span', { class: 'mono' }, fmtNs(c.start_utc, 0)),
+        h('span', { class: 'mono' }, c.no_time && c.start_utc === '0' ? 'no time' : fmtNs(c.start_utc, 0)),
         h('span', { class: 'chip static cnkind' }, KIND_WORDS[c.kind] || c.kind),
         h('span', {}, cnLabel(c.from), ' → ', cnLabel(c.to)),
         c.account ? h('span', { class: 'dimc' }, c.account) : '',
         h('span', { class: 'chip static cnconf ' + (c.confidence === 'one-end' ? 'oneend' : c.confidence) }, CONF_WORDS[c.confidence]),
         c.ended_utc ? h('span', { class: 'chip static cnsess', title: `The session ${c.end_how === 'logged off' ? 'was logged off' : 'was disconnected, and no logoff was found'} at ${fmtNs(c.ended_utc, 0)} UTC` }, `${c.end_how === 'logged off' ? 'session' : 'until disconnected'} ${sessionLength(c)}`) : '',
-        c.undated ? h('span', { class: 'chip static cnconf undated', title: 'Only the registry names this connection, and its time is when a key was last written, not when the connection was made' }, 'no time') : '',
+        c.undated ? h('span', { class: 'chip static cnconf undated', title: c.no_time ? `No time: ${c.no_time}` : 'Only the registry names this connection, and its time is when a key was last written, not when the connection was made' }, 'no time') : '',
         h('span', { class: 'dimc' }, 'seen at ' + SEEN_WORDS[c.seen_on])),
       h('ul', { class: 'annotes' }, ...c.reasons.map((x) => h('li', {}, x))),
       on ? h('div', { class: 'cnends' }, ...ends) : '',
       h('div', { class: 'cnactions' },
         h('button', { class: 'link', onclick: () => selectConn(c) }, on ? 'Hide the events' : 'Each end\'s events'),
-        h('button', { class: 'link', onclick: () => showEvents(c.event_ids) }, `Show the ${c.event_ids.length} event${c.event_ids.length === 1 ? '' : 's'} on the timeline`))));
+        c.event_ids.length ? h('button', { class: 'link', onclick: () => showEvents(c.event_ids) }, `Show the ${c.event_ids.length} event${c.event_ids.length === 1 ? '' : 's'} on the timeline`) : '')));
   }
   if (!list.length && CN.pick && CN.pick.event != null) {
     out.push(h('p', { class: 'anempty' }, `Event #${CN.pick.event} is not part of any connection. Network logons and connections to file sharing support a connection but are not shown on their own, and records of a host's own work (a service, task or WMI program with no network logon near it) are taken as local: the notes in the side panel list those.`));

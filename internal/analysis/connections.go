@@ -80,8 +80,10 @@ type Connection struct {
 	// timing a connection (the registry's server lists, MountPoints2).
 	Named []ConnEvent `json:"named,omitempty"`
 	// Undated: the connection rests on such records alone, so its time is
-	// only when a registry key was last written.
-	Undated bool `json:"undated,omitempty"`
+	// only when a registry key was last written; or, with NoTime, it has
+	// no time at all, and NoTime says why.
+	Undated bool   `json:"undated,omitempty"`
+	NoTime  string `json:"no_time,omitempty"`
 	// Ended is when a Remote Desktop session ended on the computer
 	// connected to (corrected), and EndHow how: "logged off", or
 	// "disconnected" when no logoff was found.
@@ -150,7 +152,7 @@ var connRead = []ConnRead{
 	{What: "The same USB storage device on two hosts", Done: true,
 		Either: []string{`SYSTEM hive, Enum\USBSTOR, by serial (not a serial Windows made up)`}},
 	{What: "The same file on two hosts", Done: true,
-		Either: []string{"SHA-1 and SHA-256 from Sysmon 1, 6, 15, 23, 26, 29", "Amcache's SHA-1 (of the first 31.4 MB)", "a browser download's SHA-256", "Defender's detection history (the hashes of the file it tracked)", `not files only under Windows (but not its Temp), Program Files or ProgramData\Microsoft`}},
+		Either: []string{"SHA-1 and SHA-256 from Sysmon 1, 6, 15, 23, 26, 29", "Amcache's SHA-1 (of the first 31.4 MB)", "a browser download's SHA-256", "Defender's detection history (the hashes of the file it tracked)", "the case's own evidence items: an executable, document, archive, picture, shortcut or script collected from each host (no time of its own)", `not files only under Windows (but not its Temp), Program Files or ProgramData\Microsoft`}},
 	{What: "Shortcut files", Why: "their times are the target's; the shortcut file's own times are needed"},
 	{What: "ShellWindows and ShellBrowserWindow without Sysmon 3", Why: "they run inside explorer.exe and leave no record of their own"},
 	{What: "The WMI-Activity log (5857, 5860, 5861)", Why: "no real record has been seen to check against"},
@@ -964,7 +966,11 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 	}
 
 	rep.Connections = append(rep.Connections, c.deviceLinks(devices)...)
-	rep.Connections = append(rep.Connections, c.fileLinks(files)...)
+	items, err := s.ListEvidence()
+	if err != nil {
+		return nil, err
+	}
+	rep.Connections = append(rep.Connections, c.fileLinks(files, collectedFiles(items))...)
 
 	// How long each Remote Desktop session lasted: its logoff, or failing
 	// that its disconnection, on the computer connected to, tied to the
@@ -1097,7 +1103,8 @@ func Connections(s *store.Store) (*ConnectionsReport, error) {
 		default:
 			ed.OneEnd++
 		}
-		if cn.Start < ed.First {
+		// A connection with no time at all (Start 0) gives the edge none.
+		if cn.Start != 0 && (ed.First == 0 || cn.Start < ed.First) {
 			ed.First = cn.Start
 		}
 		if cn.Start > ed.Last {
@@ -1356,13 +1363,78 @@ func commonPlace(p string) bool {
 	return false
 }
 
+// collectedFile is an evidence item of the case that is a file a person
+// or a program might carry from one computer to another, with the host
+// its submission is from.
+type collectedFile struct {
+	ID           int64
+	Host, Origin string
+	SHA1, SHA256 string
+}
+
+// collectedKinds are the kinds of evidence item that may be the same file
+// on two hosts. Logs, hives, databases and images are each a computer's
+// own: the same copy from two hosts is the same evidence added twice.
+var collectedKinds = map[string]bool{"pe-executable": true, "elf-executable": true, "pdf": true, "ole-compound-file": true,
+	"zip-archive": true, "7z-archive": true, "gzip": true, "tar-archive": true, "picture": true, "windows-shortcut": true,
+	"text": true, "text-utf16": true, "unknown": true}
+
+// collectedFiles are the case's items of those kinds that came from a
+// host and are not excluded.
+func collectedFiles(items []store.Evidence) []collectedFile {
+	var out []collectedFile
+	for _, e := range items {
+		if !collectedKinds[e.Kind] || e.Excluded || e.Assigned == nil || e.Assigned.HostName == "" || e.Size == 0 {
+			continue
+		}
+		if base(e.Name) == "desktop.ini" {
+			continue
+		}
+		origin := e.Origin
+		if origin == "" {
+			origin = e.Name
+		}
+		out = append(out, collectedFile{ID: e.ID, Host: e.Assigned.HostName, Origin: origin,
+			SHA1: hexLower(e.SHA1, 40), SHA256: hexLower(e.SHA256, 64)})
+	}
+	return out
+}
+
+// collectedCommon is commonPlace for an item's origin, which may begin
+// with the image or archive it came out of.
+func collectedCommon(origin string) bool {
+	p := strings.ToLower(strings.ReplaceAll(origin, "/", `\`))
+	for _, in := range []string{`\windows\`, `\program files\`, `\program files (x86)\`, `\programdata\microsoft\`} {
+		if i := strings.Index(p, in); i >= 0 {
+			return commonPlace(p[i:])
+		}
+	}
+	return false
+}
+
+// base is a path's file name, in lower case.
+func base(p string) string {
+	if i := strings.LastIndexAny(p, `\/`); i >= 0 {
+		p = p[i+1:]
+	}
+	return strings.ToLower(p)
+}
+
+func hexLower(h string, n int) string {
+	h = strings.ToLower(strings.TrimSpace(h))
+	if len(h) != n {
+		return ""
+	}
+	return h
+}
+
 // fileLinks are files with the same hash on more than one host of the
 // case: a link from the host that had it first to the next, at its first
 // record there. The hashes one record gives (a SHA-1 and a SHA-256) are
 // of one file, so a file is matched on either. Files that are only ever
 // in a common place (commonPlace) are left out, unless Defender detected
 // them.
-func (c *connCtx) fileLinks(files []store.ObservedEvent) []Connection {
+func (c *connCtx) fileLinks(files []store.ObservedEvent, collected []collectedFile) []Connection {
 	// Union the hashes of each record into files.
 	parent := map[string]string{}
 	var find func(string) string
@@ -1384,8 +1456,24 @@ func (c *connCtx) fileLinks(files []store.ObservedEvent) []Connection {
 		}
 		return hs
 	}
+	collectedHashes := func(x collectedFile) []string {
+		var hs []string
+		if x.SHA1 != "" {
+			hs = append(hs, "sha1:"+x.SHA1)
+		}
+		if x.SHA256 != "" {
+			hs = append(hs, "sha256:"+x.SHA256)
+		}
+		return hs
+	}
+	var all [][]string
 	for _, e := range files {
-		hs := hashesOf(e)
+		all = append(all, hashesOf(e))
+	}
+	for _, x := range collected {
+		all = append(all, collectedHashes(x))
+	}
+	for _, hs := range all {
 		for _, h := range hs {
 			find(h)
 		}
@@ -1406,6 +1494,8 @@ func (c *connCtx) fileLinks(files []store.ObservedEvent) []Connection {
 		paths       []string
 		events      []ConnEvent
 		amcache     bool
+		items       []string // evidence items of the case with this content
+		itemNames   []string
 	}
 	type file struct {
 		hashes map[string]bool
@@ -1465,11 +1555,35 @@ func (c *connCtx) fileLinks(files []store.ObservedEvent) []Connection {
 		}
 		o.events = append(o.events, ConnEvent{ID: e.EventID, TS: e.TSUTC, What: e.What})
 	}
-	base := func(p string) string {
-		if i := strings.LastIndexAny(p, `\/`); i >= 0 {
-			p = p[i+1:]
+	// The case's own evidence items with the same content, collected from
+	// a host: the file itself, with no time of its own.
+	for _, x := range collected {
+		hs := collectedHashes(x)
+		h := c.hostByName(x.Host)
+		if len(hs) == 0 || h == "" {
+			continue
 		}
-		return strings.ToLower(p)
+		k := find(hs[0])
+		f := byFile[k]
+		if f == nil {
+			f = &file{hashes: map[string]bool{}, hosts: map[string]*onHost{}}
+			byFile[k] = f
+			order = append(order, k)
+		}
+		for _, v := range hs {
+			f.hashes[v] = true
+		}
+		node := hostNode(h)
+		o := f.hosts[node]
+		if o == nil {
+			o = &onHost{node: node, name: h, first: math.MaxInt64, last: math.MinInt64}
+			f.hosts[node] = o
+		}
+		if !collectedCommon(x.Origin) {
+			f.odd = true
+		}
+		o.items = append(o.items, fmt.Sprintf("item %d (%s)", x.ID, x.Origin))
+		o.itemNames = append(o.itemNames, x.Origin)
 	}
 	var out []Connection
 	for _, k := range order {
@@ -1493,7 +1607,14 @@ func (c *connCtx) fileLinks(files []store.ObservedEvent) []Connection {
 		}
 		sort.Strings(hs)
 		where := func(o *onHost) string {
-			return fmt.Sprintf("on %s as %s, first recorded %s", o.name, strings.Join(o.paths, ", "), time.Unix(0, o.first).UTC().Format("2006-01-02 15:04:05"))
+			var w []string
+			if len(o.paths) > 0 {
+				w = append(w, fmt.Sprintf("as %s, first recorded %s", strings.Join(o.paths, ", "), time.Unix(0, o.first).UTC().Format("2006-01-02 15:04:05")))
+			}
+			if len(o.items) > 0 {
+				w = append(w, "collected as "+strings.Join(o.items, ", "))
+			}
+			return "on " + o.name + " " + strings.Join(w, "; and ")
 		}
 		end := func(o *onHost) *ConnEnd {
 			evs := append([]ConnEvent(nil), o.events...)
@@ -1508,7 +1629,7 @@ func (c *connCtx) fileLinks(files []store.ObservedEvent) []Connection {
 			}
 			names := map[string]bool{}
 			for _, o := range []*onHost{a, b} {
-				for _, p := range o.paths {
+				for _, p := range append(append([]string(nil), o.paths...), o.itemNames...) {
 					names[base(p)] = true
 				}
 			}
@@ -1519,8 +1640,24 @@ func (c *connCtx) fileLinks(files []store.ObservedEvent) []Connection {
 				reasons = append(reasons, "Amcache's SHA-1 covers only a file's first 31.4 MB, and its time is when its key was last written, not when the file arrived")
 			}
 			reasons = append(reasons, "a hash shows the same content, not how it went from one computer to the other")
-			out = append(out, Connection{Kind: "file", From: a.node, To: b.node, Start: b.first, SeenOn: "both", Confidence: "strong",
-				Source: end(a), Target: end(b), Reasons: reasons})
+			conn := Connection{Kind: "file", From: a.node, To: b.node, Start: b.first, SeenOn: "both", Confidence: "strong",
+				Source: end(a), Target: end(b), Reasons: reasons}
+			if b.first == math.MaxInt64 {
+				// b has the file only as collected evidence: no time, and
+				// no way to say which way it went.
+				conn.Undated = true
+				conn.Target = &ConnEnd{Node: b.node, Events: []ConnEvent{}}
+				if a.first == math.MaxInt64 {
+					conn.Start = 0
+					conn.NoTime = "the file was collected from both, and that gives no time"
+					conn.Source = &ConnEnd{Node: a.node, Events: []ConnEvent{}}
+				} else {
+					conn.Start = a.first
+					conn.NoTime = "the file was collected from " + b.name + ", and that gives no time"
+				}
+				conn.Reasons = append(conn.Reasons, "it is drawn from the host with a record of it, or else by name: which way it went is not known")
+			}
+			out = append(out, conn)
 		}
 	}
 	return out
@@ -1583,7 +1720,9 @@ func WriteConnectionsText(w io.Writer, r *ConnectionsReport) error {
 	for _, c := range r.Connections {
 		seen := map[string]string{"both": "both ends", "source": "the connecting end only", "target": "the end connected to only"}[c.SeenOn]
 		when := ts(c.Start) + " UTC"
-		if c.Undated {
+		if c.NoTime != "" {
+			when = "no time (" + c.NoTime + ")"
+		} else if c.Undated {
 			when = "no time (a registry key written " + when + ")"
 		}
 		fmt.Fprintf(w, "\n%s  %s -> %s  %s", when, label[c.From], label[c.To], ConnKindWords[c.Kind])
