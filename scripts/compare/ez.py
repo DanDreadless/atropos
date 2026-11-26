@@ -9,7 +9,7 @@ Usage: ez.py KIND EXPORT.jsonl CSV_OR_FOLDER [EVIDENCE_ID]
   shimcache  AppCompatCacheParser -f SYSTEM --csv DIR --csvf out.csv
   shellbags  SBECmd -d DIR_WITH_HIVES --csv DIR            (pass the hive's CSV)
   recycle    RBCmd -d DIR --csv DIR --csvf out.csv
-  recmd      RECmd -d DIR --bn BatchExamples/DFIRBatch.reb --csv DIR   (pass its CSV, and the hive's evidence id)
+  recmd      RECmd -d DIR --bn BatchExamples/DFIRBatch.reb --csv DIR   (pass its CSV, and the hive's evidence id): key times, UserAssist, BAM, recent-file and dialog lists
   jumplist   JLECmd -d DIR --csv DIR                       (pass the AutomaticDestinations CSV)
 
 Only the standard library is needed. Times are compared to the precision the
@@ -404,10 +404,113 @@ def jumplist(export, path, evid):
                   [f"{untimed} entries never used (no time) are in the other tool only, by design here"] if untimed else [])
 
 
+def recmd_lists(export, csv_rows, evid, norm):
+    """The recent-file lists in RECmd's batch output: Office File and Place MRU (path and last-opened time per
+    item), the Open and Save dialog's OpenSavePidlMRU (each extension's paths in MRU order, and the newest's time)
+    and LastVisitedPidlMRU (program and folder in MRU order). RECmd's DFIR batch reaches some Office keys by two
+    wildcard paths and lists their rows twice; each is taken once."""
+    bs = chr(92)
+    office, dialogs, last, typed = {}, {}, None, {}
+    for e in load(export, "registry", evid):
+        d, f = e["timestamp_desc"], e["fields"]
+        if d in ("office-document-last-opened", "office-folder-last-used"):
+            office[(norm(f["key"]), f["value"].lower())] = e
+        elif d == "open-save-dialog-latest":
+            dialogs[norm(f["key"]).split(bs)[-1].lower()] = e
+        elif d == "dialog-last-folder-latest":
+            last = e
+        elif d in ("url-typed-latest (internet explorer)", "path-typed-latest (explorer)"):
+            typed["TypedURLs" if d.startswith("url") else "TypedPaths"] = e
+    after = lambda s, label: s.split(label, 1)[1].strip() if label in s else ""
+    diff, seen = [], set()
+    n_office = n_office_untimed = 0
+    theirs_ds, theirs_last, theirs_typed = defaultdict(list), [], defaultdict(list)
+    for r in csv_rows:
+        desc = r["Description"]
+        if desc == "Microsoft Office MRU":
+            k = (norm(r["KeyPath"]), r["ValueName"].lower())
+            if k in seen:
+                continue
+            seen.add(k)
+            when = t_ns(after(r["ValueData2"], ":"))
+            if when[0] is None:
+                n_office_untimed += 1  # no time in the value: not an event here
+                continue
+            n_office += 1
+            e = office.pop(k, None)
+            name = after(r["ValueData"], "File name:") or after(r["ValueData"], "Folder name:") or r["ValueData"]
+            if e is None:
+                diff.append(f"Office {k[0].split(bs)[-4]} {r['ValueName']}: not found here")
+            elif not same(e["ts_utc_ns"], when):
+                diff.append(f"Office {e['path']!r}: time {e['datetime_utc']} here, {r['ValueData2']} there")
+            elif e["path"].lower().rstrip(bs) != name.lower().rstrip(bs):
+                diff.append(f"Office {r['ValueName']}: path {e['path']!r} here, {name!r} there")
+        elif desc == "OpenSavePidlMRU" and dialogs:
+            m = re.match(r"Extension: (.*?) Absolute path: (.*)$", r["ValueData"], re.S)
+            pos = re.match(r"MRU: (\d+)", r["ValueData3"])
+            if m and pos:
+                theirs_ds[m.group(1).lower()].append((int(pos.group(1)), m.group(2).strip(), r["ValueData2"]))
+        elif desc in ("TypedURLs", "TypedPaths") and re.match(r"url\d+$", r["ValueName"]):
+            # No time per entry: url1 is the newest, dated by the key's last write (RECmd's "Opened:" form).
+            theirs_typed[desc].append((int(r["ValueName"][3:]), r["ValueData"].strip(), "Opened: " + r["LastWriteTimestamp"]))
+        elif desc == "LastVisitedPidlMRU" and last:
+            m = re.match(r"Exe: (.*?) Folder: .*? Absolute path: (.*)$", r["ValueData"], re.S)
+            pos = re.match(r"MRU: (\d+)", r["ValueData3"])
+            if m and pos:
+                theirs_last.append((int(pos.group(1)), m.group(1) + " in " + m.group(2).strip(), r["ValueData2"]))
+    for e in office.values():
+        diff.append(f"Office {e['path']!r}: only in Atropos")
+    n_ds = n_entries = 0
+
+    # The user's profile folder ({59031a47-3f72-44a7-89c5-5595fe6b30ee}) is "User folder" here; RECmd names
+    # that identifier "Shared Documents Folder (Users Files)". Its entries are under the profile (.ssh, ...).
+    wording = lambda p: p.replace("Shared Documents Folder (Users Files)", "User folder")
+
+    def ordered(label, ours_e, theirs):
+        nonlocal n_entries
+        theirs.sort()
+        names = [wording(t[1]) for t in theirs]
+        mine = list(ours_e["fields"]["entries"])
+        n_entries += len(names)
+        if [x.lower() for x in mine] != [x.lower() for x in names]:
+            for i, (a, b) in enumerate(zip(mine + [None] * len(names), names + [None] * len(mine))):
+                if a is None and b is None:
+                    break
+                if (a or "").lower() != (b or "").lower():
+                    diff.append(f"{label}, entry {i}: {a!r} here, {b!r} there")
+                    break
+        # RECmd dates the newest entry by the key's last write, as Atropos dates its event.
+        newest = t_ns(after(theirs[0][2], "Opened:")) if theirs else (None, 0)
+        if newest[0] is not None and not same(ours_e["ts_utc_ns"], newest):
+            diff.append(f"{label}: newest dated {ours_e['datetime_utc']} here, {theirs[0][2]} there")
+
+    for ext, theirs in sorted(theirs_ds.items()):
+        e = dialogs.pop(ext, None)
+        if e is None:
+            diff.append(f"OpenSavePidlMRU {ext!r}: not found here")
+            continue
+        n_ds += 1
+        ordered(f"OpenSavePidlMRU {ext!r}", e, theirs)
+    if theirs_ds:
+        for ext in dialogs:
+            diff.append(f"OpenSavePidlMRU {ext!r}: only in Atropos")
+    if theirs_last:
+        ordered("LastVisitedPidlMRU", last, theirs_last)
+    for desc, theirs in sorted(theirs_typed.items()):
+        if desc not in typed:
+            diff.append(f"{desc}: {len(theirs)} entries there, no list here")
+        else:
+            ordered(desc, typed[desc], theirs)
+    return diff, (f"{n_office} Office entries ({n_office_untimed} with no time, not events here), "
+                  f"{n_ds} Open/Save extension lists, {len(theirs_last)} LastVisited entries, "
+                  f"{sum(len(v) for v in theirs_typed.values())} typed URLs and paths "
+                  f"({n_entries} list entries in all, in order) compared")
+
+
 def recmd(export, path, evid):
     """RECmd batch output (any .reb). Every row names a key and its last-write time: those are compared with the
     key times here, to 100 ns. UserAssist rows are compared on program, last run and run count; BAM rows on
-    program and time."""
+    program and time; the recent-file and dialog lists in recmd_lists."""
     bs = chr(92)
     # RECmd names the root key ("ROOT", or "S-1-5-21-…_Classes" in UsrClass.dat); Atropos does not.
     def norm(k):
@@ -481,6 +584,8 @@ def recmd(export, path, evid):
                 diff.append(f"BAM {r['ValueName']!r}: not found here")
             elif not same(e["ts_utc_ns"], when):
                 diff.append(f"BAM {r['ValueName']!r}: time {e['datetime_utc']} here, {r['ValueData2']} there")
+    list_diff, list_counts = recmd_lists(export, csv_rows, evid, norm)
+    diff += list_diff
     if have_ua:
         for left in ua.values():
             for e in left:
@@ -489,7 +594,7 @@ def recmd(export, path, evid):
         for e in bam.values():
             diff.append(f"BAM {e['fields']['program']!r}: only in Atropos")
     return report("Registry (RECmd batch)", "RECmd", path, f"{len(keys)} keys",
-                  f"{n_keys} key times, {n_ua} UserAssist entries and {n_bam} BAM entries compared", diff,
+                  f"{n_keys} key times, {n_ua} UserAssist entries and {n_bam} BAM entries compared; " + list_counts, diff,
                   [f"{unknown} keys in the other tool's output are not in this export (another hive, or pass the evidence id)",
                    f"{ua_untimed} UserAssist and {bam_untimed} BAM rows with no time are in the other tool only, by design here"])
 

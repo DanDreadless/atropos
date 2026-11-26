@@ -32,6 +32,7 @@ var (
 	reLastVisited = regexp.MustCompile(`\\explorer\\comdlg32\\lastvisitedpidlmru(?:legacy)?$`)
 	reWordWheel   = regexp.MustCompile(`\\explorer\\wordwheelquery$`)
 	reTypedURLs   = regexp.MustCompile(`\\software\\microsoft\\internet explorer\\typedurls$`)
+	reTypedPaths  = regexp.MustCompile(`\\software\\microsoft\\windows\\currentversion\\explorer\\typedpaths$`)
 	reOfficeMRU   = regexp.MustCompile(`\\software\\microsoft\\office\\([^\\]+)\\([^\\]+)\\(?:user mru\\[^\\]+\\)?(file mru|place mru)$`)
 	reOfficeItem  = regexp.MustCompile(`^(?:\[[A-Za-z][0-9A-Fa-f]{1,16}\])*?\[T([0-9A-Fa-f]{16})\](?:\[[A-Za-z][0-9A-Fa-f]{1,16}\])*\*(.+)$`)
 
@@ -227,8 +228,17 @@ func regListsRaw(ctx *Context, look *regLookup, hive, host, lower, path string, 
 				}
 			}
 			return emitMRU(ctx, host, path, keyTime, "explorer-search-latest", CatFileOpening, "Explorer search: searched for", "", entries, ordered)
+		case reTypedPaths.MatchString(lower):
+			raw := values()
+			var entries []string
+			for _, n := range numberedURLs(raw) {
+				if u := clean(utf16zAt(raw[n])); u != "" {
+					entries = append(entries, u)
+				}
+			}
+			return emitMRU(ctx, host, path, keyTime, "path-typed-latest (explorer)", CatFileOpening, "Typed into Explorer's address bar", "", entries, true)
 		case reTypedURLs.MatchString(lower):
-			return typedURLs(ctx, look, host, path, values())
+			return typedURLs(ctx, look, host, path, keyTime, values())
 		case reOfficeMRU.MatchString(lower):
 			return officeMRU(ctx, host, lower, path, values())
 		}
@@ -262,20 +272,38 @@ func regListsRaw(ctx *Context, look *regLookup, hive, host, lower, path string, 
 	return nil
 }
 
+// numberedURLs gives the url1, url2 ... url10 values of a typed list in
+// order, newest first, by number rather than as text.
+func numberedURLs(raw map[string][]byte) []string {
+	names := make([]string, 0, len(raw))
+	num := map[string]int{}
+	for n := range raw {
+		if i, err := strconv.Atoi(strings.TrimPrefix(n, "url")); err == nil && strings.HasPrefix(n, "url") && i > 0 {
+			names, num[n] = append(names, n), i
+		}
+	}
+	sort.Slice(names, func(a, b int) bool { return num[names[a]] < num[names[b]] })
+	return names
+}
+
 // typedURLs: addresses typed into Internet Explorer (and the old Edge), each
-// with its own time in the TypedURLsTime key beside it.
-func typedURLs(ctx *Context, look *regLookup, host, path string, raw map[string][]byte) error {
+// with its own time in the TypedURLsTime key beside it. Without that key
+// (seen on Windows 11) url1 is the newest, dated by the key's last write.
+func typedURLs(ctx *Context, look *regLookup, host, path string, keyTime time.Time, raw map[string][]byte) error {
 	var times map[string][]byte
 	if look != nil && look.open != nil {
 		times = look.open(strings.TrimPrefix(path, `\`) + "Time")
 	}
-	names := make([]string, 0, len(raw))
-	for n := range raw {
-		if strings.HasPrefix(n, "url") {
-			names = append(names, n)
+	names := numberedURLs(raw)
+	if len(times) == 0 {
+		var entries []string
+		for _, n := range names {
+			if u := clean(utf16zAt(raw[n])); u != "" {
+				entries = append(entries, u)
+			}
 		}
+		return emitMRU(ctx, host, path, keyTime, "url-typed-latest (internet explorer)", CatBrowser, "Address typed into Internet Explorer", "", entries, true)
 	}
-	sort.Strings(names)
 	for _, n := range names {
 		u := clean(utf16zAt(raw[n]))
 		t := times[n]

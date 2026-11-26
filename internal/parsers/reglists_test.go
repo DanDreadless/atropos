@@ -122,6 +122,23 @@ func TestRegistryRecentLists(t *testing.T) {
 		ev[0].Stamp.UTC.Format(time.RFC3339) != "2024-03-03T08:00:00Z" {
 		t.Errorf("typed urls: %+v", ev)
 	}
+	// Without TypedURLsTime (as on the owner's Windows 11): url1 is the newest,
+	// dated by the key, and url10 comes after url2.
+	ev, _ = lists(t, "NTUSER", `\Software\Microsoft\Internet Explorer\TypedURLs`, map[string][]byte{
+		"url10": wide("http://ten/\x00"), "url2": wide("http://two/\x00"), "url1": wide("http://one/\x00"), "urlx": wide("http://no/\x00"),
+	}, nil, utc)
+	if len(ev) != 1 || ev[0].Type != "url-typed-latest (internet explorer)" || ev[0].Category != CatBrowser || ev[0].Path != "http://one/" ||
+		fmt.Sprint(ev[0].Fields["entries"]) != "[http://one/ http://two/ http://ten/]" || ev[0].Stamp.UTC.Format(time.RFC3339) != "2024-05-01T10:00:00Z" {
+		t.Errorf("typed urls without times: %+v", ev)
+	}
+	// Paths typed into Explorer's address bar: the same numbering, no times.
+	ev, _ = lists(t, "NTUSER", `\Software\Microsoft\Windows\CurrentVersion\Explorer\TypedPaths`, map[string][]byte{
+		"url2": wide(`\\fs01\share` + "\x00"), "url1": wide(`C:\Windows\System32\config` + "\x00"),
+	}, nil, utc)
+	if len(ev) != 1 || ev[0].Type != "path-typed-latest (explorer)" || ev[0].Category != CatFileOpening || ev[0].Path != `C:\Windows\System32\config` ||
+		ev[0].Fields["entry_count"] != 2 || !strings.HasPrefix(ev[0].Message, `Typed into Explorer's address bar: C:\Windows\System32\config  (the newest of 2`) {
+		t.Errorf("typed paths: %+v", ev)
+	}
 
 	// Office: every item carries its own time.
 	item := func(when, p string) []byte {
