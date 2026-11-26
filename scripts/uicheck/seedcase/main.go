@@ -1,6 +1,7 @@
 // Command seedcase writes a small case whose artefacts contradict each other
 // about three files' times, so the browser check can look at the Analysis tab
-// with findings in it. The events are written straight into the store: there
+// with findings in it, and holds a command history with a command of a kind
+// attackers use, for the finding in a file's text. The events are written straight into the store: there
 // are no files behind them, so this case is for looking at, not for verifying.
 //
 //	go run ./scripts/uicheck/seedcase DIR
@@ -123,4 +124,14 @@ func main() {
 				"tab_url": "https://files.test/landing", "state": "complete", "danger": "not dangerous", "danger_code": 0,
 				"received_bytes": 4096, "total_bytes": 4096, "mime_type": "application/pdf", "opened_from_browser": true})},
 	)
+	// A PowerShell command history: text with no times of its own, indexed
+	// in full, whose third line is a command of a kind attackers use.
+	hist := &store.Evidence{SHA256: fmt.Sprintf("%064d", n+1), Name: "ConsoleHost_history.txt", Origin: "seed:text", BatchID: 1, Kind: "text", DetectReason: "seeded for the browser check"}
+	if err := s.AddEvidence(hist); err != nil {
+		panic(err)
+	}
+	if err := s.AddText(hist.ID, "full text", false, "Get-ChildItem C:\\Users\\Public\ncd C:\\Users\\Public\n"+
+		"powershell -nop -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkA\nexit\n"); err != nil {
+		panic(err)
+	}
 }

@@ -578,14 +578,25 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // A seeded case whose artefacts disagree about three files.
   await page.goto(process.env.ATROPOS_URL2 + '?token=' + process.env.ATROPOS_TOKEN2 + '#view=analysis', { waitUntil: 'networkidle0' });
-  await page.waitForFunction(() => document.querySelectorAll('#anrows .anrow').length === 3, { timeout: 20000 });
-  ok((await text('#ansummary')).startsWith('3 things out of place'), 'three things out of place are found in the seeded case');
+  await page.waitForFunction(() => document.querySelectorAll('#anrows .anrow').length === 4, { timeout: 20000 });
+  ok((await text('#ansummary')).startsWith('4 things out of place') && (await text('#ansummary')).includes('the text of 1 file'),
+    'four things out of place are found in the seeded case, one in the text of a file');
   const oop = await text('#anrows');
   ok(oop.includes('Name one character away from a Windows program') && oop.includes('close to svchost.exe') && oop.includes('mft, registry'),
     'a look-alike name is one finding across the artefacts that show it');
   ok(oop.includes('Program run from a folder programs do not belong in') && oop.includes('Program file in a folder programs do not belong in') && !oop.includes('calc.exe'),
     'a program in Users\\Public is reported, and ordinary files are not');
+  ok(oop.includes("Command of a kind attackers use, in a file's text") && oop.includes('PowerShell run with an encoded command')
+    && oop.includes('ConsoleHost_history.txt, at line 3') && oop.includes('powershell -nop -enc SQBF'),
+    'a command in a file with no times is found, with its line, quoted as written');
   await shot('16-out-of-place');
+  const textRow = await page.evaluateHandle(() => [...document.querySelectorAll('#anrows .anrow button.link')].find((b) => b.textContent.includes('under Evidence')));
+  ok(textRow && !(await textRow.evaluate((b) => !!b.closest('.anrow').querySelector('.antimes'))), 'the finding in text has no times and offers the file instead of events');
+  await textRow.click();
+  await page.waitForFunction(() => !document.getElementById('view-evidence').hidden && document.querySelector('#evrows .erow.sel'), { timeout: 20000 });
+  ok((await text('#evrows .erow.sel')).includes('ConsoleHost_history.txt'), 'the finding opens its file under Evidence');
+  await page.click('#nav [data-view=analysis]');
+  await page.waitForFunction(() => document.querySelectorAll('#anrows .anrow').length === 4, { timeout: 20000 });
   await page.click('#antag');
   await page.waitForFunction(() => document.getElementById('ansummary').textContent.includes('tags added'), { timeout: 20000 });
   const tagged = await (await page.evaluate(async () => (await fetch('api/events?q=tag:anomaly&limit=50')).json()));
