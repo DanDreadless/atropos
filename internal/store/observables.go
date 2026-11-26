@@ -43,7 +43,7 @@ import (
 // item saying how it was started: service, task, wmi or winrm. The analysis
 // ties it to a network logon by time, and by account where it names one.
 
-const observablesVersion = 10
+const observablesVersion = 11
 
 const observablesSchema = `
 CREATE TABLE IF NOT EXISTS observables (
@@ -137,6 +137,11 @@ func (s *Store) computeObservables(runID int64) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	// Phones and cameras among the USB devices, by their keys' values.
+	phones, err := s.portableDevices(runID)
+	if err != nil {
+		return err
+	}
 	// The connecting computer's own records outside its logs: the
 	// registry's Remote Desktop server lists and MountPoints2, and jump
 	// list entries on a share; and USB storage devices.
@@ -155,7 +160,7 @@ func (s *Store) computeObservables(runID int64) error {
 			rows.Close()
 			return err
 		}
-		if observeArtefact(&oe, typ, path, fields) {
+		if observeArtefact(&oe, typ, path, fields) || observePhone(&oe, typ, fields, phones) {
 			found = append(found, oe)
 		}
 	}
@@ -1208,6 +1213,135 @@ func observeArtefact(oe *ObservedEvent, typ, path, fieldsJSON string) bool {
 	default:
 		return false
 	}
+	return true
+}
+
+// usbKey is what a SYSTEM hive's Enum\USB\<device>\<instance> key says
+// of the device.
+type usbKey struct {
+	dev, inst                                        string // as in the key's path
+	class, service, compat, friendly, desc, idPrefix string
+}
+
+// portable says whether a USB device key is a phone, camera or media
+// player: Windows' portable devices class (WPD), its MTP driver, or the
+// compatible IDs of MTP or of the still image class (PTP).
+func (k usbKey) portable() bool {
+	c := strings.ToLower(k.compat)
+	return strings.EqualFold(k.class, "WPD") || strings.EqualFold(k.service, "WUDFWpdMtp") || strings.EqualFold(k.service, "WpdMtp") ||
+		strings.Contains(c, "ms_comp_mtp") || strings.Contains(c, "class_06&subclass_01&prot_01")
+}
+
+// name is the device's name as Windows shows it: FriendlyName, or the text
+// of DeviceDesc after its driver file reference ("@oem12.inf,%x%;Galaxy").
+func (k usbKey) name() string {
+	if k.friendly != "" {
+		return k.friendly
+	}
+	if i := strings.LastIndexByte(k.desc, ';'); i >= 0 {
+		return strings.TrimSpace(k.desc[i+1:])
+	}
+	return k.desc
+}
+
+// portableDevices finds the phones and cameras among a SYSTEM hive's USB
+// devices, by device and instance in lower case ("vid_04e8&pid_6860\r58m"),
+// with their names. A composite device (a phone that is also a modem or a
+// debugging bridge) has a key per interface, VID_x&PID_y&MI_00 with an
+// instance Windows made up beginning with the parent's ParentIdPrefix: the
+// portable interface marks the parent, whose instance is the serial.
+func (s *Store) portableDevices(runID int64) (map[string]string, error) {
+	rows, err := s.r.Query(`SELECT path, fields FROM events WHERE run_id = ? AND source = 'registry' AND ts_type = 'registry-key-last-write'
+		AND path LIKE '%\Enum\USB\%'`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []usbKey
+	for rows.Next() {
+		var path, fields string
+		if err := rows.Scan(&path, &fields); err != nil {
+			return nil, err
+		}
+		i := strings.Index(strings.ToLower(path), `\enum\usb\`)
+		if i < 0 {
+			continue
+		}
+		parts := strings.Split(path[i+len(`\enum\usb\`):], `\`)
+		if len(parts) != 2 {
+			continue
+		}
+		var f struct {
+			Values map[string]struct {
+				Data string `json:"data"`
+			} `json:"values"`
+		}
+		_ = json.Unmarshal([]byte(fields), &f)
+		v := func(n string) string {
+			for k, x := range f.Values {
+				if strings.EqualFold(k, n) {
+					return strings.TrimSpace(x.Data)
+				}
+			}
+			return ""
+		}
+		keys = append(keys, usbKey{dev: parts[0], inst: parts[1], class: v("Class"), service: v("Service"), compat: v("CompatibleIDs"),
+			friendly: v("FriendlyName"), desc: v("DeviceDesc"), idPrefix: v("ParentIdPrefix")})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for _, k := range keys {
+		if !k.portable() {
+			continue
+		}
+		dl := strings.ToLower(k.dev)
+		i := strings.Index(dl, "&mi_")
+		if i < 0 {
+			out[dl+`\`+strings.ToLower(k.inst)] = k.name()
+			continue
+		}
+		for _, p := range keys {
+			if strings.EqualFold(p.dev, k.dev[:i]) && p.idPrefix != "" && strings.HasPrefix(strings.ToLower(k.inst), strings.ToLower(p.idPrefix)+"&") {
+				name := p.friendly
+				if name == "" {
+					name = k.name()
+				}
+				if name == "" {
+					name = p.name()
+				}
+				out[strings.ToLower(p.dev)+`\`+strings.ToLower(p.inst)] = name
+			}
+		}
+	}
+	return out, nil
+}
+
+// observePhone reads a USB device's connection times from the SYSTEM hive
+// when the device is a phone or camera (portableDevices) with a serial of
+// its own.
+func observePhone(oe *ObservedEvent, typ, fieldsJSON string, phones map[string]string) bool {
+	if deviceTimes[typ] == "" {
+		return false
+	}
+	var f struct {
+		Device string `json:"device"`
+		Serial string `json:"serial"`
+		Bus    string `json:"bus"`
+	}
+	if json.Unmarshal([]byte(fieldsJSON), &f) != nil || f.Bus != "USB" || len(f.Serial) < 3 || f.Serial[1] == '&' {
+		return false
+	}
+	name, ok := phones[strings.ToLower(f.Device+`\`+f.Serial)]
+	if !ok {
+		return false
+	}
+	if name == "" {
+		name = f.Device
+	}
+	oe.Items = append(oe.Items, Observable{"device", name, "object"}, Observable{"serial", f.Serial, "object"})
+	oe.Act, oe.What = "device", "Phone or camera (MTP or PTP) "+strings.TrimPrefix(deviceTimes[typ], "device ")+": "+name+" (registry, Enum\\USB)"
 	return true
 }
 

@@ -149,8 +149,8 @@ var connRead = []ConnRead{
 	{What: "Network logons and connections, which support the others", Done: true,
 		ConnectedTo: []string{"Security 4624 type 3", "Sysmon 3 to file sharing (445, 139) and the RPC endpoint mapper (135)"},
 		Why:         "not shown alone: a domain controller or file server has thousands"},
-	{What: "The same USB storage device on two hosts", Done: true,
-		Either: []string{`SYSTEM hive, Enum\USBSTOR, by serial (not a serial Windows made up)`, "Partition/Diagnostic 1006 for USB disks (bus type 7), by the serial in its ParentId; capacity 0 is a removal"}},
+	{What: "The same USB storage device, phone or camera on two hosts", Done: true,
+		Either: []string{`SYSTEM hive, Enum\USBSTOR, by serial (not a serial Windows made up)`, "Partition/Diagnostic 1006 for USB disks (bus type 7), by the serial in its ParentId; capacity 0 is a removal", `phones and cameras (MTP, PTP) in the SYSTEM hive's Enum\USB, by serial: the device, or the parent of an interface, of Windows' portable devices class or MTP driver (from published key layouts; not checked on a real phone)`}},
 	{What: "The same file on two hosts", Done: true,
 		Either: []string{"SHA-1 and SHA-256 from Sysmon 1, 6, 15, 23, 26, 29", "Amcache's SHA-1 (of the first 31.4 MB)", "a browser download's SHA-256", "Defender's detection history (the hashes of the file it tracked)", "the case's own evidence items: an executable, document, archive, picture, shortcut or script collected from each host (no time of its own)", `not files only under Windows (but not its Temp), Program Files or ProgramData\Microsoft`}},
 	{What: "Shortcut files", Why: "their times are the target's; the shortcut file's own times are needed"},
@@ -1256,6 +1256,7 @@ func (c *connCtx) deviceLinks(devices []store.ObservedEvent) []Connection {
 	var serials []string
 	labels := map[string]string{}
 	sources := map[string]map[string]bool{}
+	phone := map[string]bool{}
 	for _, e := range devices {
 		h := c.hostByName(e.Host)
 		serial := item(e, "serial", "object")
@@ -1276,6 +1277,9 @@ func (c *connCtx) deviceLinks(devices []store.ObservedEvent) []Connection {
 		o.events = append(o.events, ConnEvent{ID: e.EventID, TS: e.TSUTC, What: e.What})
 		if sources[k] == nil {
 			sources[k] = map[string]bool{}
+		}
+		if strings.HasPrefix(e.What, "Phone or camera") {
+			phone[k] = true
 		}
 		if strings.Contains(e.What, "Partition/Diagnostic") {
 			sources[k]["the Partition/Diagnostic log"] = true
@@ -1329,8 +1333,12 @@ func (c *connCtx) deviceLinks(devices []store.ObservedEvent) []Connection {
 		}
 		for i := 0; i+1 < len(hosts); i++ {
 			a, b := hosts[i], hosts[i+1]
+			what := "USB storage device"
+			if phone[k] {
+				what = "phone or camera"
+			}
 			reasons := []string{
-				fmt.Sprintf("the same USB storage device, %s (serial %s), is recorded on both computers (read from %s)", labels[k], k, joinSet(sources[k])),
+				fmt.Sprintf("the same %s, %s (serial %s), is recorded on both computers (read from %s)", what, labels[k], k, joinSet(sources[k])),
 				fmt.Sprintf("%s; %s (UTC, each host's stated clock difference taken off)", when(a), when(b)),
 			}
 			if b.first <= a.last {

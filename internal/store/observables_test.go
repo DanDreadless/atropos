@@ -341,3 +341,24 @@ func TestObserveSysmonHash(t *testing.T) {
 		}
 	}
 }
+
+// A USB device is a phone or camera by its class, its driver or its
+// compatible IDs; its name is FriendlyName, or DeviceDesc's text.
+func TestUSBKeyPortable(t *testing.T) {
+	for _, c := range []struct {
+		k        usbKey
+		portable bool
+		name     string
+	}{
+		{usbKey{class: "WPD", friendly: "Pixel 8"}, true, "Pixel 8"},
+		{usbKey{service: "WUDFWpdMtp", desc: "@oem12.inf,%mtp%;MTP USB Device"}, true, "MTP USB Device"},
+		{usbKey{compat: `USB\Class_06&SubClass_01&Prot_01 | USB\Class_06&SubClass_01 | USB\Class_06`, desc: "Canon EOS R6"}, true, "Canon EOS R6"},
+		{usbKey{compat: `USB\MS_COMP_MTP | USB\Class_ff`}, true, ""},
+		{usbKey{class: "HIDClass", service: "HidUsb", desc: "@input.inf,%hid%;USB Input Device"}, false, "USB Input Device"},
+		{usbKey{class: "USB", service: "usbccgp"}, false, ""},
+	} {
+		if c.k.portable() != c.portable || c.k.name() != c.name {
+			t.Errorf("%+v: portable %v name %q", c.k, c.k.portable(), c.k.name())
+		}
+	}
+}

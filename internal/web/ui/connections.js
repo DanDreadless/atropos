@@ -84,7 +84,7 @@ function nodeLeaves(id) {
 
 function leafWords(l) {
   if (l.kind === 'device') {
-    return `USB storage device ${l.label}, ${l.detail}: ${l.events.length} record${l.events.length === 1 ? '' : 's'}, ${fmtNs(l.first_utc, 0)}` +
+    return `${/^Phone or camera/.test((l.events[0] || {}).what || '') ? 'Phone or camera' : 'USB storage device'} ${l.label}, ${l.detail}: ${l.events.length} record${l.events.length === 1 ? '' : 's'}, ${fmtNs(l.first_utc, 0)}` +
       (l.last_utc !== l.first_utc ? ` to ${fmtNs(l.last_utc, 0)}` : '') + ' UTC';
   }
   const parts = [];
