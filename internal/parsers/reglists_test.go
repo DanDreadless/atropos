@@ -224,6 +224,94 @@ func TestSAMAccounts(t *testing.T) {
 	}
 }
 
+// A local group's C value: its name, comment and members as SIDs. A local
+// account is named from the same hive when its SID is the machine's; a
+// domain account keeps its SID; a well-known SID is named. Layout checked on
+// the owner's SAM against Get-LocalGroupMember.
+func TestSAMGroups(t *testing.T) {
+	le := binary.LittleEndian
+	sid := func(auth byte, subs ...uint32) []byte {
+		b := []byte{1, byte(len(subs)), 0, 0, 0, 0, 0, auth}
+		for _, s := range subs {
+			b = le.AppendUint32(b, s)
+		}
+		return b
+	}
+	group := func(name, comment string, members ...[]byte) []byte {
+		data := wide(name)
+		nameOff := 0
+		commOff := len(data)
+		data = append(data, wide(comment)...)
+		memOff := len(data)
+		for _, m := range members {
+			data = append(data, m...)
+		}
+		h := make([]byte, 0x34)
+		le.PutUint32(h[0x10:], uint32(nameOff))
+		le.PutUint32(h[0x14:], uint32(len(wide(name))))
+		le.PutUint32(h[0x1C:], uint32(commOff))
+		le.PutUint32(h[0x20:], uint32(len(wide(comment))))
+		le.PutUint32(h[0x28:], uint32(memOff))
+		le.PutUint32(h[0x2C:], uint32(len(data)-memOff))
+		le.PutUint32(h[0x30:], uint32(len(members)))
+		return append(h, data...)
+	}
+	// The hive's own domain is S-1-5-21-111-222-333; account 1001 is dan.
+	acct := make([]byte, 40)
+	acct = append(acct, le.AppendUint32(le.AppendUint32(le.AppendUint32(nil, 111), 222), 333)...)
+	userV := make([]byte, 0xCC)
+	le.PutUint32(userV[12:], 0)
+	le.PutUint32(userV[16:], uint32(len(wide("dan"))))
+	userV = append(userV, wide("dan")...)
+	look := &regLookup{open: func(p string) map[string][]byte {
+		switch p {
+		case `SAM\Domains\Account`:
+			return map[string][]byte{"v": acct}
+		case `SAM\Domains\Account\Users\000003E9`:
+			return map[string][]byte{"v": userV}
+		}
+		return nil
+	}}
+	c := group("Administrators", "Administrators have complete and unrestricted access",
+		sid(5, 21, 111, 222, 333, 1001), sid(5, 21, 900, 901, 902, 1001), sid(5, 4), sid(5, 21, 900, 901, 902, 512))
+	ev, facts := lists(t, "SAM", `\SAM\Domains\Builtin\Aliases\00000220`, map[string][]byte{"c": c}, look, timeutil.AssumedUTC())
+	wantList := "dan, S-1-5-21-900-901-902-1001, INTERACTIVE, S-1-5-21-900-901-902-512"
+	if len(facts["sam.group"]) != 1 || facts["sam.group"][0] != "Administrators: "+wantList {
+		t.Errorf("fact: %q", facts["sam.group"])
+	}
+	if len(ev) != 1 {
+		t.Fatalf("%d events", len(ev))
+	}
+	e := ev[0]
+	if e.Type != "group-key-last-write (sam)" || e.Category != CatAccount || e.Path != "Administrators" || e.Stamp.UTC.Format(time.RFC3339) != "2024-05-01T10:00:00Z" ||
+		e.Message != "Local group Administrators (built-in): 4 members, "+wantList || e.Fields["machine_sid"] != "S-1-5-21-111-222-333" ||
+		e.Fields["member_count"] != 4 || e.Fields["comment"] != "Administrators have complete and unrestricted access" {
+		t.Errorf("%s %q %+v", e.Type, e.Message, e.Fields)
+	}
+	if ms := e.Fields["members"].([]map[string]any); ms[0]["name"] != "dan" || ms[0]["sid"] != "S-1-5-21-111-222-333-1001" || ms[1]["name"] != nil {
+		t.Errorf("members: %+v", ms)
+	}
+	// A group made on the computer with no members: a fact, no event.
+	ev, facts = lists(t, "SAM", `\SAM\Domains\Account\Aliases\000003F4`, map[string][]byte{"c": group("Backup operators (local)", "")}, look, timeutil.AssumedUTC())
+	if len(ev) != 0 || len(facts["sam.group"]) != 1 || facts["sam.group"][0] != "Backup operators (local): no members" {
+		t.Errorf("empty group: %d events, %q", len(ev), facts["sam.group"])
+	}
+	// Without the rest of the hive, a local account is its SID.
+	ev, _ = lists(t, "SAM", `\SAM\Domains\Builtin\Aliases\00000220`, map[string][]byte{"c": c}, nil, timeutil.AssumedUTC())
+	if len(ev) != 1 || !strings.Contains(ev[0].Message, "4 members, S-1-5-21-111-222-333-1001, ") {
+		t.Errorf("no lookup: %+v", ev)
+	}
+	// Every truncation, and a count larger than the members.
+	for n := 0; n < len(c); n++ {
+		lists(t, "SAM", `\SAM\Domains\Builtin\Aliases\00000220`, map[string][]byte{"c": c[:n]}, look, timeutil.AssumedUTC())
+	}
+	big := append([]byte(nil), c...)
+	le.PutUint32(big[0x30:], 1000)
+	if ev, _ := lists(t, "SAM", `\SAM\Domains\Builtin\Aliases\00000220`, map[string][]byte{"c": big}, look, timeutil.AssumedUTC()); len(ev) != 0 {
+		t.Errorf("a count beyond the members gave %d events", len(ev))
+	}
+}
+
 func TestNetworkHistory(t *testing.T) {
 	st := func(y, mo, d, h, mi, s int) []byte {
 		b := make([]byte, 16)

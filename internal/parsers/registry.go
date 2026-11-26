@@ -19,7 +19,7 @@ type registryParser struct{}
 
 func (registryParser) Name() string { return "registry" }
 func (registryParser) Version() string {
-	return "16 (velocidex/regparser 31e704a; the computer's addresses and domain from Tcpip; recent-file lists, SAM accounts, networks; key times to 100 ns; known folders named; Amcache name-and-hash entries; ShimCache times to 100 ns; BAM entries for Store apps; ShimCache slack and executed flag; transaction logs applied; deleted keys and values recovered; portable device, web folder and property view shell items)"
+	return "17 (velocidex/regparser 31e704a; the computer's addresses and domain from Tcpip; recent-file lists, SAM accounts and local groups, networks; key times to 100 ns; known folders named; Amcache name-and-hash entries; ShimCache times to 100 ns; BAM entries for Store apps; ShimCache slack and executed flag; transaction logs applied; deleted keys and values recovered; portable device, web folder and property view shell items)"
 }
 
 const (

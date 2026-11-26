@@ -37,6 +37,7 @@ var (
 
 	reSAMUser    = regexp.MustCompile(`^\\sam\\domains\\account\\users\\([0-9a-f]{8})$`)
 	reSAMName    = regexp.MustCompile(`^\\sam\\domains\\account\\users\\names\\[^\\]+$`)
+	reSAMAlias   = regexp.MustCompile(`^\\sam\\domains\\(builtin|account)\\aliases\\([0-9a-f]{8})$`)
 	reNetProfile = regexp.MustCompile(`^\\microsoft\\windows nt\\currentversion\\networklist\\profiles\\(\{[0-9a-f-]+\})$`)
 )
 
@@ -234,6 +235,9 @@ func regListsRaw(ctx *Context, look *regLookup, hive, host, lower, path string, 
 	case "SAM":
 		if g := reSAMUser.FindStringSubmatch(lower); g != nil {
 			return samUser(ctx, host, path, g[1], values())
+		}
+		if g := reSAMAlias.FindStringSubmatch(lower); g != nil {
+			return samGroup(ctx, look, host, path, g[1], keyTime, values())
 		}
 	case "SOFTWARE":
 		if g := reNetProfile.FindStringSubmatch(lower); g != nil {
@@ -440,6 +444,148 @@ func samUser(ctx *Context, host, path, ridHex string, raw map[string][]byte) err
 		}
 	}
 	return nil
+}
+
+// ---- SAM: local groups and their members ---------------------------------
+
+// A group's C value: offsets into the data after a 0x34-byte header. The
+// name at 0x10 (offset, length), the comment at 0x1C, the members at 0x28
+// (offset, length in bytes) and their count at 0x30. The members are SIDs,
+// one after another.
+type samAlias struct {
+	name, comment string
+	members       []string
+}
+
+func parseSAMC(b []byte) (samAlias, bool) {
+	le := binary.LittleEndian
+	if len(b) < 0x34 {
+		return samAlias{}, false
+	}
+	str := func(at int) string {
+		off, n := int(le.Uint32(b[at:]))+0x34, int(le.Uint32(b[at+4:]))
+		if off < 0x34 || n <= 0 || n > 1024 || off+n > len(b) {
+			return ""
+		}
+		return clean(utf16zAt(append(append([]byte(nil), b[off:off+n]...), 0, 0)))
+	}
+	a := samAlias{name: str(0x10), comment: str(0x1C)}
+	off, size, count := int(le.Uint32(b[0x28:]))+0x34, int(le.Uint32(b[0x2C:])), int(le.Uint32(b[0x30:]))
+	if count == 0 {
+		return a, a.name != ""
+	}
+	if off < 0x34 || size <= 0 || off+size > len(b) || count > size/8 {
+		return a, false
+	}
+	m := b[off : off+size]
+	for i := 0; i < count; i++ {
+		sid := sidString(m)
+		if sid == "" {
+			return a, false
+		}
+		a.members = append(a.members, sid)
+		m = m[8+4*int(m[1]):]
+	}
+	return a, a.name != ""
+}
+
+// Well-known SIDs that appear as members of local groups.
+var wellKnownSIDs = map[string]string{
+	"S-1-1-0": "Everyone", "S-1-5-2": "NETWORK", "S-1-5-4": "INTERACTIVE", "S-1-5-6": "SERVICE", "S-1-5-7": "ANONYMOUS LOGON",
+	"S-1-5-9": "ENTERPRISE DOMAIN CONTROLLERS", "S-1-5-11": "Authenticated Users", "S-1-5-14": "REMOTE INTERACTIVE LOGON",
+	"S-1-5-17": "IUSR", "S-1-5-18": "SYSTEM", "S-1-5-19": "LOCAL SERVICE", "S-1-5-20": "NETWORK SERVICE",
+	"S-1-5-32-544": "Administrators", "S-1-5-32-545": "Users", "S-1-5-32-546": "Guests",
+}
+
+// machineSID is the SID of the hive's own accounts: S-1-5-21 and the three
+// numbers at the end of SAM\Domains\Account's V value.
+func (l *regLookup) machineSID() string {
+	if l == nil || l.open == nil {
+		return ""
+	}
+	v := l.open(`SAM\Domains\Account`)["v"]
+	if len(v) < 12 {
+		return ""
+	}
+	le := binary.LittleEndian
+	t := v[len(v)-12:]
+	return fmt.Sprintf("S-1-5-21-%d-%d-%d", le.Uint32(t), le.Uint32(t[4:]), le.Uint32(t[8:]))
+}
+
+// memberName names a member: a well-known SID, or a local account of this
+// hive by its RID. Anything else (a domain account or group) has no name
+// here.
+func (l *regLookup) memberName(sid, machine string) string {
+	if n, ok := wellKnownSIDs[sid]; ok {
+		return n
+	}
+	if machine != "" && strings.HasPrefix(sid, machine+"-") && l != nil && l.open != nil {
+		if rid, err := strconv.ParseUint(sid[len(machine)+1:], 10, 32); err == nil {
+			if name, _, _ := parseSAMV(l.open(fmt.Sprintf(`SAM\Domains\Account\Users\%08X`, rid))["v"]); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// samGroup reads a local group: a fact naming it and its members, and, for a
+// group with members, an event at its key's last write. Windows writes the
+// key when the membership changes, so the membership last changed then or
+// earlier; who joined when is not recorded.
+func samGroup(ctx *Context, look *regLookup, host, path, domain string, keyTime time.Time, raw map[string][]byte) error {
+	a, ok := parseSAMC(raw["c"])
+	if !ok {
+		if len(raw["c"]) > 0 {
+			ctx.Note("the group key %s holds a C value that could not be read", path)
+		}
+		return nil
+	}
+	machine := look.machineSID()
+	var names []string
+	var members []map[string]any
+	for _, sid := range a.members {
+		m := map[string]any{"sid": sid}
+		label := sid
+		if n := look.memberName(sid, machine); n != "" {
+			m["name"], label = n, n
+		}
+		members = append(members, m)
+		names = append(names, label)
+	}
+	kind := "built-in"
+	if domain == "account" {
+		kind = "made on this computer"
+	}
+	list := "no members"
+	if len(names) > 0 {
+		list = strings.Join(names, ", ")
+	}
+	ctx.Fact("sam.group", a.name+": "+list, "a local group in the SAM hive ("+kind+")")
+	if len(members) == 0 {
+		return nil
+	}
+	fields := map[string]any{"key": path, "group": a.name, "group_kind": kind, "members": members, "member_count": len(members),
+		"time_meaning": "the group's key was last written: the membership last changed then or earlier, and who joined when is not recorded"}
+	if a.comment != "" {
+		fields["comment"] = a.comment
+	}
+	if machine != "" {
+		fields["machine_sid"] = machine
+	}
+	plural := "s"
+	if len(names) == 1 {
+		plural = ""
+	}
+	stamp, ok := timeutil.FromTimeNative(keyTime, "key last written")
+	if !ok {
+		return nil
+	}
+	return ctx.Emit(Event{
+		Stamp: stamp, Type: "group-key-last-write (sam)", Category: CatAccount, Source: "registry",
+		Host: host, Path: a.name, Message: fmt.Sprintf("Local group %s (%s): %d member%s, %s", a.name, kind, len(names), plural, list),
+		Fields: fields, Ref: "value C of " + path,
+	})
 }
 
 // ---- SOFTWARE: networks joined ------------------------------------------
