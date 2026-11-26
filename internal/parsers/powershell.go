@@ -75,12 +75,16 @@ func parseTranscript(ctx *Context, doc []byte) error {
 	// prompt line, which is the command it refers to.
 	var pendingAt *time.Time
 	pendingLine := 0
+	// headers is set once a session shows invocation headers. Every command
+	// then has its block, so a prompt-like line without one is output (a
+	// log or another transcript printed), not a command.
+	headers := false
 	inHeader := false
 	for i, l := range lines {
 		l = strings.TrimRight(l, " \t")
 		switch {
 		case strings.HasSuffix(l, "transcript start") && !strings.Contains(l, ">"):
-			inHeader, header, user = true, map[string]string{}, ""
+			inHeader, header, user, headers = true, map[string]string{}, "", false
 			sessions++
 			continue
 		case strings.HasSuffix(l, "transcript end") && !strings.Contains(l, ">"):
@@ -96,7 +100,7 @@ func parseTranscript(ctx *Context, doc []byte) error {
 			continue
 		case strings.HasPrefix(l, "Command start time:"):
 			if t, ok := transcriptTime(l[len("Command start time:"):]); ok {
-				pendingAt, pendingLine = &t, i+1
+				pendingAt, pendingLine, headers = &t, i+1, true
 			}
 			continue
 		}
@@ -139,7 +143,9 @@ func parseTranscript(ctx *Context, doc []byte) error {
 			continue
 		}
 		if pendingAt == nil {
-			untimed++
+			if !headers {
+				untimed++
+			}
 			continue
 		}
 		timed++

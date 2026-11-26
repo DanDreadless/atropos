@@ -25,7 +25,7 @@ type textParser struct{}
 
 func (textParser) Name() string { return "text-log" }
 func (textParser) Version() string {
-	return "8 (native: json, w3c, access-log, iso-8601, syslog, scheduled-task xml, notepad++ xml, zone.identifier, powershell transcript, defender mplog, browser bookmarks, preferences, extensions and session json)"
+	return "9 (native: json, w3c, access-log, iso-8601, syslog, scheduled-task xml, notepad++ xml, zone.identifier, powershell transcript (prompt-like output not taken for commands), defender mplog, browser bookmarks, preferences, extensions and session json)"
 }
 
 const (
