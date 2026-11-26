@@ -1202,6 +1202,7 @@ func (c *connCtx) leaves(conns []Connection, devices []store.ObservedEvent) []Co
 			l.Events = append(l.Events, e.Events...)
 		}
 	}
+	volumes := map[*ConnLeaf][]string{}
 	for _, e := range devices {
 		h := c.hostByName(e.Host)
 		if h == "" {
@@ -1213,13 +1214,21 @@ func (c *connCtx) leaves(conns []Connection, devices []store.ObservedEvent) []Co
 			ts -= int64(hi.Clock)
 		}
 		l := leaf(hostNode(h), "device", strings.ToUpper(serial), item(e, "device", "object"), ts)
+		if v := item(e, "volume", "object"); v != "" {
+			volumes[l] = append(volumes[l], v)
+		}
 		l.Detail = "serial " + serial
 		// The friendly name from the key reads better than the vendor and
 		// product.
-		if strings.Contains(e.What, "key last written") {
+		if strings.Contains(e.What, "key last written") && item(e, "volume", "object") == "" {
 			l.Label = item(e, "device", "object")
 		}
 		l.Events = append(l.Events, ConnEvent{ID: e.EventID, TS: e.TSUTC, What: e.What})
+	}
+	for l, vs := range volumes {
+		sort.Strings(vs)
+		vs = compactSorted(vs)
+		l.Detail += ", volume " + strings.Join(vs, ", ")
 	}
 	out := make([]ConnLeaf, 0, len(order))
 	for _, k := range order {
@@ -1281,13 +1290,16 @@ func (c *connCtx) deviceLinks(devices []store.ObservedEvent) []Connection {
 		if strings.HasPrefix(e.What, "Phone or camera") {
 			phone[k] = true
 		}
-		if strings.Contains(e.What, "Partition/Diagnostic") {
+		if item(e, "volume", "object") != "" {
+			sources[k]["the SOFTWARE hive"] = true
+		} else if strings.Contains(e.What, "Partition/Diagnostic") {
 			sources[k]["the Partition/Diagnostic log"] = true
 		} else {
 			sources[k]["the SYSTEM hive"] = true
 		}
 		keyWrite := strings.Contains(e.What, "key last written")
-		if keyWrite || strings.Contains(e.What, "Partition/Diagnostic") && !strings.HasPrefix(item(e, "device", "object"), "VID_") {
+		volume := item(e, "volume", "object")
+		if volume == "" && (keyWrite || strings.Contains(e.What, "Partition/Diagnostic") && !strings.HasPrefix(item(e, "device", "object"), "VID_")) {
 			labels[k] = item(e, "device", "object")
 		} else if labels[k] == "" {
 			labels[k] = item(e, "device", "object")
@@ -1349,6 +1361,17 @@ func (c *connCtx) deviceLinks(devices []store.ObservedEvent) []Connection {
 			reasons = append(reasons, "a serial shows the same device, not who carried it or what was copied")
 			out = append(out, Connection{Kind: "usb", From: a.node, To: b.node, Start: b.first, SeenOn: "both", Confidence: "strong",
 				Source: end(a), Target: end(b), Reasons: reasons})
+		}
+	}
+	return out
+}
+
+// compactSorted drops repeats from a sorted list.
+func compactSorted(s []string) []string {
+	out := s[:0]
+	for i, x := range s {
+		if i == 0 || x != s[i-1] {
+			out = append(out, x)
 		}
 	}
 	return out

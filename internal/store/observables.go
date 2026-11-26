@@ -43,7 +43,7 @@ import (
 // item saying how it was started: service, task, wmi or winrm. The analysis
 // ties it to a network logon by time, and by account where it names one.
 
-const observablesVersion = 11
+const observablesVersion = 12
 
 const observablesSchema = `
 CREATE TABLE IF NOT EXISTS observables (
@@ -161,6 +161,28 @@ func (s *Store) computeObservables(runID int64) error {
 			return err
 		}
 		if observeArtefact(&oe, typ, path, fields) || observePhone(&oe, typ, fields, phones) {
+			found = append(found, oe)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// The SOFTWARE hive's list of portable devices: a USB disk's volume
+	// name, by its device and serial.
+	rows, err = s.r.Query(`SELECT id, evidence_id, ts_utc, host, path, fields FROM events
+		WHERE run_id = ? AND source = 'registry' AND ts_type = 'registry-key-last-write' AND path LIKE '%\Windows Portable Devices\Devices\%'`, runID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var oe ObservedEvent
+		var path, fields string
+		if err := rows.Scan(&oe.EventID, &oe.EvidenceID, &oe.TSUTC, &oe.Host, &path, &fields); err != nil {
+			rows.Close()
+			return err
+		}
+		if observePortableName(&oe, path, fields) {
 			found = append(found, oe)
 		}
 	}
@@ -1316,6 +1338,49 @@ func (s *Store) portableDevices(runID int64) (map[string]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// observePortableName reads a key of SOFTWARE's Windows Portable
+// Devices\Devices, named for the device's instance with "#" for "\"
+// (SWD#WPDBUSENUM#_??_USBSTOR#DISK&VEN_x&PROD_y&REV_z#<serial>&0#{guid}).
+// Its FriendlyName is the name Windows showed for it: for a USB disk, its
+// volume's name when it was connected. Only USB disks with a serial of
+// their own; the time is only the key's last write.
+func observePortableName(oe *ObservedEvent, path, fieldsJSON string) bool {
+	parts := strings.Split(path, `\`)
+	segs := strings.Split(parts[len(parts)-1], "#")
+	at := -1
+	for i, x := range segs {
+		if strings.EqualFold(x, "_??_USBSTOR") {
+			at = i
+		}
+	}
+	if at < 0 || at+2 >= len(segs) {
+		return false
+	}
+	serial := deviceSerial(segs[at+2])
+	if len(serial) < 3 || serial[1] == '&' {
+		return false
+	}
+	var f struct {
+		Values map[string]struct {
+			Data string `json:"data"`
+		} `json:"values"`
+	}
+	_ = json.Unmarshal([]byte(fieldsJSON), &f)
+	label := ""
+	for k, x := range f.Values {
+		if strings.EqualFold(k, "FriendlyName") {
+			label = strings.TrimSpace(x.Data)
+		}
+	}
+	if label == "" {
+		return false
+	}
+	name := deviceName(segs[at+1])
+	oe.Items = append(oe.Items, Observable{"device", name, "object"}, Observable{"serial", serial, "object"}, Observable{"volume", label, "object"})
+	oe.Act, oe.What = "device", "USB storage device's volume name "+label+": "+name+" (SOFTWARE, Windows Portable Devices; the key last written)"
+	return true
 }
 
 // observePhone reads a USB device's connection times from the SYSTEM hive

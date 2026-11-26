@@ -342,6 +342,30 @@ func TestObserveSysmonHash(t *testing.T) {
 	}
 }
 
+// SOFTWARE's portable devices: a USB disk's volume name by its device and
+// serial; a phone's interface, a made-up serial, or no name give nothing.
+func TestObservePortableName(t *testing.T) {
+	const dev = `\Microsoft\Windows Portable Devices\Devices\`
+	for _, c := range []struct {
+		path, fields, what string
+		items              []Observable
+	}{
+		{dev + `SWD#WPDBUSENUM#_??_USBSTOR#DISK&VEN_KINGSTON&PROD_DATATRAVELER_3.0&REV_PMAP#60A44C3FAE22EEA0797900F7&0#{53F56307-B6BF-11D0-94F2-00A0C91EFB8B}`,
+			`{"values":{"FriendlyName":{"type":"REG_SZ","data":"KINGSTON"}}}`,
+			"USB storage device's volume name KINGSTON: KINGSTON DATATRAVELER 3.0 (SOFTWARE, Windows Portable Devices; the key last written)",
+			[]Observable{{"device", "KINGSTON DATATRAVELER 3.0", "object"}, {"serial", "60A44C3FAE22EEA0797900F7", "object"}, {"volume", "KINGSTON", "object"}}},
+		{dev + `SWD#WPDBUSENUM#_??_USBSTOR#DISK&VEN_X&PROD_Y&REV_1#7&1A2B3C&0&000000&0#{53F56307-B6BF-11D0-94F2-00A0C91EFB8B}`, `{"values":{"FriendlyName":{"data":"X"}}}`, "", nil},
+		{dev + `SWD#WPDBUSENUM#_??_USB#VID_04E8&PID_6860&MI_00#7&2BD6EF1&0&0000#{6AC27878-A6FA-4155-BA85-F98F491D4F33}`, `{"values":{"FriendlyName":{"data":"Galaxy S21"}}}`, "", nil},
+		{dev + `SWD#WPDBUSENUM#_??_USBSTOR#DISK&VEN_X&PROD_Y&REV_1#ABC123456&0#{53F56307-B6BF-11D0-94F2-00A0C91EFB8B}`, `{}`, "", nil},
+	} {
+		var oe ObservedEvent
+		ok := observePortableName(&oe, c.path, c.fields)
+		if ok != (c.what != "") || ok && (oe.What != c.what || !reflect.DeepEqual(oe.Items, c.items)) {
+			t.Errorf("%s: %v %q %+v", c.path, ok, oe.What, oe.Items)
+		}
+	}
+}
+
 // A USB device is a phone or camera by its class, its driver or its
 // compatible IDs; its name is FriendlyName, or DeviceDesc's text.
 func TestUSBKeyPortable(t *testing.T) {

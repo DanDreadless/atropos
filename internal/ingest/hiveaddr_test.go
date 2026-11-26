@@ -114,6 +114,21 @@ func TestUSBFromPartitionDiagnostic(t *testing.T) {
 	}
 }
 
+// softwareHive is a SOFTWARE hive whose list of portable devices names
+// the SanDisk stick of systemHive by its volume.
+func softwareHive(t *testing.T) []byte {
+	t.Helper()
+	t0 := time.Date(2026, 11, 2, 8, 31, 0, 0, time.UTC)
+	root := &artw.Key{Name: "ROOT", Written: t0}
+	root.Path(`Microsoft\Windows Portable Devices\Devices\SWD#WPDBUSENUM#_??_USBSTOR#DISK&VEN_SANDISK&PROD_CRUZER_BLADE&REV_1.00#4C530001230109116201&0#{53F56307-B6BF-11D0-94F2-00A0C91EFB8B}`, t0).Values =
+		[]artw.Value{artw.SZ("FriendlyName", "PAYROLL")}
+	b, err := artw.Hive(root, `\REGISTRY\MACHINE\SOFTWARE`, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 // A Remote Desktop logon that names only an address is matched to the host
 // whose own SYSTEM hive records that address, when no address is stated;
 // a hive naming another computer than its submission's host is not used.
@@ -130,7 +145,8 @@ func TestConnectionFromHiveAddress(t *testing.T) {
 		t.Fatal(err)
 	}
 	files := map[string][]byte{
-		"WS-A/SYSTEM": systemHive(t, "WS-A", "10.1.2.30"),
+		"WS-A/SYSTEM":   systemHive(t, "WS-A", "10.1.2.30"),
+		"WS-A/SOFTWARE": softwareHive(t),
 		"SRV-B/Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Operational.evtx": logs.Bytes(),
 	}
 	for p, b := range files {
@@ -188,7 +204,7 @@ func TestConnectionFromHiveAddress(t *testing.T) {
 	for _, l := range rep.Leaves {
 		got = append(got, fmt.Sprintf("%s %s %s %q in %d out %d, %d events, last %s", l.Node, l.Kind, l.Label, l.Detail, l.In, l.Out, len(l.Events), time.Unix(0, l.Last).UTC().Format("15:04")))
 	}
-	if strings.Join(got, " | ") != `host:SRV-B account CORP\alice "" in 1 out 0, 1 events, last 09:00 | host:WS-A device SanDisk Cruzer Blade USB Device "serial 4C530001230109116201" in 0 out 0, 2 events, last 08:30` {
+	if strings.Join(got, " | ") != `host:SRV-B account CORP\alice "" in 1 out 0, 1 events, last 09:00 | host:WS-A device SanDisk Cruzer Blade USB Device "serial 4C530001230109116201, volume PAYROLL" in 0 out 0, 3 events, last 08:31` {
 		t.Errorf("leaves: %s", strings.Join(got, " | "))
 	}
 	var ws *store.HostIdentity
