@@ -578,10 +578,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // A seeded case whose artefacts disagree about three files.
   await page.goto(process.env.ATROPOS_URL2 + '?token=' + process.env.ATROPOS_TOKEN2 + '#view=analysis', { waitUntil: 'networkidle0' });
-  await page.waitForFunction(() => document.querySelectorAll('#anrows .anrow').length === 4, { timeout: 20000 });
-  ok((await text('#ansummary')).startsWith('4 things out of place') && (await text('#ansummary')).includes('the text of 1 file'),
-    'four things out of place are found in the seeded case, one in the text of a file');
+  await page.waitForFunction(() => document.querySelectorAll('#anrows .anrow').length === 5, { timeout: 20000 });
+  ok((await text('#ansummary')).startsWith('5 things out of place') && (await text('#ansummary')).includes('the text of 1 file'),
+    'five things out of place are found in the seeded case, one in the text of a file');
   const oop = await text('#anrows');
+  ok(oop.includes('Defender detection: TrojanDownloader:O97M/Seed.A'), 'a Defender detection record is one of them');
   ok(oop.includes('Name one character away from a Windows program') && oop.includes('close to svchost.exe') && oop.includes('mft, registry'),
     'a look-alike name is one finding across the artefacts that show it');
   ok(oop.includes('Program run from a folder programs do not belong in') && oop.includes('Program file in a folder programs do not belong in') && !oop.includes('calc.exe'),
@@ -596,11 +597,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.waitForFunction(() => !document.getElementById('view-evidence').hidden && document.querySelector('#evrows .erow.sel'), { timeout: 20000 });
   ok((await text('#evrows .erow.sel')).includes('ConsoleHost_history.txt'), 'the finding opens its file under Evidence');
   await page.click('#nav [data-view=analysis]');
-  await page.waitForFunction(() => document.querySelectorAll('#anrows .anrow').length === 4, { timeout: 20000 });
+  await page.waitForFunction(() => document.querySelectorAll('#anrows .anrow').length === 5, { timeout: 20000 });
   await page.click('#antag');
   await page.waitForFunction(() => document.getElementById('ansummary').textContent.includes('tags added'), { timeout: 20000 });
   const tagged = await (await page.evaluate(async () => (await fetch('api/events?q=tag:anomaly&limit=50')).json()));
-  ok(tagged.events.length === 6 && tagged.events.every((e) => e.tags.includes('anomaly')), 'tagging marks every event listed, findable with tag:anomaly');
+  ok(tagged.events.length === 7 && tagged.events.every((e) => e.tags.includes('anomaly')), 'tagging marks every event listed, findable with tag:anomaly');
   await page.click('#antag');
   await page.waitForFunction(() => document.getElementById('ansummary').textContent.includes('already'), { timeout: 20000 });
   ok(true, 'tagging again adds nothing');
@@ -672,6 +673,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.click('#win .row');
   await page.waitForFunction(() => [...document.querySelectorAll('#detail h3')].some((x) => x.textContent === 'Download'));
   ok(await page.$$eval('#detail ol.chain li', (l) => l.length) === 2 && (await text('#detail')).includes('Saved to'), 'a download is read out with its redirect chain');
+  await page.keyboard.press('Escape');
+  await setQ('item:defender-detection-history', 1);
+  await page.waitForFunction(() => document.querySelector('#win .row') && document.querySelector('#win .row').textContent.includes('Defender detected'), { timeout: 8000 });
+  await page.click('#win .row');
+  await page.waitForFunction(() => [...document.querySelectorAll('#detail h3')].some((x) => x.textContent === 'Detection'), { timeout: 8000 });
+  const det = await text('#detail');
+  ok(await page.$$eval('#detail ol.chain li', (l) => l.length) === 2 && det.includes('file: C:\\Users\\dan\\Documents\\invoice.docm') && det.includes('containerfile: C:\\Users\\dan\\Downloads\\invoices.zip')
+    && det.includes('Sha256 0000000000000000000000000000000000000000000000000000000000000abc') && det.includes('Size 48213'),
+    'a Defender detection lists every resource it was found in, with the hashes Defender kept');
+  ok(det.includes('TrojanDownloader:O97M/Seed.A') && det.includes('quarantined') && det.includes('WINWORD.EXE') && await count('#detail b.bad') === 1,
+    'and says what the threat is, what Defender did and which process had it, with a severe one marked');
+  await shot('18-defender');
   await page.keyboard.press('Escape');
   await shot('17-details');
   await page.goto(URL, { waitUntil: 'networkidle0' });

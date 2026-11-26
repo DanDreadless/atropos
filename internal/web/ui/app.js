@@ -699,6 +699,27 @@ function browsingSection(e, ev, f) {
   ])];
 }
 
+// A detection record from Defender's DetectionHistory, read out: the
+// threat, what it was found in (every resource, with the hashes Defender
+// kept for it), and what Defender did. The record's three times are three
+// events; each shows the others.
+function defenderSection(e, f) {
+  if (!/^defender-(detection|remediation|status-changed)$/.test(e.ts_type) || !Array.isArray(f.resources)) return null;
+  const sev = f.severity ? (/^(high|severe)$/i.test(f.severity) ? h('b', { class: 'bad' }, f.severity) : f.severity) : '';
+  const res = f.resources.map((r) => h('li', {},
+    h('span', { class: 'mono' }, `${r.type || '?'}: ${r.location || '(no location)'}`),
+    ...['ThreatTrackingSha256', 'ThreatTrackingSha1', 'ThreatTrackingMD5', 'ThreatTrackingSize'].filter((k) => r[k] != null)
+      .map((k) => h('div', { class: 'dimc mono' }, `${k.replace('ThreatTracking', '')} ${r[k]}`))));
+  return [h('h3', {}, 'Detection'), kv([
+    ['Threat', f.threat_name], ['Severity', sev], ['Category', f.category],
+    ['Found in', res.length ? h('ol', { class: 'chain' }, ...res) : ''],
+    ['Status now', f.threat_status], ['Detected by', f.detection_source], ['Running when found', f.execution_status],
+    ['Process', f.process], ['User', f.user], ['Acted on by', f.remediation_account],
+    ['First detected', f.initial_detection_time], ['Acted on', f.remediation_time], ['Status last changed', f.last_status_change_time],
+    ['Note', f.time_from],
+  ])];
+}
+
 // Opens the visit with the browser's own number in the same history file.
 async function openVisit(evidenceId, visitId) {
   try {
@@ -723,6 +744,8 @@ function renderDetail({ event: e, evidence: ev, annotations, journal_folder: jf,
   // For a browser visit or download, what it is comes first.
   const browsing = browsingSection(e, ev, fields);
   if (browsing) kids.push(...browsing);
+  const detection = defenderSection(e, fields);
+  if (detection) kids.push(...detection);
 
   const letters = [...e.macb].filter((c) => c !== '.');
   kids.push(h('h3', {}, 'Time'), kv([

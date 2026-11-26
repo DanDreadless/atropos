@@ -124,6 +124,22 @@ func main() {
 				"tab_url": "https://files.test/landing", "state": "complete", "danger": "not dangerous", "danger_code": 0,
 				"received_bytes": 4096, "total_bytes": 4096, "mime_type": "application/pdf", "opened_from_browser": true})},
 	)
+	// A Defender detection record, as the defender-detection parser reads
+	// one: a macro document quarantined, found in two places.
+	run("defender-detection-history", "defender-detection",
+		store.Event{TSUTC: ns("2024-03-10 09:02:00"), TSType: "defender-detection", Category: "security", Source: "defender", User: `WKSTN-07\dan`,
+			Path: `C:\Users\dan\Documents\invoice.docm`, RecordRef: "detection {5A1B2C3D-0000-4000-8000-000000000001}",
+			Message: `Defender detected TrojanDownloader:O97M/Seed.A in file C:\Users\dan\Documents\invoice.docm and 1 more (severity severe; status now quarantined)`,
+			Fields: fields(map[string]any{"detection_id": "{5A1B2C3D-0000-4000-8000-000000000001}", "threat_name": "TrojanDownloader:O97M/Seed.A",
+				"severity": "severe", "severity_id": 5, "category": "trojan downloader", "category_id": 4, "threat_status": "quarantined", "threat_status_id": 3,
+				"detection_source": "real-time", "execution_status": "not executing", "process": `C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE`,
+				"user": `WKSTN-07\dan`, "initial_detection_time": "2024-03-10T09:02:00Z", "file": `C:\Users\dan\Documents\invoice.docm`,
+				"sha256": "0000000000000000000000000000000000000000000000000000000000000abc",
+				"resources": []map[string]any{
+					{"type": "file", "location": `C:\Users\dan\Documents\invoice.docm`, "ThreatTrackingSha256": "0000000000000000000000000000000000000000000000000000000000000abc", "ThreatTrackingSize": 48213},
+					{"type": "containerfile", "location": `C:\Users\dan\Downloads\invoices.zip`},
+				}})},
+	)
 	// A PowerShell command history: text with no times of its own, indexed
 	// in full, whose third line is a command of a kind attackers use.
 	hist := &store.Evidence{SHA256: fmt.Sprintf("%064d", n+1), Name: "ConsoleHost_history.txt", Origin: "seed:text", BatchID: 1, Kind: "text", DetectReason: "seeded for the browser check"}
