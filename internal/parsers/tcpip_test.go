@@ -8,6 +8,31 @@ import (
 	"github.com/DanDreadless/atropos/internal/artw"
 )
 
+// A standalone computer's SECURITY hive has no Cache key (only domain
+// logons make one): Policy, Recovery and RXACT, as on the owner's Windows
+// 11. It is still known as SECURITY, and its audit policy is read.
+func TestSecurityHiveWithoutCache(t *testing.T) {
+	t0 := time.Date(2025, 3, 4, 9, 0, 0, 0, time.UTC)
+	root := &artw.Key{Name: "ROOT", Written: t0}
+	pol := make([]byte, 12+2*59+2)
+	pol[8] = byte(len(pol))
+	pol[12+2*33] = 1 // Process Creation: success
+	for _, n := range []byte{5, 11, 14, 3, 6, 6, 6, 4, 4} {
+		pol = append(pol, n, 0)
+	}
+	root.Path(`Policy\PolAdtEv`, t0).Values = []artw.Value{{Name: "", Type: 0, Data: pol}}
+	root.Path(`Recovery`, t0)
+	root.Path(`RXACT`, t0)
+	hive, err := artw.Hive(root, `\REGISTRY\MACHINE\SECURITY`, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := run(t, write(t, "SECURITY", hive), nil)
+	if r.err != nil || r.facts["hive.kind"] != "SECURITY" || r.facts["security.audit_policy"] != "Process Creation (success); everything else not audited" {
+		t.Fatalf("err %v kind %q policy %q", r.err, r.facts["hive.kind"], r.facts["security.audit_policy"])
+	}
+}
+
 // A SYSTEM hive gives the computer's addresses and its name in the domain,
 // which connections from other hosts are matched on.
 func TestSystemHiveAddresses(t *testing.T) {

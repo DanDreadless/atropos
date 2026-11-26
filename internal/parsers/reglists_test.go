@@ -312,6 +312,78 @@ func TestSAMGroups(t *testing.T) {
 	}
 }
 
+// The SECURITY hive's audit policy: a header whose word at 8 is the offset
+// of the nine counts at the end, one setting per subcategory before them.
+// The settings below are Windows 11's defaults, as on the owner's hive.
+func TestAuditPolicy(t *testing.T) {
+	le := binary.LittleEndian
+	policy := func(counts []int, set map[int]uint16) []byte {
+		total := 0
+		for _, n := range counts {
+			total += n
+		}
+		b := make([]byte, 12+2*total+2) // one spare word before the counts, as Windows writes
+		le.PutUint16(b[0:], 0x0100)
+		le.PutUint16(b[4:], 9)
+		le.PutUint16(b[8:], uint16(len(b)))
+		for i, v := range set {
+			le.PutUint16(b[12+2*i:], v)
+		}
+		for _, n := range counts {
+			b = le.AppendUint16(b, uint16(n))
+		}
+		return b
+	}
+	// Positions in the Windows 10 and 11 layout: System 0-4, Logon/Logoff 5-15,
+	// Object Access 16-29, Privilege Use 30-32, Detailed Tracking 33-38,
+	// Policy Change 39-44, Account Management 45-50.
+	defaults := map[int]uint16{0: 1, 2: 3, 4: 3, 5: 3, 6: 1, 7: 1, 9: 1, 13: 3, 39: 1, 40: 1, 45: 1, 47: 1}
+	b := policy([]int{5, 11, 14, 3, 6, 6, 6, 4, 4}, defaults)
+	ev, facts := lists(t, "SECURITY", `\Policy\PolAdtEv`, map[string][]byte{"": b}, nil, timeutil.AssumedUTC())
+	want := "Security State Change (success), System Integrity (success and failure), Other System Events (success and failure), Logon (success and failure), " +
+		"Logoff (success), Account Lockout (success), Special Logon (success), Network Policy Server (success and failure), Audit Policy Change (success), " +
+		"Authentication Policy Change (success), User Account Management (success), Security Group Management (success); everything else not audited"
+	if len(facts["security.audit_policy"]) != 1 || facts["security.audit_policy"][0] != want {
+		t.Errorf("fact: %q", facts["security.audit_policy"])
+	}
+	if len(ev) != 1 {
+		t.Fatalf("%d events", len(ev))
+	}
+	e := ev[0]
+	settings := e.Fields["settings"].(map[string]string)
+	if e.Type != "audit-policy-key-last-write (security)" || e.Category != CatSecurity || !strings.HasPrefix(e.Message, "Audit policy (12 of 59 subcategories audited): ") ||
+		settings["Detailed Tracking: Process Creation"] != "not audited" || settings["Logon/Logoff: Special Logon"] != "success" ||
+		settings["Account Logon: Kerberos Authentication Service"] != "not audited" || len(settings) != 59 || e.Fields["caution"] != nil {
+		t.Errorf("%q %+v", e.Message, e.Fields)
+	}
+	// Process creation audited: the 34th subcategory.
+	ev, _ = lists(t, "SECURITY", `\Policy\PolAdtEv`, map[string][]byte{"": policy([]int{5, 11, 14, 3, 6, 6, 6, 4, 4}, map[int]uint16{33: 2})}, nil, timeutil.AssumedUTC())
+	if len(ev) != 1 || ev[0].Fields["settings"].(map[string]string)["Detailed Tracking: Process Creation"] != "failure" {
+		t.Errorf("process creation: %+v", ev)
+	}
+	// The owner's Windows 11: one Logon/Logoff subcategory more. Named as
+	// far as known, the extra one unnamed, and the category marked.
+	ev, _ = lists(t, "SECURITY", `\Policy\PolAdtEv`, map[string][]byte{"": policy([]int{5, 12, 14, 3, 6, 6, 6, 4, 4}, map[int]uint16{16: 1, 34: 3})}, nil, timeutil.AssumedUTC())
+	if len(ev) != 1 {
+		t.Fatalf("Windows 11: %d events", len(ev))
+	}
+	settings = ev[0].Fields["settings"].(map[string]string)
+	if settings["Logon/Logoff: subcategory 12 (not known to Atropos)"] != "success" || settings["Detailed Tracking: Process Creation"] != "success and failure" ||
+		fmt.Sprint(ev[0].Fields["categories_of_unknown_layout"]) != "[Logon/Logoff]" || ev[0].Fields["caution"] == nil {
+		t.Errorf("Windows 11: %+v", ev[0].Fields)
+	}
+	// A layout that does not add up is not read; nor is any truncation.
+	bad := append([]byte(nil), b...)
+	le.PutUint16(bad[8:], 20)
+	ev, facts = lists(t, "SECURITY", `\Policy\PolAdtEv`, map[string][]byte{"": bad}, nil, timeutil.AssumedUTC())
+	if len(ev) != 0 || len(facts) != 0 {
+		t.Errorf("bad layout: %+v %v", ev, facts)
+	}
+	for n := 0; n < len(b); n++ {
+		lists(t, "SECURITY", `\Policy\PolAdtEv`, map[string][]byte{"": b[:n]}, nil, timeutil.AssumedUTC())
+	}
+}
+
 func TestNetworkHistory(t *testing.T) {
 	st := func(y, mo, d, h, mi, s int) []byte {
 		b := make([]byte, 16)
@@ -371,5 +443,60 @@ func TestNetworkHistory(t *testing.T) {
 	bad := map[string][]byte{"profilename": wide("x\x00"), "datecreated": st(2024, 13, 1, 0, 0, 0), "datelastconnected": st(2024, 7, 16, 7, 30, 0)[:9]}
 	if ev, _ = lists(t, "SOFTWARE", path, bad, nil, timeutil.AssumedUTC()); len(ev) != 0 {
 		t.Errorf("bad dates: %+v", ev)
+	}
+}
+
+// The SECURITY hive's own SID, its name, and the domain or workgroup it is
+// in: a domain has its SID in PolPrDmS, a workgroup four empty bytes.
+func TestSecurityDomain(t *testing.T) {
+	le := binary.LittleEndian
+	lsa := func(s string) []byte {
+		w := wide(s)
+		b := le.AppendUint16(le.AppendUint16(nil, uint16(len(w))), uint16(len(w)+2))
+		return append(le.AppendUint32(b, 8), append(w, 0, 0)...)
+	}
+	sid := []byte{1, 4, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0}
+	for _, n := range []uint32{111, 222, 333} {
+		sid = le.AppendUint32(sid, n)
+	}
+	_, facts := lists(t, "SECURITY", `\Policy\PolAcDmS`, map[string][]byte{"": sid}, nil, timeutil.AssumedUTC())
+	if facts["security.machine_sid"][0] != "S-1-5-21-111-222-333" {
+		t.Errorf("machine SID %q", facts["security.machine_sid"])
+	}
+	_, facts = lists(t, "SECURITY", `\Policy\PolAcDmN`, map[string][]byte{"": lsa("WS-ALICE")}, nil, timeutil.AssumedUTC())
+	if facts["security.computer_name"][0] != "WS-ALICE" {
+		t.Errorf("computer name %q", facts["security.computer_name"])
+	}
+	prs := map[string][]byte{"": {0, 0, 0, 0}}
+	look := &regLookup{open: func(p string) map[string][]byte {
+		if p == `Policy\PolPrDmS` {
+			return prs
+		}
+		return nil
+	}}
+	ev, facts := lists(t, "SECURITY", `\Policy\PolPrDmN`, map[string][]byte{"": lsa("WORKGROUP")}, look, timeutil.AssumedUTC())
+	if facts["security.primary_domain"][0] != "WORKGROUP (a workgroup: not joined to a domain)" || len(ev) != 1 ||
+		ev[0].Type != "domain-membership-key-last-write (security)" || ev[0].Category != CatAccount ||
+		ev[0].Message != "In the workgroup WORKGROUP (not joined to a domain)" || ev[0].Fields["membership"] != "workgroup" {
+		t.Errorf("workgroup: %q %+v", facts["security.primary_domain"], ev)
+	}
+	prs[""] = sid
+	ev, facts = lists(t, "SECURITY", `\Policy\PolPrDmN`, map[string][]byte{"": lsa("CORP")}, look, timeutil.AssumedUTC())
+	if facts["security.primary_domain"][0] != "CORP (a domain, SID S-1-5-21-111-222-333)" || len(ev) != 1 ||
+		ev[0].Message != "Member of the domain CORP" || ev[0].Fields["domain_sid"] != "S-1-5-21-111-222-333" {
+		t.Errorf("domain: %q %+v", facts["security.primary_domain"], ev)
+	}
+	// Without PolPrDmS, which it is is not known, and that is said.
+	ev, facts = lists(t, "SECURITY", `\Policy\PolPrDmN`, map[string][]byte{"": lsa("CORP")}, nil, timeutil.AssumedUTC())
+	if facts["security.primary_domain"][0] != "CORP (domain or workgroup: not known)" || ev[0].Fields["caution"] == nil {
+		t.Errorf("unknown: %q %+v", facts["security.primary_domain"], ev)
+	}
+	// Lengths and offsets that do not fit give nothing.
+	good := lsa("CORP")
+	for _, bad := range [][]byte{good[:7], good[:10], append(append([]byte{}, good[:4]...), 0xF0, 0, 0, 0), {3, 0, 4, 0, 8, 0, 0, 0, 'a', 0}} {
+		ev, facts = lists(t, "SECURITY", `\Policy\PolPrDmN`, map[string][]byte{"": bad}, look, timeutil.AssumedUTC())
+		if len(ev) != 0 || len(facts) != 0 {
+			t.Errorf("% x: %+v %v", bad, ev, facts)
+		}
 	}
 }

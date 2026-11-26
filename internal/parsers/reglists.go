@@ -239,6 +239,21 @@ func regListsRaw(ctx *Context, look *regLookup, hive, host, lower, path string, 
 		if g := reSAMAlias.FindStringSubmatch(lower); g != nil {
 			return samGroup(ctx, look, host, path, g[1], keyTime, values())
 		}
+	case "SECURITY":
+		switch lower {
+		case `\policy\poladtev`:
+			return auditPolicy(ctx, host, path, keyTime, values()[""])
+		case `\policy\polacdms`:
+			if s := sidString(values()[""]); s != "" {
+				ctx.Fact("security.machine_sid", s, `the computer's own SID, from Policy\PolAcDmS: its local accounts' SIDs begin with it`)
+			}
+		case `\policy\polacdmn`:
+			if n := lsaString(values()[""]); n != "" {
+				ctx.Fact("security.computer_name", n, `the computer's name as the domain of its local accounts, from Policy\PolAcDmN`)
+			}
+		case `\policy\polprdmn`:
+			return primaryDomain(ctx, look, host, path, keyTime, values()[""])
+		}
 	case "SOFTWARE":
 		if g := reNetProfile.FindStringSubmatch(lower); g != nil {
 			return networkProfile(ctx, look, host, path, g[1], values())
@@ -585,6 +600,192 @@ func samGroup(ctx *Context, look *regLookup, host, path, domain string, keyTime 
 		Stamp: stamp, Type: "group-key-last-write (sam)", Category: CatAccount, Source: "registry",
 		Host: host, Path: a.name, Message: fmt.Sprintf("Local group %s (%s): %d member%s, %s", a.name, kind, len(names), plural, list),
 		Fields: fields, Ref: "value C of " + path,
+	})
+}
+
+// ---- SECURITY: the audit policy -----------------------------------------
+
+// The audit policy's categories in the order PolAdtEv stores them, and their
+// subcategories in order, as RegRipper's auditpol plugin (processWin2016,
+// 2023) lays out Windows 10 1607 and later; checked against the default
+// policy on the owner's Windows 11, which holds one Logon/Logoff
+// subcategory more. The data says how many subcategories each category
+// holds.
+var auditCategories = []struct {
+	name string
+	subs []string
+}{
+	{"System", []string{"Security State Change", "Security System Extension", "System Integrity", "IPsec Driver", "Other System Events"}},
+	{"Logon/Logoff", []string{"Logon", "Logoff", "Account Lockout", "IPsec Main Mode", "Special Logon", "IPsec Quick Mode", "IPsec Extended Mode",
+		"Other Logon/Logoff Events", "Network Policy Server", "User/Device Claims", "Group Membership"}},
+	{"Object Access", []string{"File System", "Registry", "Kernel Object", "SAM", "Other Object Access Events", "Certification Services",
+		"Application Generated", "Handle Manipulation", "File Share", "Filtering Platform Packet Drop", "Filtering Platform Connection",
+		"Detailed File Share", "Removable Storage", "Central Policy Staging"}},
+	{"Privilege Use", []string{"Sensitive Privilege Use", "Non Sensitive Privilege Use", "Other Privilege Use Events"}},
+	{"Detailed Tracking", []string{"Process Creation", "Process Termination", "DPAPI Activity", "RPC Events", "Plug and Play Events", "Token Right Adjusted Events"}},
+	{"Policy Change", []string{"Audit Policy Change", "Authentication Policy Change", "Authorization Policy Change", "MPSSVC Rule-Level Policy Change",
+		"Filtering Platform Policy Change", "Other Policy Change Events"}},
+	{"Account Management", []string{"User Account Management", "Computer Account Management", "Security Group Management",
+		"Distribution Group Management", "Application Group Management", "Other Account Management Events"}},
+	{"DS Access", []string{"Directory Service Access", "Directory Service Changes", "Directory Service Replication", "Detailed Directory Service Replication"}},
+	{"Account Logon", []string{"Credential Validation", "Kerberos Service Ticket Operations", "Other Account Logon Events", "Kerberos Authentication Service"}},
+}
+
+var auditSettings = []string{"not audited", "success", "failure", "success and failure"}
+
+type auditSub struct {
+	category, name, setting string
+	value                   uint16
+	named                   bool
+}
+
+// parseAuditPolicy reads PolAdtEv as Windows 10 and later write it: a
+// 12-byte header whose word at 8 is the offset of a table of nine counts
+// (subcategories per category) at the end of the data; before it, from
+// offset 12, one word per subcategory, category by category. uncertain lists
+// the categories holding a different number of subcategories from the names
+// here: an older or newer Windows, whose order may differ (RegRipper's own
+// tables for Windows 7 and 2012 disagree on where Special Logon sits).
+func parseAuditPolicy(b []byte) (subs []auditSub, uncertain []string, ok bool) {
+	le := binary.LittleEndian
+	if len(b) < 12 {
+		return nil, nil, false
+	}
+	table := int(le.Uint16(b[8:]))
+	if table < 12 || table+2*len(auditCategories) != len(b) {
+		return nil, nil, false
+	}
+	at := 12
+	for i, c := range auditCategories {
+		n := int(le.Uint16(b[table+2*i:]))
+		if n > 64 || at+2*n > table {
+			return nil, nil, false
+		}
+		if n != len(c.subs) {
+			uncertain = append(uncertain, c.name)
+		}
+		for j := 0; j < n; j++ {
+			v := le.Uint16(b[at:])
+			at += 2
+			s := auditSub{category: c.name, value: v, setting: fmt.Sprintf("unknown setting %d", v)}
+			if int(v) < len(auditSettings) {
+				s.setting = auditSettings[v]
+			}
+			// Past the known names a subcategory is unnamed. A category with
+			// a different count is marked: its order may differ.
+			if j < len(c.subs) {
+				s.name, s.named = c.subs[j], true
+			} else {
+				s.name = fmt.Sprintf("subcategory %d (not known to Atropos)", j+1)
+			}
+			subs = append(subs, s)
+		}
+	}
+	return subs, uncertain, true
+}
+
+// auditPolicy reads the SECURITY hive's audit policy: a fact saying what was
+// audited, and an event at the key's last write, when the policy last
+// changed or later. It says which kinds of Security log events this computer
+// would have written, and so what their absence means.
+func auditPolicy(ctx *Context, host, path string, keyTime time.Time, b []byte) error {
+	if len(b) == 0 {
+		return nil
+	}
+	subs, uncertain, ok := parseAuditPolicy(b)
+	if !ok {
+		ctx.Note("the audit policy (%s) is %d bytes in a layout Atropos does not know; it was not read", path, len(b))
+		return nil
+	}
+	settings := map[string]string{}
+	var on []string
+	for _, s := range subs {
+		key := s.category + ": " + s.name
+		settings[key] = s.setting
+		if s.value != 0 {
+			on = append(on, s.name+" ("+s.setting+")")
+		}
+	}
+	summary := "nothing audited"
+	if len(on) > 0 {
+		summary = strings.Join(on, ", ") + "; everything else not audited"
+	}
+	ctx.Fact("security.audit_policy", summary, "the audit policy in the SECURITY hive")
+	fields := map[string]any{"key": path, "settings": settings, "audited_count": len(on), "subcategories": len(subs),
+		"names_from":   "RegRipper's auditpol plugin (Windows 10 1607 and later); the layout is read from the data",
+		"time_meaning": "the policy's key was last written: the audit policy last changed then or earlier"}
+	if len(uncertain) > 0 {
+		fields["categories_of_unknown_layout"] = uncertain
+		fields["caution"] = "These categories hold a different number of subcategories from the Windows 10 and 11 layout Atropos names, so their names may be shifted: compare with auditpol on the same Windows version."
+	}
+	stamp, ok := timeutil.FromTimeNative(keyTime, "key last written")
+	if !ok {
+		return nil
+	}
+	return ctx.Emit(Event{
+		Stamp: stamp, Type: "audit-policy-key-last-write (security)", Category: CatSecurity, Source: "registry", Host: host, Path: "audit policy",
+		Message: "Audit policy (" + fmt.Sprint(len(on)) + " of " + fmt.Sprint(len(subs)) + " subcategories audited): " + summary,
+		Fields:  fields, Ref: "value (default) of " + path,
+	})
+}
+
+// lsaString reads an LSA UNICODE_STRING kept in a policy value: its length
+// in bytes, its room, and the offset of the characters from the value's
+// start.
+func lsaString(b []byte) string {
+	if len(b) < 8 {
+		return ""
+	}
+	le := binary.LittleEndian
+	n, off := int(le.Uint16(b)), int(le.Uint32(b[4:]))
+	if n == 0 || n%2 != 0 || off < 8 || off > len(b) || n > len(b)-off {
+		return ""
+	}
+	return clean(utf16At(b, off, n/2))
+}
+
+// primaryDomain reads the domain or workgroup the computer belongs to
+// (Policy\PolPrDmN). A domain has its SID in PolPrDmS beside it; a
+// workgroup has none there. The key is written when the computer joins, so
+// it joined then or earlier.
+func primaryDomain(ctx *Context, look *regLookup, host, path string, keyTime time.Time, b []byte) error {
+	name := lsaString(b)
+	if name == "" {
+		if len(b) > 0 {
+			ctx.Note("the primary domain name (%s) is %d bytes in a layout Atropos does not know; it was not read", path, len(b))
+		}
+		return nil
+	}
+	kind, sid := "unknown", ""
+	if look != nil && look.open != nil {
+		if v, ok := look.open(`Policy\PolPrDmS`)[""]; ok {
+			kind = "workgroup"
+			if sid = sidString(v); sid != "" {
+				kind = "domain"
+			}
+		}
+	}
+	fields := map[string]any{"key": path, "name": name, "membership": kind,
+		"time_meaning": "the key was last written: the computer joined this domain or workgroup then or earlier"}
+	var fact, msg string
+	switch kind {
+	case "domain":
+		fields["domain_sid"] = sid
+		fact, msg = name+" (a domain, SID "+sid+")", "Member of the domain "+name
+	case "workgroup":
+		fact, msg = name+" (a workgroup: not joined to a domain)", "In the workgroup "+name+" (not joined to a domain)"
+	default:
+		fields["caution"] = `Policy\PolPrDmS was not read, so whether this is a domain or a workgroup is not known.`
+		fact, msg = name+" (domain or workgroup: not known)", "Domain or workgroup "+name
+	}
+	ctx.Fact("security.primary_domain", fact, `from Policy\PolPrDmN and PolPrDmS in the SECURITY hive`)
+	stamp, ok := timeutil.FromTimeNative(keyTime, "key last written")
+	if !ok {
+		return nil
+	}
+	return ctx.Emit(Event{
+		Stamp: stamp, Type: "domain-membership-key-last-write (security)", Category: CatAccount, Source: "registry", Host: host, Path: name,
+		Message: msg, Fields: fields, Ref: "value (default) of " + path,
 	})
 }
 
