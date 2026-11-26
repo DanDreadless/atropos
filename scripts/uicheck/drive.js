@@ -63,8 +63,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.waitForFunction(() => Number(document.querySelector('#summary b').textContent.replace(/,/g, '')) > 1000, { timeout: 60000 });
   await settled();
   const total = await summaryCount();
-  // The sample volume gives 49 file table times (a named stream is not an event of its own) and 55 from its transaction log. The sample hive gives 1157, three of them its RecentDocs lists.
-  ok(total === 739 + 1157 + 49 + 55 + 2 + 1 + 1, `timeline shows every event after upload (${total})`);
+  // The sample volume gives 49 file table times (a named stream is not an event of its own) and 55 from its transaction log. The sample hive gives 1158, three of them its RecentDocs lists and one its typed addresses (no TypedURLsTime).
+  ok(total === 739 + 1158 + 49 + 55 + 2 + 1 + 1, `timeline shows every event after upload (${total})`);
   ok((await text('#evcount')) === '6', 'evidence count in the navigation updates');
   ok(await count('#facets .chip') >= 6 && await count('#tzfacets .chip') >= 1, 'facet chips appear');
   ok(await page.evaluate(() => {
@@ -284,7 +284,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.click('#evrows .erow');
   await shot('07-evidence');
   await page.evaluate(() => [...document.querySelectorAll('#evrows .evdetail button')].find((b) => b.textContent.startsWith('Show its')).click());
-  await page.waitForFunction(() => document.querySelector('#summary b').textContent === '1,157');
+  await page.waitForFunction(() => document.querySelector('#summary b').textContent === '1,158');
   ok(await visible('#view-timeline') && (await page.$eval('#q', (i) => i.value)).startsWith('evidence:'), '"Show its events" filters the timeline to that item');
 
   // ---- re-parse ----

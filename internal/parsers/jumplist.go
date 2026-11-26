@@ -23,7 +23,7 @@ type jumpListParser struct{}
 
 func (jumpListParser) Name() string { return "jump-list" }
 func (jumpListParser) Version() string {
-	return "4 (native: compound file, DestList, shell links; known folders and applications named)"
+	return "5 (native: compound file, DestList, shell links, a link without link information named from its item list; known folders and applications named)"
 }
 
 const jumpListMax = 256 << 20

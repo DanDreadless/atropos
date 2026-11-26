@@ -11,6 +11,7 @@ Usage: ez.py KIND EXPORT.jsonl CSV_OR_FOLDER [EVIDENCE_ID]
   recycle    RBCmd -d DIR --csv DIR --csvf out.csv
   recmd      RECmd -d DIR --bn BatchExamples/DFIRBatch.reb --csv DIR   (pass its CSV, and the hive's evidence id): key times, UserAssist, BAM, recent-file and dialog lists, MountPoints2
   jumplist   JLECmd -d DIR --csv DIR                       (pass the AutomaticDestinations CSV)
+  lnk        LECmd -d DIR --csv DIR --csvf out.csv
 
 Only the standard library is needed. Times are compared to the precision the
 tool writes: 100 nanoseconds where its CSV has seven decimal places, whole
@@ -404,6 +405,62 @@ def jumplist(export, path, evid):
                   [f"{untimed} entries never used (no time) are in the other tool only, by design here"] if untimed else [])
 
 
+def lnk(export, path, evid):
+    """LECmd's CSV of loose shortcut files. By file name: the target's three times (LECmd writes whole seconds),
+    size, path, arguments, working directory, relative path, volume serial and label, description, and the
+    tracker block's machine name and MAC address."""
+    bs = chr(92)
+    ours = defaultdict(dict)
+    for e in load(export, "lnk", evid):
+        if e["record_ref"] != "shell link header":
+            continue  # a link inside a jump list
+        m = re.match(r"Shortcut (.+?): ", e["message"])
+        if m:
+            ours[m.group(1).lower()][e["timestamp_desc"].split("-")[-1]] = e
+    diff, compared, untimed = [], 0, 0
+    fields = (("size", "target_size", "FileSize"), ("arguments", "arguments", "Arguments"),
+              ("working directory", "working_dir", "WorkingDirectory"), ("relative path", "relative_path", "RelativePath"),
+              ("volume serial", "volume_serial", "VolumeSerialNumber"), ("volume label", "volume_label", "VolumeLabel"),
+              ("description", "description", "Name"), ("machine", "tracker_machine_id", "MachineID"),
+              ("MAC", "tracker_mac", "MachineMACAddress"))
+    theirs = set()
+    for r in rows(path):
+        name = r["SourceFile"].split(bs)[-1].lower()
+        theirs.add(name)
+        o = ours.get(name)
+        times = [(k, c) for k, c in (("created", "TargetCreated"), ("modified", "TargetModified"), ("accessed", "TargetAccessed")) if r[c]]
+        if not o:
+            if times:
+                diff.append(f"{name}: {len(times)} target times there, none here")
+            else:
+                untimed += 1  # no target times: no event here
+            continue
+        for kind, col in (("created", "TargetCreated"), ("modified", "TargetModified"), ("accessed", "TargetAccessed")):
+            if kind in o and r[col]:
+                compared += 1
+                if not same(o[kind]["ts_utc_ns"], t_ns(r[col])):
+                    diff.append(f"{name}: target {kind} {o[kind]['datetime_utc']} here, {r[col]} there")
+            elif kind in o or r[col]:
+                diff.append(f"{name}: target {kind} time {'here only' if kind in o else 'there only'}")
+        f = next(iter(o.values()))["fields"]
+        # The target: the local path, or the share and the path on it, or (with no link info) the item list's.
+        target = r["LocalPath"] or (r["NetworkPath"].rstrip(bs) + bs + r["CommonPath"] if r["NetworkPath"] else r["TargetIDAbsolutePath"])
+        compared += 1
+        if (f.get("target") or "").lower() != target.lower():
+            diff.append(f"{name}: target {f.get('target')!r} here, {target!r} there")
+        for label, ours_k, col in fields:
+            a, b = str(f.get(ours_k, "")).strip(), r[col].strip()
+            if ours_k == "target_size" and a == "" and b == "0":
+                continue
+            compared += 1
+            if a.lower() != b.lower():
+                diff.append(f"{name}: {label} {a!r} here, {b!r} there")
+    for name in set(ours) - theirs:
+        diff.append(f"{name}: only in Atropos")
+    return report("Shortcut files", "LECmd", path, f"{len(ours)} shortcuts with target times", f"{len(theirs)} shortcuts, {compared} values compared",
+                  diff, [f"{untimed} shortcuts with no target times are not events here"] if untimed else [])
+
+
 def recmd_lists(export, csv_rows, evid, norm):
     """The recent-file lists in RECmd's batch output: Office File and Place MRU (path and last-opened time per
     item), the Open and Save dialog's OpenSavePidlMRU (each extension's paths in MRU order, and the newest's time)
@@ -616,7 +673,7 @@ def recmd(export, path, evid):
                    f"{ua_untimed} UserAssist and {bam_untimed} BAM rows with no time are in the other tool only, by design here"])
 
 
-KINDS = {"evtx": evtx, "prefetch": prefetch, "srum": srum, "mft": mft, "shimcache": shimcache, "shellbags": shellbags, "recycle": recycle, "jumplist": jumplist, "recmd": recmd}
+KINDS = {"evtx": evtx, "prefetch": prefetch, "srum": srum, "mft": mft, "shimcache": shimcache, "shellbags": shellbags, "recycle": recycle, "jumplist": jumplist, "lnk": lnk, "recmd": recmd}
 
 if __name__ == "__main__":
     if len(sys.argv) < 4 or sys.argv[1] not in KINDS:

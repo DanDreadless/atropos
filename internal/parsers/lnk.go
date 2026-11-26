@@ -14,8 +14,10 @@ import (
 // lnkParser reads Windows shell links per the MS-SHLLINK specification.
 type lnkParser struct{}
 
-func (lnkParser) Name() string    { return "lnk" }
-func (lnkParser) Version() string { return "3 (native)" }
+func (lnkParser) Name() string { return "lnk" }
+func (lnkParser) Version() string {
+	return "4 (native; a target from the item list without link information; an undated shortcut kept as text)"
+}
 
 const lnkMax = 8 << 20
 
@@ -48,9 +50,22 @@ func (lnkParser) Parse(ctx *Context) error {
 	if err != nil {
 		return err
 	}
-	n, err := parseLnk(ctx, b, "Shortcut "+ctx.Name, "shell link header")
+	n, fields, err := parseLnkFields(ctx, b, "Shortcut "+ctx.Name, "shell link header")
 	if err == nil && n == 0 {
-		ctx.Note("shortcut header carries no timestamps")
+		// No time to place it by, but what it points at and runs is kept as
+		// text: searchable, and seen by the command checks over file text.
+		ctx.Note("shortcut header carries no timestamps; its target and arguments are kept as searchable text")
+		var lines []string
+		for _, k := range []struct{ key, label string }{{"target", "Target"}, {"target_from", "Target read from"}, {"arguments", "Arguments"},
+			{"working_dir", "Working directory"}, {"relative_path", "Relative path"}, {"description", "Description"}, {"icon_location", "Icon"},
+			{"network_share", "Network share"}, {"tracker_machine_id", "Machine"}} {
+			if v, ok := fields[k.key].(string); ok && v != "" {
+				lines = append(lines, k.label+": "+v)
+			}
+		}
+		if len(lines) > 0 {
+			ctx.Text("full text", false, strings.Join(lines, "\n"))
+		}
 	}
 	return err
 }
@@ -59,8 +74,14 @@ func (lnkParser) Parse(ctx *Context) error {
 // target's times. label names the link in messages and ref locates it in the
 // evidence. It returns how many events it emitted.
 func parseLnk(ctx *Context, b []byte, label, ref string) (int, error) {
+	n, _, err := parseLnkFields(ctx, b, label, ref)
+	return n, err
+}
+
+// parseLnkFields is parseLnk that also returns what was read of the link.
+func parseLnkFields(ctx *Context, b []byte, label, ref string) (int, map[string]any, error) {
 	if len(b) < 76 {
-		return 0, errors.New("truncated shell link header")
+		return 0, nil, errors.New("truncated shell link header")
 	}
 	le := binary.LittleEndian
 	flags := le.Uint32(b[20:])
@@ -73,11 +94,16 @@ func parseLnk(ctx *Context, b []byte, label, ref string) (int, error) {
 	off := 76
 	unicode := flags&0x80 != 0
 
+	var idList []byte
 	if flags&0x1 != 0 { // LinkTargetIDList
 		if off+2 > len(b) {
-			return 0, errors.New("truncated target ID list")
+			return 0, nil, errors.New("truncated target ID list")
 		}
-		off += 2 + int(le.Uint16(b[off:]))
+		n := int(le.Uint16(b[off:]))
+		if off+2+n <= len(b) {
+			idList = b[off+2 : off+2+n]
+		}
+		off += 2 + n
 	}
 	target := ""
 	if flags&0x2 != 0 && off+28 <= len(b) { // LinkInfo
@@ -189,6 +215,13 @@ func parseLnk(ctx *Context, b []byte, label, ref string) (int, error) {
 	}
 
 	target = clean(target)
+	// Without link information (a target that did not exist, or a shortcut
+	// made by a program), the shell item list names it, as Explorer shows it.
+	if target == "" {
+		if p := clean(pidlPath(idList)); p != "" {
+			target, fields["target_from"] = p, "the shell item list (the shortcut has no link information)"
+		}
+	}
 	if target == "" {
 		if rp, ok := fields["relative_path"].(string); ok {
 			target = rp
@@ -217,8 +250,8 @@ func parseLnk(ctx *Context, b []byte, label, ref string) (int, error) {
 			Stamp: stamp, Type: t.kind, MACB: t.macb, Category: CatFileOpening, Source: "lnk", Host: ctx.Host, Path: target,
 			Message: msg, Fields: fields, Ref: ref,
 		}); err != nil {
-			return n, err
+			return n, fields, err
 		}
 	}
-	return n, nil
+	return n, fields, nil
 }

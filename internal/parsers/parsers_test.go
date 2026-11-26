@@ -730,6 +730,35 @@ func TestLnk(t *testing.T) {
 	}
 }
 
+// A shortcut with no times and no link information, as a program writes one
+// (or as Windows writes one to a target that does not exist): no events, but
+// its target, from the shell item list, and its arguments are kept as text,
+// which the command checks over file text read. Before, both were lost.
+func TestLnkWithoutTimes(t *testing.T) {
+	le := binary.LittleEndian
+	b := make([]byte, 76)
+	le.PutUint32(b[0:], 0x4C)
+	copy(b[4:], []byte{0x01, 0x14, 0x02, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46})
+	le.PutUint32(b[20:], 0x1|0x20|0x80) // item list, arguments, unicode
+	ids := pidl(drive('C'))
+	b = le.AppendUint16(b, uint16(len(ids)))
+	b = append(b, ids...)
+	u := utf16.Encode([]rune("-nop -w hidden -enc SQBFAFgA"))
+	b = le.AppendUint16(b, uint16(len(u)))
+	for _, c := range u {
+		b = le.AppendUint16(b, c)
+	}
+	b = le.AppendUint32(b, 0)
+	r := run(t, write(t, "updater.lnk", b), nil)
+	if r.err != nil || len(r.events) != 0 || len(r.notes) != 1 || !strings.Contains(r.notes[0], "kept as searchable text") {
+		t.Fatalf("err=%v events=%d notes=%q", r.err, len(r.events), r.notes)
+	}
+	want := "Target: C:\nTarget read from: the shell item list (the shortcut has no link information)\nArguments: -nop -w hidden -enc SQBFAFgA"
+	if r.text != want {
+		t.Errorf("text %q", r.text)
+	}
+}
+
 // Every truncation of a valid shortcut must be survived: an error or a
 // warning is fine, a panic is not.
 func TestLnkTruncationNeverPanics(t *testing.T) {
