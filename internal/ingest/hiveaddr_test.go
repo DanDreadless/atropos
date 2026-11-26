@@ -41,6 +41,79 @@ func systemHive(t *testing.T, name, ip string) []byte {
 	return b
 }
 
+// A USB stick in one host's SYSTEM hive and in another's Partition/
+// Diagnostic log links them, from the hive's host (08:30) to the log's
+// (10:15); the log's removal record (capacity 0) is one of its events.
+func TestUSBFromPartitionDiagnostic(t *testing.T) {
+	dir := t.TempDir()
+	var logs bytes.Buffer
+	rec := func(at time.Time, capacity uint64) evtxw.Record {
+		return evtxw.Record{
+			Provider: "Microsoft-Windows-Partition", ProviderGUID: "{412BDFF2-A8C4-470D-8F33-63FE0D8C20E2}",
+			EventID: 1006, Level: 4, Time: at, ProcessID: 4, ThreadID: 112, UserSID: "S-1-5-18",
+			Channel: "Microsoft-Windows-Partition/Diagnostic", Computer: "SRV-B.corp.example",
+			Data: []evtxw.KV{{Name: "DiskNumber", Value: uint32(1)}, {Name: "Capacity", Value: capacity}, {Name: "BusType", Value: uint32(7)},
+				{Name: "Manufacturer", Value: "SanDisk"}, {Name: "Model", Value: "Cruzer Blade"}, {Name: "SerialNumber", Value: "4C530001230109116201"},
+				{Name: "ParentId", Value: `USB\VID_0781&PID_5567\4C530001230109116201`}},
+		}
+	}
+	if err := evtxw.Write(&logs, []evtxw.Record{
+		rec(time.Date(2026, 11, 2, 10, 15, 0, 0, time.UTC), 15631122432),
+		rec(time.Date(2026, 11, 2, 10, 40, 0, 0, time.UTC), 0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string][]byte{
+		"WS-A/SYSTEM": systemHive(t, "WS-A", "10.1.2.30"),
+		"SRV-B/Microsoft-Windows-Partition%4Diagnostic.evtx": logs.Bytes(),
+	}
+	for p, b := range files {
+		p = filepath.Join(dir, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := newCase(t)
+	for _, host := range []string{"WS-A", "SRV-B"} {
+		hst, err := c.s.AddHost(host)
+		if err != nil {
+			t.Fatal(err)
+		}
+		batch, _ := c.s.NextBatch()
+		if err := c.s.AssignBatch(batch, &hst.ID, ""); err != nil {
+			t.Fatal(err)
+		}
+		paths, _ := filepath.Glob(filepath.Join(dir, host, "*"))
+		var evs []*store.Evidence
+		for _, f := range paths {
+			e, err := c.in.IntakePath(batch, f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			evs = append(evs, e)
+		}
+		c.in.Process(evs)
+	}
+	rep, err := analysis.Connections(c.s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Connections) != 1 {
+		t.Fatalf("%d connections: %+v", len(rep.Connections), rep.Connections)
+	}
+	cn := rep.Connections[0]
+	r := strings.Join(cn.Reasons, " | ")
+	if cn.Kind != "usb" || cn.From != "host:WS-A" || cn.To != "host:SRV-B" || time.Unix(0, cn.Start).UTC().Format("15:04") != "10:15" ||
+		!strings.Contains(r, "(serial 4C530001230109116201), is recorded on both computers (read from the Partition/Diagnostic log and the SYSTEM hive)") ||
+		!strings.Contains(r, "on SRV-B from 2026-11-02 10:15:00 to 2026-11-02 10:40:00") || cn.Target == nil || len(cn.Target.Events) != 2 ||
+		!strings.Contains(cn.Target.Events[1].What, "USB storage removed: SanDisk Cruzer Blade") {
+		t.Errorf("%s -> %s at %s: %s; target %+v", cn.From, cn.To, time.Unix(0, cn.Start).UTC(), r, cn.Target)
+	}
+}
+
 // A Remote Desktop logon that names only an address is matched to the host
 // whose own SYSTEM hive records that address, when no address is stated;
 // a hive naming another computer than its submission's host is not used.

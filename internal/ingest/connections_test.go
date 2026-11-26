@@ -131,7 +131,7 @@ func TestLateralMovementConnections(t *testing.T) {
 	// WS-ALICE corrected; the key's last write is among the events but does
 	// not date it.
 	if cn := rep.Connections[15]; len(cn.Source.Events) != 5 || len(cn.Target.Events) != 5 ||
-		!strings.Contains(strings.Join(cn.Reasons, " | "), "the same USB storage device, Kingston DataTraveler 3.0 USB Device (serial 60A44C3FAE22EEA0797900F7), is recorded in both computers' SYSTEM hives | on WS-ALICE from 2026-11-20 08:40:11 to 2026-11-20 11:58:30; on SRV-FILE01 from 2026-11-20 12:20:00 to 2026-11-20 12:24:10") ||
+		!strings.Contains(strings.Join(cn.Reasons, " | "), "the same USB storage device, Kingston DataTraveler 3.0 USB Device (serial 60A44C3FAE22EEA0797900F7), is recorded on both computers (read from the SYSTEM hive) | on WS-ALICE from 2026-11-20 08:40:11 to 2026-11-20 11:58:30; on SRV-FILE01 from 2026-11-20 12:20:00 to 2026-11-20 12:24:10") ||
 		!strings.Contains(strings.Join(cn.Reasons, " | "), "it was first connected to SRV-FILE01 after it was last connected to WS-ALICE") {
 		t.Errorf("the USB stick: %d and %d events, %v", len(cn.Source.Events), len(cn.Target.Events), cn.Reasons)
 	}

@@ -729,7 +729,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.click('#cnkind [data-kind=usb]');
   ok(/^1 connection \(USB device on two hosts\)/.test(await text('#cnsummary')) && await count('#cnrows .cnrow') === 1 && await count('.cngraph .cnedge') === 1 &&
     (await text('#cnrows .cnrow')).includes('WS-ALICE → SRV-FILE01') &&
-    (await text('#cnrows .cnrow')).includes('the same USB storage device, Kingston DataTraveler 3.0 USB Device (serial 60A44C3FAE22EEA0797900F7), is recorded in both computers\' SYSTEM hives') &&
+    (await text('#cnrows .cnrow')).includes('the same USB storage device, Kingston DataTraveler 3.0 USB Device (serial 60A44C3FAE22EEA0797900F7), is recorded on both computers (read from the SYSTEM hive)') &&
     (await text('#cnrows .cnrow')).includes('it was first connected to SRV-FILE01 after it was last connected to WS-ALICE'),
     'a USB stick recorded on two hosts is a link between them, from the one that had it first: ' + await text('#cnsummary'));
   await page.click('#cnkind [data-kind=file]');
@@ -744,7 +744,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.waitForFunction(() => document.querySelectorAll('#cnrows .cnrow').length === 13, { timeout: 5000 }).catch(() => {});
   ok(await count('#cnrows .cnrow') === 13 && !(await page.$eval('#cnall', (b) => b.hidden)), 'picking a host lists only its connections, with a way back to all');
   ok(await count('.cngraph .cnleaf') === 2 && await count('.cngraph .cnleaf.device') === 1 && await count('.cngraph .cnleafline') === 2 &&
-    (await text('#cnsel .cnleaves')).includes('Kingston DataTraveler 3.0 USB Device, serial 60A44C3FAE22EEA0797900F7: 5 records in the SYSTEM hive, 2026-11-20 08:40:11 to 2026-11-20 11:58:30 UTC') &&
+    (await text('#cnsel .cnleaves')).includes('Kingston DataTraveler 3.0 USB Device, serial 60A44C3FAE22EEA0797900F7: 5 records, 2026-11-20 08:40:11 to 2026-11-20 11:58:30 UTC') &&
     (await text('#cnsel .cnleaves')).includes('CORP\\alice: connected out by 6') && (await text('#cnlegend')).includes('small: an account or USB storage device'),
     'a host picked opens into its account and its USB stick (times corrected for its clock), on the graph and in the list: ' + await text('#cnsel .cnleaves'));
   await shot('18b-connections-host');

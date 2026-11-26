@@ -43,7 +43,7 @@ import (
 // item saying how it was started: service, task, wmi or winrm. The analysis
 // ties it to a network logon by time, and by account where it names one.
 
-const observablesVersion = 9
+const observablesVersion = 10
 
 const observablesSchema = `
 CREATE TABLE IF NOT EXISTS observables (
@@ -97,6 +97,7 @@ const (
 	chLSM      = "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational"
 	chCoreTS   = "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational"
 	chWinRM    = "Microsoft-Windows-WinRM/Operational"
+	chPart     = "Microsoft-Windows-Partition/Diagnostic"
 )
 
 // computeObservables takes the observables out of one sealed run.
@@ -111,8 +112,8 @@ func (s *Store) computeObservables(runID int64) error {
 	rows, err := s.r.Query(`SELECT id, evidence_id, ts_utc, host, fields FROM events
 		WHERE run_id = ? AND source = 'evtx' AND (category IN ('account', 'network', 'execution', 'persistence')
 			OR (category = 'log' AND json_extract(fields, '$.event_id') = '10016')
-			OR json_extract(fields, '$.channel') = ?)
-		AND json_extract(fields, '$.channel') IN (?,?,?,?,?,?,?,?)`, runID, chSysmon, chSecurity, chRDPCli, chRCM, chLSM, chCoreTS, chSystem, chSysmon, chWinRM)
+			OR json_extract(fields, '$.channel') IN (?, ?))
+		AND json_extract(fields, '$.channel') IN (?,?,?,?,?,?,?,?,?)`, runID, chSysmon, chPart, chSecurity, chRDPCli, chRCM, chLSM, chCoreTS, chSystem, chSysmon, chWinRM, chPart)
 	if err != nil {
 		return err
 	}
@@ -472,6 +473,27 @@ func observeEvent(oe *ObservedEvent, fieldsJSON string) bool {
 	case chSysmon + "/3":
 		if !observeNetConn(oe, get, add) {
 			return false
+		}
+	case chPart + "/1006":
+		// A disk arriving or leaving. Only USB (bus type 7): its parent is
+		// the USB device, USB\VID_xxxx&PID_xxxx\<serial>, the serial
+		// USBSTOR's key carries too. A capacity of 0 is the record of its
+		// removal.
+		parts := strings.Split(get("ParentId"), `\`)
+		if get("BusType") != "7" || len(parts) != 3 || !strings.EqualFold(parts[0], "USB") || parts[2] == "" {
+			return false
+		}
+		name := strings.Join(strings.Fields(get("Manufacturer")+" "+get("Model")), " ")
+		if name == "" {
+			name = parts[1]
+		}
+		add("device", name, "object")
+		add("serial", parts[2], "object")
+		oe.Act = "device"
+		if c := get("Capacity"); c == "0" {
+			oe.What = "USB storage removed: " + name + " (Partition/Diagnostic 1006, capacity 0)"
+		} else {
+			oe.What = "USB storage connected: " + name + " (Partition/Diagnostic 1006, " + c + " bytes)"
 		}
 	case chSystem + "/10016":
 		// DCOM refusing a caller permission to start or use an object. One

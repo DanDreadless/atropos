@@ -197,6 +197,36 @@ func TestObserveDCOMAndNetwork(t *testing.T) {
 	}
 }
 
+// Partition/Diagnostic 1006: a USB disk connected, or removed (capacity
+// 0), by the serial of its USB parent; other buses, and parents that are
+// not a USB device, give nothing.
+func TestObservePartitionDiagnostic(t *testing.T) {
+	pd := func(bus any, parent, capacity, mfr, model string) string {
+		return fmt.Sprintf(`{"channel":%q,"event_id":"1006","event":{"EventData":{"BusType":%v,"ParentId":%q,"Capacity":%s,"Manufacturer":%q,"Model":%q,"SerialNumber":"0123"}}}`,
+			chPart, bus, parent, capacity, mfr, model)
+	}
+	cases := []struct {
+		name, fields, what string
+		items              []Observable
+	}{
+		{"connected", pd(7, `USB\VID_0951&PID_1666\60A44C3FAE22EEA0797900F7`, "31004295168", "Kingston", "DataTraveler 3.0  "),
+			"USB storage connected: Kingston DataTraveler 3.0 (Partition/Diagnostic 1006, 31004295168 bytes)",
+			[]Observable{{"device", "Kingston DataTraveler 3.0", "object"}, {"serial", "60A44C3FAE22EEA0797900F7", "object"}}},
+		{"removed, bus type as text", pd(`"7"`, `USB\VID_0951&PID_1666\60A44C3FAE22EEA0797900F7`, "0", "", ""),
+			"USB storage removed: VID_0951&PID_1666 (Partition/Diagnostic 1006, capacity 0)",
+			[]Observable{{"device", "VID_0951&PID_1666", "object"}, {"serial", "60A44C3FAE22EEA0797900F7", "object"}}},
+		{"an NVMe disk", pd(17, `PCI\VEN_144D&DEV_A808\4&1a2b3c&0&00E8`, "512110190592", "Samsung", "SSD"), "", nil},
+		{"USB bus, parent not a USB device", pd(7, `SCSI\Disk\1`, "1", "x", "y"), "", nil},
+	}
+	for _, c := range cases {
+		var oe ObservedEvent
+		ok := observeEvent(&oe, c.fields)
+		if ok != (c.what != "") || ok && (oe.Act != "device" || oe.What != c.what || !reflect.DeepEqual(oe.Items, c.items)) {
+			t.Errorf("%s: %v %q %q %+v", c.name, ok, oe.Act, oe.What, oe.Items)
+		}
+	}
+}
+
 // A host's stated clock difference is read whichever way it is written,
 // and refused when which way it was out cannot be told.
 func TestParseClockOffset(t *testing.T) {
