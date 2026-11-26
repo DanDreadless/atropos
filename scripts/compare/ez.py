@@ -9,7 +9,7 @@ Usage: ez.py KIND EXPORT.jsonl CSV_OR_FOLDER [EVIDENCE_ID]
   shimcache  AppCompatCacheParser -f SYSTEM --csv DIR --csvf out.csv
   shellbags  SBECmd -d DIR_WITH_HIVES --csv DIR            (pass the hive's CSV)
   recycle    RBCmd -d DIR --csv DIR --csvf out.csv
-  recmd      RECmd -d DIR --bn BatchExamples/DFIRBatch.reb --csv DIR   (pass its CSV, and the hive's evidence id): key times, UserAssist, BAM, recent-file and dialog lists
+  recmd      RECmd -d DIR --bn BatchExamples/DFIRBatch.reb --csv DIR   (pass its CSV, and the hive's evidence id): key times, UserAssist, BAM, recent-file and dialog lists, MountPoints2
   jumplist   JLECmd -d DIR --csv DIR                       (pass the AutomaticDestinations CSV)
 
 Only the standard library is needed. Times are compared to the precision the
@@ -410,7 +410,7 @@ def recmd_lists(export, csv_rows, evid, norm):
     and LastVisitedPidlMRU (program and folder in MRU order). RECmd's DFIR batch reaches some Office keys by two
     wildcard paths and lists their rows twice; each is taken once."""
     bs = chr(92)
-    office, dialogs, last, typed = {}, {}, None, {}
+    office, dialogs, last, typed, mounts = {}, {}, None, {}, {}
     for e in load(export, "registry", evid):
         d, f = e["timestamp_desc"], e["fields"]
         if d in ("office-document-last-opened", "office-folder-last-used"):
@@ -419,12 +419,15 @@ def recmd_lists(export, csv_rows, evid, norm):
             dialogs[norm(f["key"]).split(bs)[-1].lower()] = e
         elif d == "dialog-last-folder-latest":
             last = e
+        elif d == "mount-point-key-last-write":
+            mounts[e["path"].lower()] = e
         elif d in ("url-typed-latest (internet explorer)", "path-typed-latest (explorer)"):
             typed["TypedURLs" if d.startswith("url") else "TypedPaths"] = e
     after = lambda s, label: s.split(label, 1)[1].strip() if label in s else ""
     diff, seen = [], set()
     n_office = n_office_untimed = 0
     theirs_ds, theirs_last, theirs_typed = defaultdict(list), [], defaultdict(list)
+    theirs_mounts = {}
     for r in csv_rows:
         desc = r["Description"]
         if desc == "Microsoft Office MRU":
@@ -450,6 +453,11 @@ def recmd_lists(export, csv_rows, evid, norm):
             pos = re.match(r"MRU: (\d+)", r["ValueData3"])
             if m and pos:
                 theirs_ds[m.group(1).lower()].append((int(pos.group(1)), m.group(2).strip(), r["ValueData2"]))
+        elif desc == "MountPoints2":
+            # RECmd lists the key and everything under it; Atropos has an event for each volume or share key.
+            rest = r["KeyPath"].split("MountPoints2", 1)[-1].strip(bs)
+            if rest and bs not in rest and r["LastWriteTimestamp"]:
+                theirs_mounts[rest.lower()] = r["LastWriteTimestamp"]
         elif desc in ("TypedURLs", "TypedPaths") and re.match(r"url\d+$", r["ValueName"]):
             # No time per entry: url1 is the newest, dated by the key's last write (RECmd's "Opened:" form).
             theirs_typed[desc].append((int(r["ValueName"][3:]), r["ValueData"].strip(), "Opened: " + r["LastWriteTimestamp"]))
@@ -496,6 +504,15 @@ def recmd_lists(export, csv_rows, evid, norm):
             diff.append(f"OpenSavePidlMRU {ext!r}: only in Atropos")
     if theirs_last:
         ordered("LastVisitedPidlMRU", last, theirs_last)
+    for name, when in sorted(theirs_mounts.items()):
+        e = mounts.pop(name, None)
+        if e is None:
+            diff.append(f"MountPoints2 {name!r}: not found here")
+        elif not same(e["ts_utc_ns"], t_ns(when)):
+            diff.append(f"MountPoints2 {name!r}: time {e['datetime_utc']} here, {when} there")
+    if theirs_mounts:
+        for name in mounts:
+            diff.append(f"MountPoints2 {name!r}: only in Atropos")
     for desc, theirs in sorted(theirs_typed.items()):
         if desc not in typed:
             diff.append(f"{desc}: {len(theirs)} entries there, no list here")
@@ -503,7 +520,7 @@ def recmd_lists(export, csv_rows, evid, norm):
             ordered(desc, typed[desc], theirs)
     return diff, (f"{n_office} Office entries ({n_office_untimed} with no time, not events here), "
                   f"{n_ds} Open/Save extension lists, {len(theirs_last)} LastVisited entries, "
-                  f"{sum(len(v) for v in theirs_typed.values())} typed URLs and paths "
+                  f"{sum(len(v) for v in theirs_typed.values())} typed URLs and paths, {len(theirs_mounts)} MountPoints2 keys "
                   f"({n_entries} list entries in all, in order) compared")
 
 
