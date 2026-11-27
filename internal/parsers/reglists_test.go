@@ -517,3 +517,47 @@ func TestSecurityDomain(t *testing.T) {
 		}
 	}
 }
+
+// Explorer's cache of the Start menu's programs. On the public XP hive
+// (format 9): 20 entries and their shortcuts' times, the same 60 times as
+// Plaso's (27 November 2026). A Windows 7 value (format 12) names its
+// entries from the known folder they are relative to.
+func TestProgramsCache(t *testing.T) {
+	r := run(t, sample(t, "NTUSER.DAT"), nil)
+	var list *Event
+	times := map[string]string{}
+	for i, e := range r.events {
+		if e.Type == "start-menu-programs-cached" {
+			list = &r.events[i]
+		}
+		if strings.HasSuffix(e.Path, `Windows Explorer.lnk`) {
+			times[e.Type] = e.Stamp.UTC.Format("2006-01-02T15:04:05")
+		}
+	}
+	if list == nil || list.Fields["entry_count"] != 20 || list.Category != CatRegistry {
+		t.Fatalf("list %+v", list)
+	}
+	if times["shortcut-modified (programs cache)"] != "2007-10-11T12:37:22" || times["shortcut-created (programs cache)"] != "2009-08-04T15:12:24" {
+		t.Errorf("Windows Explorer.lnk times %v", times)
+	}
+	le := binary.LittleEndian
+	// Format 12: the Start Menu\Programs known folder, a marker, one entry, the end.
+	v := le.AppendUint32(nil, 12)
+	g := []byte{0x4E, 0xD4, 0x39, 0x01, 0xFE, 0x6A, 0xF2, 0x49, 0x86, 0x90, 0x3D, 0xAF, 0xCA, 0xE6, 0xFF, 0xB8}
+	v = append(v, g...)
+	v = append(v, 0)
+	item := pidl(fileItem(0x32, "UPDATE~1.LNK", "Updater.lnk", 9, "2024-01-02 03:04:06", "2024-01-01 10:00:00", "2024-01-02 03:04:06"))
+	v = le.AppendUint32(v, uint32(len(item)))
+	v = append(append(v, item...), 2)
+	ev, _ := lists(t, "NTUSER", `\Software\Microsoft\Windows\CurrentVersion\Explorer\StartPage2`, map[string][]byte{"programscache": v}, nil, timeutil.AssumedUTC())
+	want := `%ProgramData%\Microsoft\Windows\Start Menu\Programs\Updater.lnk`
+	if len(ev) != 4 || ev[0].Path != "" || fmt.Sprint(ev[0].Fields["entries"]) != "["+want+"]" || ev[1].Path != want || ev[1].Type != "shortcut-created (programs cache)" ||
+		ev[1].Stamp.UTC.Format("2006-01-02 15:04:05") != "2024-01-01 10:00:00" || ev[1].MACB != "...B" {
+		t.Errorf("format 12: %+v", ev)
+	}
+	// A size that runs past the value: the entries before it are kept, noted.
+	bad := append(append([]byte{}, v[:21]...), 0xFF, 0xFF, 0, 0)
+	if ev, _ = lists(t, "NTUSER", `\Software\Microsoft\Windows\CurrentVersion\Explorer\StartPage2`, map[string][]byte{"programscache": bad}, nil, timeutil.AssumedUTC()); len(ev) != 0 {
+		t.Errorf("overrun: %+v", ev)
+	}
+}

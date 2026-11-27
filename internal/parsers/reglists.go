@@ -31,6 +31,7 @@ var (
 	reOpenSave    = regexp.MustCompile(`\\explorer\\comdlg32\\opensavepidlmru\\([^\\]+)$`)
 	reLastVisited = regexp.MustCompile(`\\explorer\\comdlg32\\lastvisitedpidlmru(?:legacy)?$`)
 	reWordWheel   = regexp.MustCompile(`\\explorer\\wordwheelquery$`)
+	reStartPage   = regexp.MustCompile(`\\software\\microsoft\\windows\\currentversion\\explorer\\startpage2?$`)
 	reTypedURLs   = regexp.MustCompile(`\\software\\microsoft\\internet explorer\\typedurls$`)
 	reTypedPaths  = regexp.MustCompile(`\\software\\microsoft\\windows\\currentversion\\explorer\\typedpaths$`)
 	reOfficeMRU   = regexp.MustCompile(`\\software\\microsoft\\office\\([^\\]+)\\([^\\]+)\\(?:user mru\\[^\\]+\\)?(file mru|place mru)$`)
@@ -218,6 +219,8 @@ func regListsRaw(ctx *Context, look *regLookup, hive, host, lower, path string, 
 				entries = append(entries, program+" in "+pidlPath(b[utf16zLen(b):]))
 			}
 			return emitMRU(ctx, host, path, keyTime, "dialog-last-folder-latest", CatFileOpening, "Open or Save dialog: program and the folder it last used", "", entries, ordered)
+		case reStartPage.MatchString(lower):
+			return programsCache(ctx, host, path, keyTime, values()["programscache"])
 		case reWordWheel.MatchString(lower):
 			raw := values()
 			names, ordered := mruOrder(raw)
@@ -267,6 +270,122 @@ func regListsRaw(ctx *Context, look *regLookup, hive, host, lower, path string, 
 	case "SOFTWARE":
 		if g := reNetProfile.FindStringSubmatch(lower); g != nil {
 			return networkProfile(ctx, look, host, path, g[1], values())
+		}
+	}
+	return nil
+}
+
+// programsCacheMaxEntries bounds the entries read from one value.
+const programsCacheMaxEntries = 4096
+
+// programsCache reads Explorer's cache of the Start menu's programs
+// (StartPage\ProgramsCache on XP, StartPage2 on Vista and 7), as winreg-kb
+// ("Program cache") and Plaso's plugin describe it: a format version (1, 9,
+// 12 or 19); for 12 and 19 the known folder the entries are relative to;
+// then, except in version 9, a marker byte; then entries, each a 32-bit
+// size, a shell item list of that size and a marker byte, for as long as
+// the marker is 0 or 1. The list is placed at the key's last write, and the
+// times each entry's last item records (the shortcut file's own) as events
+// of their own.
+func programsCache(ctx *Context, host, path string, keyTime time.Time, b []byte) error {
+	if len(b) < 4 {
+		return nil
+	}
+	le := binary.LittleEndian
+	version := le.Uint32(b)
+	at, folder := 0, ""
+	switch version {
+	case 1:
+		at = 8
+	case 9:
+		at = 6
+	case 12, 19:
+		if len(b) < 21 {
+			return nil
+		}
+		g := "{" + strings.ToUpper(guidAt(b[4:20])) + "}"
+		folder = g
+		if p, ok := knownFolderPaths[g]; ok {
+			folder = p
+		}
+		at = 20
+	default:
+		ctx.Note("the programs cache in %s has format version %d, which Atropos does not know; it was not read", path, version)
+		return nil
+	}
+	marker := byte(0)
+	if version != 9 {
+		if at >= len(b) {
+			return nil
+		}
+		marker, at = b[at], at+1
+	}
+	type entry struct {
+		path string
+		item shellItem
+	}
+	var entries []entry
+	for (marker == 0 || marker == 1) && at+4 <= len(b) && len(entries) < programsCacheMaxEntries {
+		n := int(le.Uint32(b[at:]))
+		at += 4
+		if n < 0 || at+n > len(b) {
+			ctx.Note("an entry of the programs cache in %s runs past the end of the value; the entries before it are kept", path)
+			break
+		}
+		list := b[at : at+n]
+		p := clean(pidlPath(list))
+		if folder != "" && p != "" {
+			p = folder + `\` + p
+		}
+		// The last item is the shortcut itself.
+		var last shellItem
+		for o := 0; o+2 <= len(list); {
+			sz := int(le.Uint16(list[o:]))
+			if sz < 4 || o+sz > len(list) {
+				break
+			}
+			last = parseShellItem(list[o : o+sz])
+			o += sz
+		}
+		if p != "" {
+			entries = append(entries, entry{p, last})
+		}
+		at += n
+		if at >= len(b) {
+			break
+		}
+		marker, at = b[at], at+1
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.path
+	}
+	if err := emitMRU(ctx, host, path, keyTime, "start-menu-programs-cached", CatRegistry, "Start menu programs cached by Explorer", "", names, false); err != nil {
+		return err
+	}
+	for i, e := range entries {
+		for _, t := range []struct {
+			when      time.Time
+			typ, macb string
+			word      string
+		}{{e.item.created, "shortcut-created (programs cache)", "...B", "created"}, {e.item.modified, "shortcut-modified (programs cache)", "M...", "modified"}, {e.item.accessed, "shortcut-accessed (programs cache)", ".A..", "accessed"}} {
+			stamp, ok := timeutil.FromTimeNative(t.when, "")
+			if !ok {
+				continue
+			}
+			stamp.Raw = "DOS date and time " + t.when.Format("2006-01-02 15:04:05")
+			stamp.Caveat = "shell item times have two-second precision and no zone: they are UTC when the file was on an NTFS volume, and local time when it was on FAT or exFAT media"
+			if err := ctx.Emit(Event{
+				Stamp: stamp, Type: t.typ, MACB: t.macb, Category: CatFileSystem, Source: "registry", Host: host, Path: e.path,
+				Message: fmt.Sprintf("Start menu shortcut %s was %s (as recorded when Explorer cached it)", trunc(e.path, 400), t.word),
+				Fields:  map[string]any{"key": path, "entry": i, "item_kind": e.item.kind, "format_version": version},
+				Ref:     fmt.Sprintf("entry %d of value ProgramsCache of %s", i, path),
+			}); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
