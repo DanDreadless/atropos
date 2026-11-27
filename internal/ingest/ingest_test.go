@@ -937,6 +937,23 @@ func TestAssignedHost(t *testing.T) {
 	if e := first(c, "three.log"); e.Host != "" || e.TZSource != "assumed" {
 		t.Errorf("not from a host: host=%q %s", e.Host, e.TZSource)
 	}
+	// Not from a host, with a SYSTEM hive naming a computer (public samples
+	// from many machines, say): the statement stands and the name is noted.
+	// Before, the hive's name was given to every event of the submission.
+	batch, _ = c.s.NextBatch()
+	c.s.AssignBatch(batch, nil, "public samples")
+	hive2Path := filepath.Join(dir, "SYSTEM2")
+	os.WriteFile(hive2Path, []byte("another stand-in for a SYSTEM hive"), 0o600)
+	hive2, _ := c.in.IntakePath(batch, hive2Path)
+	c.s.AddFact(hive2.ID, "host.name", "LAPTOP-9", "test")
+	four, _ := c.in.IntakePath(batch, logPath("four.log"))
+	c.in.Process([]*store.Evidence{four})
+	if e := first(c, "four.log"); e.Host != "" {
+		t.Errorf("not from a host, with a SYSTEM hive: host=%q", e.Host)
+	}
+	if ev := c.byName(t, "four.log"); !strings.Contains(ev.Notes, `names the computer "LAPTOP-9"`) || ev.Status != "parsed" {
+		t.Errorf("the hive's name not noted, or marked a fault: %s %q", ev.Status, ev.Notes)
+	}
 	if !sameHost("ws-042.corp.example", "WS-042") || sameHost("WS-0421", "WS-042") {
 		t.Error("sameHost")
 	}

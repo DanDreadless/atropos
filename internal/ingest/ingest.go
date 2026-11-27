@@ -679,17 +679,24 @@ func (in *Ingester) runParser(e *store.Evidence, p parsers.Parser) (string, int6
 func (in *Ingester) runParserWith(e *store.Evidence, p parsers.Parser, okStatus string, carried []string) (status string, count int64, notes []string, err error) {
 	lc, zoneNote := in.localContext(e)
 	// The host is the one the submission is assigned to; failing that, the one
-	// a SYSTEM hive in the submission names. When the two disagree, say so.
+	// a SYSTEM hive in the submission names, unless the submission was stated
+	// to come from no single computer. When they disagree, say so.
 	host, conflict := "", ""
 	named, _ := in.S.BatchFacts(e.BatchID, "host.name")
-	if a, _ := in.S.BatchAssignment(e.BatchID); a != nil && a.HostID != nil {
+	a, _ := in.S.BatchAssignment(e.BatchID)
+	switch {
+	case a != nil && a.HostID != nil:
 		host = a.HostName
 		for _, n := range named {
 			if !sameHost(n, host) {
 				conflict = fmt.Sprintf("this submission was assigned to host %q, but a SYSTEM hive in it names the computer %q", host, n)
 			}
 		}
-	} else if len(named) == 1 {
+	case a != nil:
+		for _, n := range named {
+			conflict = fmt.Sprintf("this submission was stated to come from no single computer (%s), but a SYSTEM hive in it names the computer %q; its events are not given that host", a.Source, n)
+		}
+	case len(named) == 1:
 		host = named[0]
 	}
 	run, err := in.S.BeginRun(e.ID, p.Name(), p.Version(), zoneNote)

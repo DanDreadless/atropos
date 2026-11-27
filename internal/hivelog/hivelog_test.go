@@ -3,6 +3,7 @@ package hivelog
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -186,6 +187,61 @@ func TestLogsThatDoNotBelong(t *testing.T) {
 	if !res.Clean || res.Hive != nil || len(res.NotUsed) != 1 || !strings.Contains(res.NotUsed[0], "fully written") {
 		t.Errorf("clean hive: %+v", res)
 	}
+}
+
+// More logs of one hive than Windows keeps: a case holding yarp's whole set
+// offers NewDirtyHive2's hive its own two logs and BadLogHive3's two, which
+// name the same hive. Before, the two starting earliest were kept and the
+// rest refused, so in some orders nothing was applied (found running Plaso
+// over the public samples). The pair reaching furthest is used, whatever
+// order the logs come in, and the hive comes out as from its own logs.
+func TestMoreLogsThanWindowsKeeps(t *testing.T) {
+	hive := sample(t, "yarp", "NewDirtyHive2", "NewDirtyHive")
+	logs := []Log{lg("own1", sample(t, "yarp", "NewDirtyHive2", "NewDirtyHive.LOG1")), lg("own2", sample(t, "yarp", "NewDirtyHive2", "NewDirtyHive.LOG2")),
+		lg("bad1", sample(t, "yarp", "BadLogHive3", "BadLogHive.LOG1")), lg("bad2", sample(t, "yarp", "BadLogHive3", "BadLogHive.LOG2"))}
+	own, err := Recover(bytes.NewReader(hive), int64(len(hive)), logs[:2])
+	if err != nil || own.Hive == nil {
+		t.Fatalf("own logs: %v %+v", err, own)
+	}
+	want := readAll(t, own.Hive)
+	var used string
+	var perm func(k int)
+	perm = func(k int) {
+		if k == len(logs) {
+			res, err := Recover(bytes.NewReader(hive), int64(len(hive)), append([]Log(nil), logs...))
+			if err != nil || res.Hive == nil {
+				t.Fatalf("order %v: nothing applied: %v %+v", names(logs), err, res)
+			}
+			if got := readAll(t, res.Hive); !bytes.Equal(got, want) {
+				t.Errorf("order %v: the hive differs from its recovery with its own logs", names(logs))
+			}
+			var u []string
+			for _, a := range res.Applied {
+				u = append(u, fmt.Sprintf("%d-%d", a.First, a.Last))
+			}
+			// Which file is which may differ (bad2 holds own2's entries); what is applied may not.
+			if s := strings.Join(u, " "); used == "" {
+				used = s
+			} else if s != used {
+				t.Errorf("order %v: applied %s, in another order %s", names(logs), s, used)
+			}
+			return
+		}
+		for i := k; i < len(logs); i++ {
+			logs[k], logs[i] = logs[i], logs[k]
+			perm(k + 1)
+			logs[k], logs[i] = logs[i], logs[k]
+		}
+	}
+	perm(0)
+}
+
+func names(logs []Log) []string {
+	var s []string
+	for _, l := range logs {
+		s = append(s, l.Name)
+	}
+	return s
 }
 
 // A log damaged by a crash: yarp's BadLogHive3 has logs whose base blocks

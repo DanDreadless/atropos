@@ -13,6 +13,7 @@
 package hivelog
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -349,12 +350,43 @@ func seqBefore(a, b uint32) bool { return a != b && b-a < 0x80000000 }
 
 func recoverNew(res *Result, o *Overlay, primary Base, logs []candidate, hbins, flags uint32) (uint32, uint32, uint32, []byte) {
 	// The log whose entries start earlier is applied first.
-	sort.SliceStable(logs, func(i, j int) bool { return seqBefore(logs[i].base.Seq1, logs[j].base.Seq1) })
-	for _, extra := range logs[min(len(logs), 2):] {
-		res.NotUsed = append(res.NotUsed, extra.log.Name+": a third new-format log; Windows uses two")
-	}
+	// Logs starting at the same sequence are ordered by their bytes, so that
+	// nothing below depends on the order the files arrived in.
+	sort.SliceStable(logs, func(i, j int) bool {
+		a, b := logs[i].base.Seq1, logs[j].base.Seq1
+		if a == b {
+			return bytes.Compare(logs[i].data, logs[j].data) < 0
+		}
+		return seqBefore(a, b)
+	})
 	if len(logs) > 2 {
-		logs = logs[:2]
+		// More logs name this hive than Windows keeps (two): copies of the
+		// same hive's logs from different times, or from another copy of it.
+		// The pair whose entries carry this hive furthest is the one Windows
+		// would have had beside it; the others are left, each said why. Ties
+		// go to the earlier pair in the sorted order, so the choice does not
+		// depend on the order the files arrived in.
+		cands := logs
+		if len(cands) > maxCandidates {
+			for _, extra := range cands[maxCandidates:] {
+				res.NotUsed = append(res.NotUsed, extra.log.Name+": more logs of this hive than are tried")
+			}
+			cands = cands[:maxCandidates]
+		}
+		bi, bj, best := 0, 1, -1
+		for i := range cands {
+			for j := i + 1; j < len(cands); j++ {
+				if n := reach(primary, []candidate{cands[i], cands[j]}); n > best {
+					bi, bj, best = i, j, n
+				}
+			}
+		}
+		for k, extra := range cands {
+			if k != bi && k != bj {
+				res.NotUsed = append(res.NotUsed, extra.log.Name+": a third new-format log of this hive; Windows uses two, and the two whose entries reach furthest were used")
+			}
+		}
+		logs = []candidate{cands[bi], cands[bj]}
 	}
 	var order []candidate
 	if !primary.ChecksumOK {
@@ -410,6 +442,39 @@ func recoverNew(res *Result, o *Overlay, primary Base, logs []candidate, hbins, 
 		}
 	}
 	return seq, hbins, flags, base
+}
+
+// maxCandidates bounds the logs of one hive tried in pairs.
+const maxCandidates = 8
+
+// reach counts the entries a pair of new-format logs (sorted, earlier first)
+// would apply to the hive, by the rules recoverNew applies them by, without
+// writing anything.
+func reach(primary Base, pair []candidate) int {
+	order := pair
+	if !primary.ChecksumOK {
+		order = pair[len(pair)-1:]
+	}
+	n, have := 0, false
+	var seq uint32
+	for _, c := range order {
+		start := c.base.Seq1
+		if (primary.ChecksumOK && seqBefore(start, primary.Seq2)) || (have && start != seq+1) {
+			continue
+		}
+		expect := start
+		for off := sector; off+40 <= len(c.data); {
+			e, why := logEntry(c.data[off:], expect)
+			if why != "" {
+				break
+			}
+			n++
+			seq, have = e.seq, true
+			expect++
+			off += int(e.size)
+		}
+	}
+	return n
 }
 
 type page struct {
