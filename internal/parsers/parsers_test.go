@@ -861,11 +861,17 @@ func TestPrefetchKnownAnswers(t *testing.T) {
 			t.Errorf("%s: err=%v warns=%v", file, r.err, r.warns)
 			continue
 		}
-		if len(r.events) != len(golden.LastRunTimes) {
-			t.Errorf("%s: %d run times, want %d", file, len(r.events), len(golden.LastRunTimes))
+		var runs []Event
+		for _, e := range r.events {
+			if e.Type == "program-executed (prefetch)" {
+				runs = append(runs, e)
+			}
+		}
+		if len(runs) != len(golden.LastRunTimes) {
+			t.Errorf("%s: %d run times, want %d", file, len(runs), len(golden.LastRunTimes))
 			continue
 		}
-		for i, e := range r.events {
+		for i, e := range runs {
 			if !e.Stamp.UTC.Truncate(time.Second).Equal(golden.LastRunTimes[i]) {
 				t.Errorf("%s: run %d at %s, want %s", file, i, utc(e), golden.LastRunTimes[i].Format(time.RFC3339))
 			}
@@ -1117,5 +1123,50 @@ func TestProfileUser(t *testing.T) {
 		if got := ProfileUser(origin); got != want {
 			t.Errorf("%s: %q, want %q", origin, got, want)
 		}
+	}
+}
+
+// The volumes a prefetch file names, each with its serial number and
+// creation time: on Windows 10 the device path is the volume's identifier,
+// which is that very time and serial; checked against PECmd on all the
+// samples (59 volumes, 27 November 2026). A count that does not fit is a
+// warning, and the run times are still read.
+func TestPrefetchVolumes(t *testing.T) {
+	r := run(t, sample(t, "prefetch", "Win10", "CALC.EXE-3FBEF7FD.pf"), nil)
+	var vol []Event
+	for _, e := range r.events {
+		if e.Type == "volume-created (prefetch)" {
+			vol = append(vol, e)
+		}
+	}
+	if len(vol) != 1 || vol[0].Stamp.Raw != "FILETIME 0x01D1217A9C4C6779" || vol[0].Fields["serial"] != "8C9F49EC" ||
+		vol[0].Path != `\VOLUME{01d1217a9c4c6779-8c9f49ec}` || vol[0].Category != CatFileSystem || vol[0].MACB != "" {
+		t.Fatalf("volumes %+v", vol)
+	}
+	for _, e := range r.events {
+		if e.Type != "program-executed (prefetch)" {
+			continue
+		}
+		if v, _ := e.Fields["volumes"].([]map[string]any); len(v) != 1 || v[0]["serial"] != "8C9F49EC" {
+			t.Errorf("execution event's volumes %v", e.Fields["volumes"])
+		}
+	}
+	raw, err := os.ReadFile(sample(t, "prefetch", "Vista", "CMD.EXE-89305D47.pf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary.LittleEndian.PutUint32(raw[112:], 100000)
+	r = run(t, write(t, "CMD.EXE-89305D47.pf", raw), nil)
+	runs := 0
+	for _, e := range r.events {
+		if e.Type == "volume-created (prefetch)" {
+			t.Errorf("a volume from a count that does not fit: %+v", e)
+		}
+		if e.Type == "program-executed (prefetch)" {
+			runs++
+		}
+	}
+	if runs == 0 || len(r.warns) != 1 || !strings.Contains(r.warns[0], "does not fit") {
+		t.Errorf("runs %d, warnings %q", runs, r.warns)
 	}
 }

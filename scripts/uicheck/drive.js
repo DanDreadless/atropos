@@ -63,8 +63,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.waitForFunction(() => Number(document.querySelector('#summary b').textContent.replace(/,/g, '')) > 1000, { timeout: 60000 });
   await settled();
   const total = await summaryCount();
-  // The sample volume gives 49 file table times (a named stream is not an event of its own) and 55 from its transaction log. The sample hive gives 1158, three of them its RecentDocs lists and one its typed addresses (no TypedURLsTime).
-  ok(total === 739 + 1158 + 49 + 55 + 2 + 1 + 1, `timeline shows every event after upload (${total})`);
+  // The sample volume gives 49 file table times (a named stream is not an event of its own) and 55 from its transaction log. The sample hive gives 1158, three of them its RecentDocs lists and one its typed addresses (no TypedURLsTime). The prefetch file gives 3: two runs and its volume.
+  ok(total === 739 + 1158 + 49 + 55 + 3 + 1 + 1, `timeline shows every event after upload (${total})`);
   ok((await text('#evcount')) === '6', 'evidence count in the navigation updates');
   ok(await count('#facets .chip') >= 6 && await count('#tzfacets .chip') >= 1, 'facet chips appear');
   ok(await page.evaluate(() => {
@@ -169,7 +169,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.select('#groupadd', await groupId('Malware'));
   await page.waitForFunction(() => document.querySelectorAll('#win .row .gtag').length === 2, { timeout: 8000 }).catch(() => {});
   ok(await chipCount('Malware') === 2 && await count('#win .row .gtag') === 2, 'ticked events join the group and are marked in the main timeline');
-  await setQ('source:prefetch', 2);
+  await setQ('source:prefetch type:"program-executed (prefetch)"', 2);
   await page.select('#groupadd', await groupId('Malware'));
   await page.waitForFunction(() => document.querySelectorAll('#win .row .gtag').length === 2, { timeout: 8000 }).catch(() => {});
   ok(await chipCount('Malware') === 4, 'everything a search shows can be added in one step');
@@ -253,13 +253,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await setQ('', total);
 
   // ---- bookmarkable state ----
-  await setQ('source:prefetch', 2);
+  await setQ('source:prefetch type:"program-executed (prefetch)"', 2);
   await page.click('#win .row');
   await sleep(300);
   const hash = await page.evaluate(() => location.hash);
   await page.goto('about:blank');
   await page.goto(URL + hash, { waitUntil: 'networkidle0' });
-  ok((await page.$eval('#q', (i) => i.value)) === 'source:prefetch' && await summaryCount() === 2 && await visible('#detail'), 'reopening the address restores search and selected event');
+  ok((await page.$eval('#q', (i) => i.value)) === 'source:prefetch type:"program-executed (prefetch)"' && await summaryCount() === 2 && await visible('#detail'), 'reopening the address restores search and selected event');
   await setQ('', total);
 
   // ---- text search over files with no parser ----
@@ -562,7 +562,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // ---- export ----
   const csv = await (await apiFetch('api/export?format=csv&q=source:prefetch')).text();
-  ok(csv.trim().split('\n').length === 3, 'export returns the filtered events');
+  ok(csv.trim().split('\n').length === 4, 'export returns the filtered events'); // a header and the prefetch file's three
 
   // ---- analysis ----
   await page.click('#nav [data-view=analysis]');

@@ -85,7 +85,10 @@ def prefetch(export, path, evid):
     # different systems), so a file is keyed by those and its last run.
     files = defaultdict(lambda: {"times": set()})
     for e in load(export, "prefetch", evid):
+        if e["timestamp_desc"] != "program-executed (prefetch)":
+            continue
         f = files[e["evidence_id"]]
+        f["vols"] = e["fields"].get("volumes") or []
         f["times"].add(e["ts_utc_ns"] // 10**9)
         f["exe"], f["count"] = e["fields"]["executable"].upper(), e["fields"].get("run_count")
         # The other tool prints the hash without leading zeros.
@@ -102,8 +105,10 @@ def prefetch(export, path, evid):
             if t is not None:
                 times.add(t // 10**9)
         if times:
-            theirs[(r["ExecutableName"].upper(), r["Hash"].upper().lstrip("0"), max(times))] = {"times": times, "count": r["RunCount"]}
-    diff = []
+            # The tool writes the first two volumes in columns of their own.
+            vols = [(r[f"Volume{i}Name"], r[f"Volume{i}Serial"], r[f"Volume{i}Created"]) for i in range(2) if r.get(f"Volume{i}Name")]
+            theirs[(r["ExecutableName"].upper(), r["Hash"].upper().lstrip("0"), max(times))] = {"times": times, "count": r["RunCount"], "vols": vols}
+    diff, nvols = [], [0]
     for key in sorted(set(ours) | set(theirs)):
         if key not in ours or key not in theirs:
             diff.append(f"{key}: only in {'the other tool' if key not in ours else 'Atropos'}")
@@ -113,8 +118,17 @@ def prefetch(export, path, evid):
             diff.append(f"{key}: run times differ: only here {sorted(a['times'] - b['times'])}, only there {sorted(b['times'] - a['times'])}")
         if str(a["count"]) != str(b["count"]):
             diff.append(f"{key}: run count {a['count']} here, {b['count']} there")
+        for i, (name, serial, created) in enumerate(b["vols"]):
+            nvols[0] += 1
+            v = a["vols"][i] if i < len(a["vols"]) else {}
+            ok = v.get("device_path", "").upper() == name.upper() and v.get("serial", "").upper() == serial.upper()
+            if ok and created:
+                t = t_ns(v.get("created", ""))[0]
+                ok = t is not None and same(t, t_ns(created))
+            if not ok:
+                diff.append(f"{key}: volume {i}: {v} here, {name} {serial} {created} there")
     n = sum(len(v["times"]) for v in ours.values())
-    return report("Prefetch", "PECmd", path, f"{len(ours)} files, {n} run times", f"{len(theirs)} files, {sum(len(v['times']) for v in theirs.values())} run times",
+    return report("Prefetch", "PECmd", path, f"{len(ours)} files, {n} run times", f"{len(theirs)} files, {sum(len(v['times']) for v in theirs.values())} run times, {nvols[0]} volumes",
                   diff, [f"{failed} files the other tool could not parse are left out"] if failed else [])
 
 

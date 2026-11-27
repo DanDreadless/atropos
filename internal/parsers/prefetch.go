@@ -16,7 +16,7 @@ type prefetchParser struct{}
 
 func (prefetchParser) Name() string { return "prefetch" }
 func (prefetchParser) Version() string {
-	return "3 (velocidex/go-prefetch 4bae979; run times read natively)"
+	return "4 (velocidex/go-prefetch 4bae979; run times read natively; volumes: device path, serial number and creation time)"
 }
 
 // Real prefetch files are well under a megabyte, compressed or not.
@@ -115,6 +115,18 @@ func (prefetchParser) Parse(ctx *Context) (err error) {
 		cleaned[i] = clean(f)
 	}
 	fields["files_accessed"] = cleaned
+	vols := prefetchVolumes(ctx, raw)
+	if len(vols) > 0 {
+		var list []map[string]any
+		for _, v := range vols {
+			m := map[string]any{"device_path": v.device, "serial": v.serial}
+			if v.ok {
+				m["created"] = v.created.UTC.Format("2006-01-02T15:04:05.0000000Z")
+			}
+			list = append(list, m)
+		}
+		fields["volumes"] = list
+	}
 	path := clean(info.Path)
 	if path == "" {
 		path = clean(info.Executable)
@@ -156,5 +168,72 @@ func (prefetchParser) Parse(ctx *Context) (err error) {
 			return err
 		}
 	}
+	// Each volume the program used, at the time the volume was created
+	// (formatted), with its serial number: a removable drive a program ran
+	// from or read is named here, and the serial joins it to shortcuts.
+	for i, v := range vols {
+		if !v.ok {
+			continue
+		}
+		if err := ctx.Emit(Event{
+			Stamp: v.created, Type: "volume-created (prefetch)", Category: CatFileSystem, Source: "prefetch",
+			Host: ctx.Host, Path: v.device,
+			Message: fmt.Sprintf("Volume %s (serial %s) created, as recorded in the prefetch file of %s", v.device, v.serial, clean(info.Executable)),
+			Fields: map[string]any{"device_path": v.device, "serial": v.serial, "executable": clean(info.Executable), "prefetch_hash": info.Hash,
+				"time_meaning": "the volume's creation time, as the prefetch file recorded it: when the volume was formatted"},
+			Ref: fmt.Sprintf("volume information entry %d", i),
+		}); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+type prefetchVolume struct {
+	device, serial string
+	created        timeutil.Stamp
+	ok             bool
+}
+
+// prefetchVolumeEntry is the size of one volume information entry per
+// format version (libscca's "Windows Prefetch File (PF) format").
+var prefetchVolumeEntry = map[uint32]int{17: 40, 23: 104, 26: 104, 30: 96, 31: 96}
+
+// prefetchVolumes reads the volume information block: at offset 108 of the
+// file information its offset, at 112 the number of volumes and at 116 its
+// size. Each entry holds the offset (from the block's start) and length in
+// characters of the volume's device path, the volume's creation FILETIME
+// and its serial number.
+func prefetchVolumes(ctx *Context, raw []byte) []prefetchVolume {
+	le := binary.LittleEndian
+	entry := prefetchVolumeEntry[le.Uint32(raw)]
+	if entry == 0 || len(raw) < 120 {
+		return nil
+	}
+	off, count, size := int64(le.Uint32(raw[108:])), int64(le.Uint32(raw[112:])), int64(le.Uint32(raw[116:]))
+	n := int64(len(raw))
+	if count == 0 {
+		return nil
+	}
+	if count > 256 || off < 120 || off+size > n || count*int64(entry) > size {
+		ctx.Warn("the volume information (%d volumes at offset %d, %d bytes) does not fit in the file; not read", count, off, size)
+		return nil
+	}
+	var out []prefetchVolume
+	for i := int64(0); i < count; i++ {
+		e := raw[off+i*int64(entry):]
+		pathOff, pathLen := int64(le.Uint32(e)), int64(le.Uint32(e[4:]))
+		v := prefetchVolume{serial: fmt.Sprintf("%08X", le.Uint32(e[16:]))}
+		if pathLen > 0 && pathLen < 1024 && pathOff+2*pathLen <= size {
+			v.device = clean(utf16At(raw, int(off+pathOff), int(pathLen)))
+		}
+		if ft := le.Uint64(e[8:]); ft != 0 {
+			v.created, v.ok = timeutil.FromFiletime(ft)
+			if !v.ok {
+				ctx.Warn("volume %d's creation time is implausible (FILETIME 0x%016X); not placed on the timeline", i, ft)
+			}
+		}
+		out = append(out, v)
+	}
+	return out
 }
