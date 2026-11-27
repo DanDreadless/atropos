@@ -18,7 +18,7 @@ type evtxParser struct{}
 
 func (evtxParser) Name() string { return "evtx" }
 func (evtxParser) Version() string {
-	return "7 (velocidex/evtx v0.2.0; event time and record number from the event itself; more event descriptions; the host the log came from, the record's own computer kept)"
+	return "8 (velocidex/evtx v0.2.0, patched in third_party/evtx to bound damaged records; older records recovered from chunks' unused space; event time and record number from the event itself; more event descriptions; the host the log came from, the record's own computer kept)"
 }
 
 // Short descriptions for events analysts reach for most. The description is
@@ -355,131 +355,186 @@ func (evtxParser) Parse(ctx *Context) error {
 		ctx.Warn("no valid chunks found")
 	}
 	fromSystem, renumbered, otherComputer := 0, 0, 0
+	// The events placed, by channel, the event's own record number and its
+	// exact time: a recovered record matching one is a copy (of a live
+	// record, renumbered when the log was saved, or of another recovered
+	// one) and is left out.
+	placed := map[string]bool{}
+	recovered, copies, undecoded := 0, 0, 0
+	// emitRecord puts one record on the timeline; recoveredAt is its offset in
+	// the chunk when it was recovered from unused space, else 0. chunkData is
+	// read only when a record's own time is needed.
+	emitRecord := func(chunk *evtx.Chunk, chunkData *[]byte, rec *evtx.EventRecord, recoveredAt int) error {
+		raw, err := json.Marshal(rec.Event)
+		if err != nil {
+			ctx.Warn("record %d could not be rendered: %v", rec.Header.RecordID, err)
+			return nil
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			ctx.Warn("record %d could not be decoded: %v", rec.Header.RecordID, err)
+			return nil
+		}
+		ev, _ := m["Event"].(map[string]any)
+		if ev == nil {
+			ev = m
+		}
+		// An event's time is its own TimeCreated, as Event Viewer shows
+		// it. The record header holds the same time in an ordinary log;
+		// in a log saved from another ("Save filtered log file as",
+		// wevtutil epl) the header is rewritten, its time sometimes zero,
+		// and the record numbers start again from 1.
+		stamp, ok := timeutil.FromFiletime(rec.Header.FileTime)
+		headerTime := ok
+		if secs, isNum := dig(ev, "System", "TimeCreated", "SystemTime").(float64); isNum && secs > 0 {
+			// The library gives TimeCreated as floating-point seconds,
+			// which at present-day values is good to about a
+			// microsecond; the exact value is taken from the record.
+			if *chunkData == nil {
+				*chunkData = readChunk(ctx, chunk.Offset)
+			}
+			if ft, found := exactFiletime(*chunkData, rec.Header, secs); found && ft != rec.Header.FileTime {
+				if s2, ok2 := timeutil.FromFiletime(ft); ok2 {
+					stamp, ok = s2, true
+					fromSystem++
+				}
+			}
+		}
+		if !ok {
+			ctx.Warn("record %d has no usable timestamp", rec.Header.RecordID)
+			return nil
+		}
+		channel := str(dig(ev, "System", "Channel"))
+		eid := str(dig(ev, "System", "EventID", "Value"))
+		if eid == "" {
+			eid = str(dig(ev, "System", "EventID"))
+		}
+		provider := str(dig(ev, "System", "Provider", "Name"))
+		data, _ := ev["EventData"].(map[string]any)
+		if data == nil {
+			data, _ = ev["UserData"].(map[string]any)
+		}
+		user := firstNonEmpty(data, "TargetUserName", "SubjectUserName", "User", "AccountName")
+		if user == "" {
+			user = str(dig(ev, "System", "Security", "UserID"))
+		}
+		path := firstNonEmpty(data, "NewProcessName", "Image", "ImagePath", "ServiceFileName", "TargetFilename", "ProcessName", "Path")
+
+		desc := eventNames[channel+"/"+eid]
+		if d, ok := providerEventNames[channel+"/"+provider+"/"+eid]; ok {
+			desc = d
+		}
+		var b strings.Builder
+		if desc != "" {
+			b.WriteString(desc)
+		} else {
+			b.WriteString("Event")
+		}
+		fmt.Fprintf(&b, " [%s %s]", channel, eid)
+		keys := make([]string, 0, len(data))
+		for k := range data {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		shown := 0
+		for _, k := range keys {
+			v := str(data[k])
+			if v == "" || v == "-" || shown >= 10 {
+				continue
+			}
+			fmt.Fprintf(&b, " %s=%s", k, trunc(v, 160))
+			shown++
+		}
+		recordID := rec.Header.RecordID
+		if n, isNum := dig(ev, "System", "EventRecordID").(float64); isNum && n >= 0 && uint64(n) != recordID {
+			recordID = uint64(n)
+			renumbered++
+		}
+		fields := map[string]any{
+			"event_id": eid, "channel": channel, "provider": provider,
+			"record_id": recordID, "event": ev,
+		}
+		if recordID != rec.Header.RecordID {
+			fields["record_number_in_file"] = rec.Header.RecordID
+		}
+		if headerTime && stamp.Raw != fmt.Sprintf("FILETIME 0x%016X", rec.Header.FileTime) {
+			if ht, okh := timeutil.FromFiletime(rec.Header.FileTime); okh {
+				fields["record_written"] = ht.UTC.Format("2006-01-02T15:04:05.0000000Z")
+			}
+		}
+		// The host is the computer the log came from, when that is known
+		// (the submission's host, or the SYSTEM hive beside it); a record
+		// that names another computer (a forwarded event) keeps that name
+		// in "computer". Otherwise the record's own computer is the host.
+		host := str(dig(ev, "System", "Computer"))
+		if ctx.Host != "" {
+			if host != "" && !SameHost(host, ctx.Host) {
+				fields["computer"] = host
+				otherComputer++
+			}
+			host = ctx.Host
+		}
+		same := fmt.Sprintf("%s/%d/%s", channel, recordID, stamp.Raw)
+		if recoveredAt > 0 && placed[same] {
+			copies++
+			return nil
+		}
+		placed[same] = true
+		typ, msg, ref := "event-logged", b.String(), fmt.Sprintf("record %d, chunk at offset %d", recordID, chunk.Offset)
+		if rec.Truncated {
+			// The patched library stops a record that would take unbounded
+			// work to decode (third_party/evtx, maxWork).
+			ctx.Warn("record %d could not be decoded in full (its binary XML is damaged or refers to itself without end); the part read is kept", recordID)
+			fields["truncated"] = "decoding stopped: the record's binary XML would take unbounded work; what was read is kept"
+		}
+		if recoveredAt > 0 {
+			// An older record left in the chunk's unused space: the log no
+			// longer lists it, but nothing has yet written over it.
+			recovered++
+			typ, msg = "event-logged (recovered)", "Recovered record: "+msg
+			ref = fmt.Sprintf("recovered record %d at offset %d of the chunk at offset %d", recordID, recoveredAt, chunk.Offset)
+			fields["recovered"] = "from the chunk's unused space: an older record the log no longer lists, decoded with the templates of the records before it"
+		}
+		return ctx.Emit(Event{
+			Stamp: stamp, Type: typ, Category: eventCategory(channel, provider, eid), Source: "evtx",
+			Host: host, User: user, Path: path,
+			Message: msg, Fields: fields, Ref: ref,
+		})
+	}
+	type key struct{ id, ft uint64 }
+	live := map[key]bool{}
+	liveCount := make([]int, len(chunks))
 	for ci, chunk := range chunks {
 		records, perr := parseChunk(chunk)
 		if perr != nil {
 			ctx.Warn("chunk %d at offset %d: %v", ci, chunk.Offset, perr)
 		}
-		var chunkData []byte // read only when a record's own time is needed
+		liveCount[ci] = len(records)
+		var chunkData []byte
 		for _, rec := range records {
-			raw, err := json.Marshal(rec.Event)
-			if err != nil {
-				ctx.Warn("record %d could not be rendered: %v", rec.Header.RecordID, err)
-				continue
-			}
-			var m map[string]any
-			if err := json.Unmarshal(raw, &m); err != nil {
-				ctx.Warn("record %d could not be decoded: %v", rec.Header.RecordID, err)
-				continue
-			}
-			ev, _ := m["Event"].(map[string]any)
-			if ev == nil {
-				ev = m
-			}
-			// An event's time is its own TimeCreated, as Event Viewer shows
-			// it. The record header holds the same time in an ordinary log;
-			// in a log saved from another ("Save filtered log file as",
-			// wevtutil epl) the header is rewritten, its time sometimes zero,
-			// and the record numbers start again from 1.
-			stamp, ok := timeutil.FromFiletime(rec.Header.FileTime)
-			headerTime := ok
-			if secs, isNum := dig(ev, "System", "TimeCreated", "SystemTime").(float64); isNum && secs > 0 {
-				// The library gives TimeCreated as floating-point seconds,
-				// which at present-day values is good to about a
-				// microsecond; the exact value is taken from the record.
-				if chunkData == nil {
-					chunkData = readChunk(ctx, chunk.Offset)
-				}
-				if ft, found := exactFiletime(chunkData, rec.Header, secs); found && ft != rec.Header.FileTime {
-					if s2, ok2 := timeutil.FromFiletime(ft); ok2 {
-						stamp, ok = s2, true
-						fromSystem++
-					}
-				}
-			}
-			if !ok {
-				ctx.Warn("record %d has no usable timestamp", rec.Header.RecordID)
-				continue
-			}
-			channel := str(dig(ev, "System", "Channel"))
-			eid := str(dig(ev, "System", "EventID", "Value"))
-			if eid == "" {
-				eid = str(dig(ev, "System", "EventID"))
-			}
-			provider := str(dig(ev, "System", "Provider", "Name"))
-			data, _ := ev["EventData"].(map[string]any)
-			if data == nil {
-				data, _ = ev["UserData"].(map[string]any)
-			}
-			user := firstNonEmpty(data, "TargetUserName", "SubjectUserName", "User", "AccountName")
-			if user == "" {
-				user = str(dig(ev, "System", "Security", "UserID"))
-			}
-			path := firstNonEmpty(data, "NewProcessName", "Image", "ImagePath", "ServiceFileName", "TargetFilename", "ProcessName", "Path")
-
-			desc := eventNames[channel+"/"+eid]
-			if d, ok := providerEventNames[channel+"/"+provider+"/"+eid]; ok {
-				desc = d
-			}
-			var b strings.Builder
-			if desc != "" {
-				b.WriteString(desc)
-			} else {
-				b.WriteString("Event")
-			}
-			fmt.Fprintf(&b, " [%s %s]", channel, eid)
-			keys := make([]string, 0, len(data))
-			for k := range data {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-			shown := 0
-			for _, k := range keys {
-				v := str(data[k])
-				if v == "" || v == "-" || shown >= 10 {
-					continue
-				}
-				fmt.Fprintf(&b, " %s=%s", k, trunc(v, 160))
-				shown++
-			}
-			recordID := rec.Header.RecordID
-			if n, isNum := dig(ev, "System", "EventRecordID").(float64); isNum && n >= 0 && uint64(n) != recordID {
-				recordID = uint64(n)
-				renumbered++
-			}
-			fields := map[string]any{
-				"event_id": eid, "channel": channel, "provider": provider,
-				"record_id": recordID, "event": ev,
-			}
-			if recordID != rec.Header.RecordID {
-				fields["record_number_in_file"] = rec.Header.RecordID
-			}
-			if headerTime && stamp.Raw != fmt.Sprintf("FILETIME 0x%016X", rec.Header.FileTime) {
-				if ht, okh := timeutil.FromFiletime(rec.Header.FileTime); okh {
-					fields["record_written"] = ht.UTC.Format("2006-01-02T15:04:05.0000000Z")
-				}
-			}
-			// The host is the computer the log came from, when that is known
-			// (the submission's host, or the SYSTEM hive beside it); a record
-			// that names another computer (a forwarded event) keeps that name
-			// in "computer". Otherwise the record's own computer is the host.
-			host := str(dig(ev, "System", "Computer"))
-			if ctx.Host != "" {
-				if host != "" && !SameHost(host, ctx.Host) {
-					fields["computer"] = host
-					otherComputer++
-				}
-				host = ctx.Host
-			}
-			if err := ctx.Emit(Event{
-				Stamp: stamp, Type: "event-logged", Category: eventCategory(channel, provider, eid), Source: "evtx",
-				Host: host, User: user, Path: path,
-				Message: b.String(), Fields: fields,
-				Ref: fmt.Sprintf("record %d, chunk at offset %d", recordID, chunk.Offset),
-			}); err != nil {
+			live[key{rec.Header.RecordID, rec.Header.FileTime}] = true
+			if err := emitRecord(chunk, &chunkData, rec, 0); err != nil {
 				return err
 			}
 		}
+	}
+	// Older records in the chunks' unused space, after the live ones.
+	for ci, chunk := range chunks {
+		data := readChunk(ctx, chunk.Offset)
+		recs, bad := recoverRecords(chunk, data, liveCount[ci])
+		undecoded += bad
+		for _, r := range recs {
+			if live[key{r.rec.Header.RecordID, r.rec.Header.FileTime}] {
+				copies++
+				continue
+			}
+			if err := emitRecord(chunk, &data, r.rec, r.off); err != nil {
+				return err
+			}
+		}
+	}
+	if recovered > 0 || undecoded > 0 {
+		ctx.Note("%d older records were recovered from unused space in the log's chunks (event type \"event-logged (recovered)\"); %d found there were copies of live records and left out, and %d could not be decoded, the templates they use having been overwritten", recovered, copies, undecoded)
 	}
 	if otherComputer > 0 {
 		ctx.Note("%d records name a computer other than %s, the host this log came from: forwarded events, or a log copied from another machine. Each keeps the name it gives in its \"computer\" field", otherComputer, ctx.Host)
@@ -488,6 +543,192 @@ func (evtxParser) Parse(ctx *Context) error {
 		ctx.Note("this log was saved from another one: %d records were renumbered when it was written and %d have a record time that differs from the event's own. The original record numbers and each event's own time (TimeCreated) are used; the rewritten ones are kept in the fields", renumbered, fromSystem)
 	}
 	return nil
+}
+
+type recoveredRecord struct {
+	rec *evtx.EventRecord
+	off int
+}
+
+// maxRecoveredPerChunk bounds the candidates tried in one chunk: a 64 KiB
+// chunk holds a few hundred real records at most.
+const maxRecoveredPerChunk = 1024
+
+// recoverRecords finds older records in a chunk's unused space (from the
+// header's free-space offset to its end) and decodes them. A candidate has
+// the record signature at an 8-byte boundary and its size repeated in its
+// last four bytes. The library walks a chunk from its first record by each
+// record's size, learning templates as it goes, and cannot be pointed at an
+// offset; so it is given a copy of the chunk in which the last live record's
+// size (and each earlier recovered one's) leads to the candidate, and the
+// header counts one record more. A candidate whose template was defined by a
+// record since overwritten does not decode, and is counted, not guessed at.
+func recoverRecords(chunk *evtx.Chunk, data []byte, live int) (out []recoveredRecord, undecoded int) {
+	const size = 0x10000
+	if len(data) < size {
+		return nil, 0
+	}
+	le := binary.LittleEndian
+	free := int(le.Uint32(data[0x30:]))
+	if free < 0x200 || free > size {
+		return nil, 0
+	}
+	last, at := -1, 0x200
+	for i := 0; i < live; i++ {
+		if at+24 > size || !bytes.Equal(data[at:at+4], []byte("**\x00\x00")) {
+			return nil, 0
+		}
+		n := int(le.Uint32(data[at+4:]))
+		if n < 24 || at+n > size {
+			return nil, 0
+		}
+		last, at = at, at+n
+	}
+	var cands []int
+	for off := (max(free, at) + 7) &^ 7; off+28 <= size && len(cands) < maxRecoveredPerChunk; off += 8 {
+		if !bytes.Equal(data[off:off+4], []byte("**\x00\x00")) {
+			continue
+		}
+		n := int(le.Uint32(data[off+4:]))
+		if n < 28 || off+n > size || int(le.Uint32(data[off+n-4:])) != n {
+			continue
+		}
+		cands = append(cands, off)
+		off += n&^7 - 8
+	}
+	// The templates the walk will know: those of the live records.
+	known := map[uint32]bool{}
+	for i, off := 0, 0x200; i < live; i++ {
+		if id, _, ok := topInstance(data, off); ok {
+			known[id] = true
+		}
+		off += int(le.Uint32(data[off+4:]))
+	}
+	var chain []int
+	// walk decodes the accepted records and then seq, in one pass of the
+	// library over a copy of the chunk; it returns seq's records.
+	walk := func(seq []int) ([]*evtx.EventRecord, bool) {
+		steps := append(append([]int{}, chain...), seq...)
+		prev := last
+		if prev < 0 {
+			// No live records: the walk must start at the first record's place.
+			if steps[0] != 0x200 {
+				return nil, false
+			}
+			prev, steps = steps[0], steps[1:]
+		}
+		buf := make([]byte, size)
+		copy(buf, data)
+		for _, w := range steps {
+			le.PutUint32(buf[prev+4:], uint32(w-prev))
+			prev = w
+		}
+		h := chunk.Header
+		count := live + len(chain) + len(seq)
+		h.LastEventRecNumber = h.FirstEventRecNumber + uint64(count) - 1
+		recs, err := parseChunk(&evtx.Chunk{Header: h, Offset: 0, Fd: bytes.NewReader(buf)})
+		if err != nil || len(recs) != count {
+			return nil, false
+		}
+		return recs[count-len(seq):], true
+	}
+	// try decodes a batch of candidates in one walk; when any of them fails,
+	// the batch is halved and each half tried, so that a candidate fails
+	// alone. Only a record whose template is defined in it, or by a record
+	// read before it, is given to the library: otherwise it would read
+	// whatever is at the template's old place as a definition, and it trusts
+	// the counts it finds there.
+	var try func(batch []int)
+	try = func(batch []int) {
+		if len(batch) == 0 {
+			return
+		}
+		ids, prov, ok := make([]uint32, len(batch)), map[uint32]bool{}, true
+		for i, c := range batch {
+			id, inline, good := topInstance(data, c)
+			if !good || (!inline && !known[id] && !prov[id]) {
+				ok = false
+				break
+			}
+			ids[i], prov[id] = id, true
+		}
+		var recs []*evtx.EventRecord
+		if ok {
+			recs, ok = walk(batch)
+		}
+		for i := 0; ok && i < len(recs); i++ {
+			ok = !recs[i].Truncated && decodedEvent(recs[i])
+		}
+		if ok {
+			for i, c := range batch {
+				chain = append(chain, c)
+				known[ids[i]] = true
+				out = append(out, recoveredRecord{recs[i], c})
+			}
+			return
+		}
+		if len(batch) == 1 {
+			undecoded++
+			return
+		}
+		try(batch[:len(batch)/2])
+		try(batch[len(batch)/2:])
+	}
+	try(cands)
+	return out, undecoded
+}
+
+// topInstance reads the template instance a record's binary XML opens with:
+// the fragment header (0x0F 01 01 00), then token 0x0C, 0x01, the template's
+// identifier and the offset of its definition, which follows at once when
+// the definition is inline (next-definition offset, GUID, size, body). Every
+// count the library would read as the number of arguments must fit in the
+// record, so a damaged one cannot make it allocate without bound.
+func topInstance(data []byte, off int) (id uint32, inline, ok bool) {
+	le := binary.LittleEndian
+	if off < 0 || off+28 > len(data) {
+		return 0, false, false
+	}
+	size := int(le.Uint32(data[off+4:]))
+	end := off + size
+	t := off + 28
+	if size < 28 || end > len(data) || !bytes.Equal(data[off+24:t], []byte{0x0F, 0x01, 0x01, 0x00}) || t+14 > end || data[t] != 0x0C || data[t+1] != 0x01 {
+		return 0, false, false
+	}
+	id = le.Uint32(data[t+2:])
+	inline = int(le.Uint32(data[t+6:])) == t+10
+	limit := uint32(size / 4)
+	if le.Uint32(data[t+10:]) > limit && !inline {
+		return 0, false, false
+	}
+	if inline {
+		if t+34 > end {
+			return 0, false, false
+		}
+		body := int(le.Uint32(data[t+30:]))
+		if body < 0 || t+34+body+4 > end || le.Uint32(data[t+34+body:]) > limit || le.Uint32(data[t+10:]) > 0x10000 {
+			return 0, false, false
+		}
+	}
+	return id, inline, id != 0
+}
+
+// decodedEvent says whether a record decoded to an event with a System
+// block naming its event: a record decoded with the wrong template does not.
+func decodedEvent(rec *evtx.EventRecord) bool {
+	raw, err := json.Marshal(rec.Event)
+	if err != nil {
+		return false
+	}
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return false
+	}
+	ev, _ := m["Event"].(map[string]any)
+	if ev == nil {
+		ev = m
+	}
+	return dig(ev, "System", "EventID") != nil && dig(ev, "System", "Provider") != nil
 }
 
 // readChunk reads one 64 KiB chunk of the log.

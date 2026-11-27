@@ -12,7 +12,7 @@ go list -deps -f '{{with .Module}}{{.Path}} {{.Version}}{{end}}' . | sort -u
 
 | Module | Version | Licence |
 |---|---|---|
-| www.velocidex.com/golang/evtx | v0.2.0 | Apache-2.0 |
+| www.velocidex.com/golang/evtx | v0.2.0, modified (a copy in `third_party/evtx`; its `PATCHES.md` lists the changes) | Apache-2.0 |
 | www.velocidex.com/golang/regparser | v0.0.0-20250203141505-31e704a67ef7 | Apache-2.0 |
 | www.velocidex.com/golang/go-ntfs | v0.2.1 | Apache-2.0 |
 | www.velocidex.com/golang/go-prefetch | v0.0.0-20260922101442-4bae97962980 | Apache-2.0 |
