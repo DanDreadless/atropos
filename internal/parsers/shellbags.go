@@ -113,6 +113,7 @@ type shellItem struct {
 	kind                        string // what sort of item, for the examiner
 	created, modified, accessed time.Time
 	mftEntry                    uint64
+	mftSeq                      uint16
 }
 
 var beef0004 = []byte{0x04, 0x00, 0xEF, 0xBE}
@@ -212,6 +213,7 @@ func parseShellItem(b []byte) shellItem {
 		}
 		if version >= 7 && len(e) >= 28 {
 			it.mftEntry = le.Uint64(e[20:]) & 0xFFFFFFFFFFFF
+			it.mftSeq = le.Uint16(e[26:])
 		}
 		if off > 0 && off < len(e) {
 			if n := utf16zAt(e[off:]); n != "" {

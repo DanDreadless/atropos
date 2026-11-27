@@ -406,7 +406,7 @@ def jumplist(export, path, evid):
 
 
 def lnk(export, path, evid):
-    """LECmd's CSV of loose shortcut files. By file name: the target's three times (LECmd writes whole seconds),
+    """LECmd's CSV of loose shortcut files. By file name: the target's three times (LECmd writes whole seconds), file-table reference, tracking identifiers and their time,
     size, path, arguments, working directory, relative path, volume serial and label, description, and the
     tracker block's machine name and MAC address."""
     bs = chr(92)
@@ -448,6 +448,21 @@ def lnk(export, path, evid):
         compared += 1
         if (f.get("target") or "").lower() != target.lower():
             diff.append(f"{name}: target {f.get('target')!r} here, {target!r} there")
+        # LECmd prints the file-table reference in hexadecimal, and 0 when there is none.
+        for ours_k, col in (("target_mft_entry", "TargetMFTEntryNumber"), ("target_mft_sequence", "TargetMFTSequenceNumber")):
+            a, b = f.get(ours_k), r[col].strip()
+            compared += 1
+            if (int(a) if a is not None else 0) != (int(b, 16) if b else 0):
+                diff.append(f"{name}: {ours_k} {a!r} here, {b!r} there")
+        for ours_k, col in (("tracker_volume_id", "VolumeDroid"), ("tracker_file_id", "FileDroid"),
+                            ("tracker_birth_volume_id", "VolumeDroidBirth"), ("tracker_birth_file_id", "FileDroidBirth")):
+            compared += 1
+            if (f.get(ours_k) or "").lower() != r[col].strip().lower():
+                diff.append(f"{name}: {ours_k} {f.get(ours_k)!r} here, {r[col]!r} there")
+        if r["TrackerCreatedOn"] or f.get("tracker_file_id_time"):
+            compared += 1
+            if (f.get("tracker_file_id_time") or "")[:19] != r["TrackerCreatedOn"][:19]:
+                diff.append(f"{name}: identifier time {f.get('tracker_file_id_time')!r} here, {r['TrackerCreatedOn']!r} there")
         for label, ours_k, col in fields:
             a, b = str(f.get(ours_k, "")).strip(), r[col].strip()
             if ours_k == "target_size" and a == "" and b == "0":

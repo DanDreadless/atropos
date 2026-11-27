@@ -759,6 +759,59 @@ func TestLnkWithoutTimes(t *testing.T) {
 	}
 }
 
+// The target's file-table reference from the last item of the list, and the
+// tracking block's identifiers with the time in the file identifier, as
+// LECmd shows them (checked against it on 98 real shortcuts).
+func TestLnkFileReferenceAndTracker(t *testing.T) {
+	le := binary.LittleEndian
+	b := make([]byte, 76)
+	le.PutUint32(b[0:], 0x4C)
+	copy(b[4:], []byte{0x01, 0x14, 0x02, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46})
+	le.PutUint32(b[20:], 0x1|0x80)
+	le.PutUint64(b[28:], 133000000000000000)
+	ids := pidl(drive('C'), fileItem(0x32, "UPDATE~1.EXE", "updater.exe", 9, "2024-01-02 03:04:06", "2024-01-02 03:04:06", "2024-01-02 03:04:06"))
+	b = le.AppendUint16(b, uint16(len(ids)))
+	b = append(b, ids...)
+	tr := make([]byte, 96)
+	le.PutUint32(tr[0:], 96)
+	le.PutUint32(tr[4:], 0xA0000003)
+	copy(tr[16:], "ws-7")
+	// A version 1 identifier: 2026-11-26 18:55:58.8923771 UTC (as Python's uuid module reads it), node 00:11:22:33:44:55.
+	file := []byte{0x7b, 0x1d, 0x89, 0x04, 0xcb, 0xe9, 0xf1, 0x11, 0xb3, 0xd8, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55}
+	vol := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x48, 0x89, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}
+	copy(tr[32:], vol)
+	copy(tr[48:], file)
+	copy(tr[64:], vol)
+	copy(tr[80:], file)
+	b = append(append(b, tr...), 0, 0, 0, 0)
+	ctx, _, _ := collect(timeutil.AssumedUTC())
+	n, f, err := parseLnkFields(ctx, b, "Shortcut t.lnk", "shell link header")
+	if err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	for k, v := range map[string]any{
+		"target": `C:\updater.exe`, "target_mft_entry": uint64(0x1234), "target_mft_sequence": uint16(5),
+		"tracker_volume_id": "04030201-0605-4807-890a-0b0c0d0e0f10", "tracker_file_id": "04891d7b-e9cb-11f1-b3d8-001122334455",
+		"tracker_birth_file_id": "04891d7b-e9cb-11f1-b3d8-001122334455", "tracker_mac": "00:11:22:33:44:55",
+	} {
+		if f[k] != v {
+			t.Errorf("%s = %v (%T), want %v", k, f[k], f[k], v)
+		}
+	}
+	if f["tracker_moved"] != nil || f["tracker_file_id_time"] != "2026-11-26 18:55:58.8923771 UTC" || f["tracker_file_id_time_meaning"] == nil {
+		t.Errorf("moved %v, time %v", f["tracker_moved"], f["tracker_file_id_time"])
+	}
+	// Moved: the birth identifier differs. Not version 1: no time.
+	tr2 := append([]byte{}, b...)
+	at := len(tr2) - 4 - 96
+	tr2[at+80] ^= 0xFF
+	tr2[at+48+7] = 0x40
+	_, f, _ = parseLnkFields(ctx, tr2, "Shortcut t.lnk", "shell link header")
+	if f["tracker_moved"] == nil || f["tracker_file_id_time"] != nil {
+		t.Errorf("moved %v, time %v", f["tracker_moved"], f["tracker_file_id_time"])
+	}
+}
+
 // Every truncation of a valid shortcut must be survived: an error or a
 // warning is fine, a panic is not.
 func TestLnkTruncationNeverPanics(t *testing.T) {

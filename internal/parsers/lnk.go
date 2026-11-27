@@ -1,11 +1,13 @@
 package parsers
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
+	"time"
 	"unicode/utf16"
 
 	"github.com/DanDreadless/atropos/internal/timeutil"
@@ -16,7 +18,7 @@ type lnkParser struct{}
 
 func (lnkParser) Name() string { return "lnk" }
 func (lnkParser) Version() string {
-	return "4 (native; a target from the item list without link information; an undated shortcut kept as text)"
+	return "5 (native; a target from the item list without link information; an undated shortcut kept as text; the target's file-table reference; tracking identifiers and their time)"
 }
 
 const lnkMax = 8 << 20
@@ -58,7 +60,8 @@ func (lnkParser) Parse(ctx *Context) error {
 		var lines []string
 		for _, k := range []struct{ key, label string }{{"target", "Target"}, {"target_from", "Target read from"}, {"arguments", "Arguments"},
 			{"working_dir", "Working directory"}, {"relative_path", "Relative path"}, {"description", "Description"}, {"icon_location", "Icon"},
-			{"network_share", "Network share"}, {"tracker_machine_id", "Machine"}} {
+			{"network_share", "Network share"}, {"tracker_machine_id", "Machine"}, {"tracker_file_id", "Object identifier"},
+			{"tracker_moved", "Moved"}} {
 			if v, ok := fields[k.key].(string); ok && v != "" {
 				lines = append(lines, k.label+": "+v)
 			}
@@ -76,6 +79,43 @@ func (lnkParser) Parse(ctx *Context) error {
 func parseLnk(ctx *Context, b []byte, label, ref string) (int, error) {
 	n, _, err := parseLnkFields(ctx, b, label, ref)
 	return n, err
+}
+
+// trackerIDs reads the distributed link tracking block's object
+// identifiers: the volume's and the file's as they are now, and as they were
+// when the file got its identifier ("birth"). A birth identifier different
+// from the current one means the file was moved, to another volume or
+// computer, since. The file identifier is a version 1 UUID, which holds a
+// time: Windows hands these out from a clock reading it takes in advance,
+// so the identifier was made then or later, and it says nothing about the
+// shortcut itself.
+func trackerIDs(fields map[string]any, blk []byte) {
+	ids := map[string][]byte{"tracker_volume_id": blk[32:48], "tracker_file_id": blk[48:64],
+		"tracker_birth_volume_id": blk[64:80], "tracker_birth_file_id": blk[80:96]}
+	for k, v := range ids {
+		if !bytes.Equal(v, make([]byte, 16)) {
+			fields[k] = guidAt(v)
+		}
+	}
+	if !bytes.Equal(ids["tracker_file_id"], ids["tracker_birth_file_id"]) || !bytes.Equal(ids["tracker_volume_id"], ids["tracker_birth_volume_id"]) {
+		fields["tracker_moved"] = "the identifiers differ from those at birth: the target was moved since it got them"
+	}
+	le := binary.LittleEndian
+	id := ids["tracker_file_id"]
+	if le.Uint16(id[6:])>>12 != 1 || id[8]&0xC0 != 0x80 {
+		return // not a version 1 (time-based) identifier
+	}
+	ticks := uint64(le.Uint16(id[6:])&0x0FFF)<<48 | uint64(le.Uint16(id[4:]))<<32 | uint64(le.Uint32(id))
+	// 100-nanosecond intervals since 15 October 1582.
+	const gregorianToUnix = 122192928000000000
+	// Only 1990 to 2200, which also keeps the arithmetic inside int64.
+	const from1990, to2200 = 6311520000000000, 72581184000000000
+	if ticks <= gregorianToUnix+from1990 || ticks-gregorianToUnix >= to2200 {
+		return
+	}
+	t := time.Unix(0, int64(ticks-gregorianToUnix)*100).UTC()
+	fields["tracker_file_id_time"] = t.Format("2006-01-02 15:04:05.0000000") + " UTC"
+	fields["tracker_file_id_time_meaning"] = "the time inside the target's object identifier: Windows made the identifier at this time or later; it is not when the shortcut was made"
 }
 
 // parseLnkFields is parseLnk that also returns what was read of the link.
@@ -210,10 +250,25 @@ func parseLnkFields(ctx *Context, b []byte, label, ref string) (int, map[string]
 			fields["tracker_machine_id"] = clean(cstr(blk[16:32]))
 			mac := blk[58:64]
 			fields["tracker_mac"] = fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5])
+			trackerIDs(fields, blk)
 		}
 		off += size
 	}
 
+	// The last item of the list is the target; on NTFS it carries the
+	// target's file-table entry and sequence, which join it to the $MFT.
+	var last shellItem
+	for at := 0; at+2 <= len(idList); {
+		n := int(le.Uint16(idList[at:]))
+		if n < 4 || at+n > len(idList) {
+			break
+		}
+		last = parseShellItem(idList[at : at+n])
+		at += n
+	}
+	if last.mftEntry != 0 {
+		fields["target_mft_entry"], fields["target_mft_sequence"] = last.mftEntry, last.mftSeq
+	}
 	target = clean(target)
 	// Without link information (a target that did not exist, or a shortcut
 	// made by a program), the shell item list names it, as Explorer shows it.
